@@ -1,0 +1,15 @@
+[package]
+name = "ocre"
+version = "0.1.0"
+description = "Rails-like Rust web framework for Cloudflare Workers, deployable on the free plan."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+worker.workspace = true
+axum.workspace = true
+askama.workspace = true
+serde.workspace = true
+wasm-bindgen.workspace = true
+tower-service = "0.3.3"

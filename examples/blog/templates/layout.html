@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Ocre blog{% endblock %}</title>
+  <script src="https://unpkg.com/htmx.org@2.0.4" crossorigin="anonymous"></script>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 42rem; margin: 2rem auto; padding: 0 1rem; color: #2b2118; }
+    a { color: #b5651d; }
+    form { display: grid; gap: .5rem; margin-bottom: 2rem; }
+    input, textarea, button { font: inherit; padding: .5rem; }
+    button { background: #cc7722; color: white; border: 0; cursor: pointer; }
+    article { border-top: 1px solid #e8d8c4; padding: 1rem 0; }
+    time { color: #8a7560; font-size: .875rem; }
+  </style>
+</head>
+<body>
+  <header><h1><a href="/">Ocre blog</a></h1></header>
+  <main>{% block content %}{% endblock %}</main>
+</body>
+</html>

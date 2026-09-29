@@ -1,0 +1,22 @@
+[workspace]
+resolver = "3"
+members = ["crates/ocre", "examples/blog"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tgeselle/ocre.rs"
+
+[workspace.dependencies]
+ocre = { path = "crates/ocre" }
+worker = { version = "0.8.7", features = ["http", "axum", "d1"] }
+axum = { version = "0.8.9", default-features = false, features = ["form", "json", "query"] }
+askama = "0.16.1"
+serde = { version = "1.0", features = ["derive"] }
+wasm-bindgen = "0.2"
+
+# `strip` breaks wasm-bindgen ("externref table required"); keep symbols.
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = "z"
