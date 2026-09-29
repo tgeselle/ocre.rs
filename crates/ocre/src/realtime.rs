@@ -1,8 +1,14 @@
-//! Realtime updates over WebSockets, like Rails' Action Cable and Turbo
-//! Streams: browsers subscribe to a named channel, and handlers or jobs
-//! [`broadcast`] HTML fragments (or JSON) to every subscriber.
+//! Realtime updates: WebSocket channels on a Durable Object, HTML broadcasts for htmx (feature `realtime`).
 //!
-//! ```ignore
+//! Works like Rails' Action Cable and Turbo Streams: browsers subscribe to a
+//! named channel over a WebSocket, and handlers or jobs
+//! [`broadcast`] HTML fragments (or JSON) to every
+//! subscriber.
+//!
+//! ```no_run
+//! use axum::{Router, extract::{Path, State}, response::Response, routing::{get, post}};
+//! use ocre::{Ctx, Error, Result, realtime::{self, WebSocketUpgrade}};
+//!
 //! // src/realtime.rs: who may listen to which channel (`ocre g scaffold ... --realtime` writes it).
 //! async fn connect(State(ctx): State<Ctx>, Path(channel): Path<String>, upgrade: WebSocketUpgrade) -> Result<Response> {
 //!     match channel.as_str() {
@@ -13,7 +19,16 @@
 //! }
 //!
 //! // Any handler or job: the new row goes to the top of every open index page.
-//! realtime::broadcast(&ctx, "posts", &realtime::prepend("posts", &row_html)).await?;
+//! async fn create(State(ctx): State<Ctx>) -> Result<&'static str> {
+//!     let row_html = "<tr id=\"post_1\"><td>Hello</td></tr>";
+//!     realtime::broadcast(&ctx, "posts", &realtime::prepend("posts", row_html)).await?;
+//!     Ok("created")
+//! }
+//!
+//! fn routes() -> Router<Ctx> {
+//!     Router::new().route("/realtime/{channel}", get(connect)).route("/posts", post(create))
+//! }
+//! # let _ = routes;
 //! ```
 //!
 //! In the page, htmx's WebSocket extension connects and swaps each message
@@ -27,16 +42,23 @@
 //! ```
 //!
 //! Messages: an element with an `id` replaces the page element with that id;
-//! [`append`], [`prepend`], [`update`] and [`remove`] build the other swaps.
-//! One message may hold several of them.
+//! [`append`], [`prepend`],
+//! [`update`] and [`remove`]
+//! build the other swaps. One message may hold several of them.
 //!
 //! How it runs: one Durable Object of class [`OcreChannel`] (binding
 //! `CHANNELS`) per channel name holds the channel's WebSockets with the
-//! WebSocket Hibernation API, so it sleeps, and costs no duration, between
-//! broadcasts. Each connection and each broadcast is one Durable Object
-//! request (free plan: 100,000 a day); messages sent to browsers are free.
+//! WebSocket Hibernation API, so it is evicted from memory, and costs no
+//! duration, between broadcasts while browsers stay connected. It stores
+//! nothing.
+//!
+//! Free plan (see the README's Realtime section): each connection (and
+//! reconnection) and each broadcast is one Durable Object request (100,000 a
+//! day); messages sent to browsers are free; a connection is also one Worker
+//! request, while a broadcast is a subrequest of the request that sends it.
 //! Needs Ocre's `realtime` feature and, in wrangler.toml, the binding and a
-//! `new_sqlite_classes` migration for `OcreChannel`.
+//! `new_sqlite_classes` migration for `OcreChannel` (see [`OcreChannel`]).
+//! API-only apps can use the same pieces and broadcast JSON.
 
 use axum::{extract::FromRequestParts, http::request::Parts};
 
@@ -48,13 +70,23 @@ use crate::{
     session::{Rejection, reject},
 };
 
-/// Name of the Durable Object binding holding the channels.
+/// Name of the Durable Object binding holding the channels, declared in wrangler.toml.
+///
+/// A missing binding makes [`broadcast`] and [`WebSocketUpgrade::connect`]
+/// fail with [`Error::Internal`] naming the wrangler.toml entries to add.
 pub const CHANNELS_BINDING: &str = "CHANNELS";
-/// Durable Object class Ocre exports for channels.
+/// Name of the Durable Object class Ocre exports for channels ([`OcreChannel`]).
+///
+/// wrangler.toml's `class_name` and `new_sqlite_classes` must use it.
 pub const CHANNEL_CLASS: &str = "OcreChannel";
 /// Prefix of every line Ocre logs about realtime, e.g. in `ocre dev` output.
+///
+/// Failed broadcasts log `[ocre realtime] broadcast to posts failed: ...`.
 pub const LOG_PREFIX: &str = "[ocre realtime]";
-/// Longest channel name.
+/// Longest channel name, in bytes.
+///
+/// Channel names are 1 to 128 ASCII letters, digits, `_`, `-`, `.` or `:`
+/// (e.g. `posts`, `post:12`), so they are safe in URLs and logs.
 pub const MAX_CHANNEL_LEN: usize = 128;
 
 /// Why `name` is not a valid channel name, or `None`: 1 to 128 ASCII letters,
@@ -89,20 +121,34 @@ pub(crate) fn close_code(code: usize) -> u16 {
     }
 }
 
-/// Extractor for a WebSocket handshake (`Upgrade: websocket`). Other
-/// requests get a 400. Finish the handshake with
-/// [`connect`](Self::connect), after checking who may listen:
+/// Axum extractor for a WebSocket handshake (`Upgrade: websocket`), finished with [`connect`](Self::connect).
 ///
-/// ```ignore
+/// Check who may listen in the handler, then call
+/// [`connect`](Self::connect). Browsers send the session cookie with the
+/// handshake, so `CurrentUser` and [`Session`](crate::Session) work in the
+/// same handler. [`serve`](crate::serve) refuses handshakes from other sites
+/// (403), as it does for forms.
+///
+/// Rejection: requests without `Upgrade: websocket` get
+/// [`Error::BadRequest`] (400), rendered as an HTML page in full-stack apps
+/// and as JSON in API-only apps.
+///
+/// Free plan: each connection (and each reconnection) is one Worker request
+/// and one Durable Object request (100,000 a day each); hibernated sockets
+/// cost nothing between messages.
+///
+/// # Examples
+///
+/// ```no_run
+/// use axum::{extract::{Path, State}, response::Response};
+/// use ocre::{Ctx, Result, realtime::WebSocketUpgrade};
+///
+/// // GET /realtime/{channel}
 /// async fn connect(State(ctx): State<Ctx>, Path(channel): Path<String>, upgrade: WebSocketUpgrade)
 ///     -> Result<Response> {
 ///     upgrade.connect(&ctx, &channel).await
 /// }
 /// ```
-///
-/// Browsers send the session cookie with the handshake, so `CurrentUser`
-/// and `Session` work in the same handler. `ocre::serve` refuses handshakes
-/// from other sites (403), as it does for forms.
 #[derive(Debug)]
 pub struct WebSocketUpgrade {
     _private: (),
@@ -122,8 +168,16 @@ impl<S: Sync> FromRequestParts<S> for WebSocketUpgrade {
     }
 }
 
-/// Inserts `html` at the end of the element with id `target`
-/// (htmx `beforeend`).
+/// Builds a message that inserts `html` at the end of the element with id `target` (htmx `beforeend`).
+///
+/// The fragment is wrapped in an element the browser can parse it in (a
+/// `<tr>` goes in a `<tbody>`, an `<li>` in a `<ul>`, and likewise for other
+/// table parts, options and `<dt>`/`<dd>`; anything else in a `<div>`)
+/// carrying `hx-swap-oob`; htmx drops the wrapper. `target` is
+/// escaped; `html` is sent as is, so escape user content in it (askama
+/// templates do). Pure: no I/O until you [`broadcast`] it.
+///
+/// # Examples
 ///
 /// ```
 /// assert_eq!(
@@ -135,8 +189,12 @@ pub fn append(target: &str, html: &str) -> String {
     swap("beforeend", target, html)
 }
 
-/// Inserts `html` at the start of the element with id `target`
-/// (htmx `afterbegin`), e.g. a new row at the top of a table body.
+/// Builds a message that inserts `html` at the start of the element with id `target` (htmx `afterbegin`).
+///
+/// Typical use: a new row at the top of a table body. Wrapping and escaping
+/// work as in [`append`].
+///
+/// # Examples
 ///
 /// ```
 /// assert_eq!(
@@ -148,7 +206,13 @@ pub fn prepend(target: &str, html: &str) -> String {
     swap("afterbegin", target, html)
 }
 
-/// Replaces the contents of the element with id `target` (htmx `innerHTML`).
+/// Builds a message that replaces the contents of the element with id `target` (htmx `innerHTML`).
+///
+/// The element itself stays; wrapping and escaping work as in [`append`].
+/// To replace a whole element, broadcast its new HTML with the same `id`
+/// instead.
+///
+/// # Examples
 ///
 /// ```
 /// assert_eq!(
@@ -160,7 +224,11 @@ pub fn update(target: &str, html: &str) -> String {
     swap("innerHTML", target, html)
 }
 
-/// Removes the element with id `id` from the page.
+/// Builds a message that removes the element with id `id` from the page (htmx `delete`).
+///
+/// `id` is escaped.
+///
+/// # Examples
 ///
 /// ```
 /// assert_eq!(ocre::realtime::remove("post_3"), "<div id=\"post_3\" hx-swap-oob=\"delete\"></div>");

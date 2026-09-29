@@ -43,6 +43,11 @@ fn add_columns_give_existing_rows_a_value() {
         "ALTER TABLE posts ADD COLUMN cover_key TEXT;\nALTER TABLE posts ADD COLUMN cover_filename TEXT;\n\
          ALTER TABLE posts ADD COLUMN cover_content_type TEXT;\nALTER TABLE posts ADD COLUMN cover_size INTEGER;\n"
     );
+    assert_eq!(
+        infer("add_settings_to_posts", &fields(&["settings:json", "extra:json?"])).unwrap(),
+        "ALTER TABLE posts ADD COLUMN settings TEXT NOT NULL CHECK (json_valid(settings)) DEFAULT '{}';\n\
+         ALTER TABLE posts ADD COLUMN extra TEXT CHECK (json_valid(extra));\n"
+    );
 }
 
 #[test]

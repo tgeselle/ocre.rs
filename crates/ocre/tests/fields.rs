@@ -41,3 +41,21 @@ fn patch_tells_missing_from_cleared() {
     assert_eq!(parse(r#"{"pages": 4}"#), Changes { pages: Some(Some(4)) });
     assert_eq!(serde_urlencoded::from_str::<Changes>("pages=").unwrap(), Changes { pages: Some(None) });
 }
+
+#[derive(Debug, Deserialize, PartialEq)]
+struct JsonChanges {
+    #[serde(default, deserialize_with = "patch_json")]
+    metadata: Option<Option<serde_json::Value>>,
+}
+
+#[test]
+fn patch_json_keeps_strings_as_json_strings() {
+    let parse = |json: &str| serde_json::from_str::<JsonChanges>(json).unwrap();
+    assert_eq!(parse("{}"), JsonChanges { metadata: None });
+    assert_eq!(parse(r#"{"metadata": null}"#), JsonChanges { metadata: Some(None) });
+    assert_eq!(parse(r#"{"metadata": "{}"}"#), JsonChanges { metadata: Some(Some("{}".into())) });
+    assert_eq!(
+        parse(r#"{"metadata": {"a": [1]}}"#),
+        JsonChanges { metadata: Some(Some(serde_json::json!({"a": [1]}))) }
+    );
+}

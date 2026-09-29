@@ -9,6 +9,12 @@ repository.workspace = true
 # compiled into the library with `#[path]`, so they are not test targets.
 autotests = false
 
+# docs.rs: document every feature, with "Available on crate feature ..." badges
+# (`#![cfg_attr(docsrs, feature(doc_cfg))]` in src/lib.rs).
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [dependencies]
 # `queue`: background jobs (`ocre::jobs`) on Cloudflare Queues.
 worker = { workspace = true, features = ["queue"] }

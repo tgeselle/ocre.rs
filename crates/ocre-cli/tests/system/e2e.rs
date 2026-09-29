@@ -141,8 +141,10 @@ fn api_only_app_serves_rest_and_graphql_on_workerd() {
     let sandbox = Sandbox::new();
     sandbox.use_real_wrangler();
     let root = sandbox.new_app("e2e-api", &["--api", "--starter", "blog"]);
-    let (report, ok) =
-        sandbox.json(&["g", "api", "Book", "title:string", "pages:integer", "available:boolean", "--graphql"], &root);
+    let (report, ok) = sandbox.json(
+        &["g", "api", "Book", "title:string", "pages:integer", "available:boolean", "meta:json?", "--graphql"],
+        &root,
+    );
     assert!(ok, "{report}");
     let (report, ok) = sandbox.json(&["g", "auth"], &root);
     assert!(ok, "{report}");
@@ -200,6 +202,24 @@ fn api_only_app_serves_rest_and_graphql_on_workerd() {
     // Delete.
     assert_eq!(json(&server, "DELETE", "/api/books/2", ""), (204, serde_json::Value::Null));
     assert_eq!(json(&server, "DELETE", "/api/books/2", "").0, 404);
+
+    // JSON fields: any JSON value in, the same value out; strings stay strings, null clears.
+    let body = r#"{"title": "Meta", "pages": 1, "meta": {"tags": ["sf", 1.5], "a": null}}"#;
+    let (status, book) = json(&server, "POST", "/api/books", body);
+    assert_eq!((status, &book["meta"]), (201, &serde_json::json!({"tags": ["sf", 1.5], "a": null})), "{book}");
+    let path = format!("/api/books/{}", book["id"]);
+    assert_eq!(json(&server, "GET", &path, "").1["meta"], book["meta"], "read back from D1");
+    let (status, book) = json(&server, "PATCH", &path, r#"{"meta": "{not json"}"#);
+    assert_eq!((status, &book["meta"]), (200, &serde_json::json!("{not json")), "{book}");
+    let (status, book) = json(&server, "PATCH", &path, r#"{"pages": 2}"#);
+    assert_eq!((status, &book["meta"]), (200, &serde_json::json!("{not json")), "missing keeps");
+    let (status, book) = json(&server, "PATCH", &path, r#"{"meta": null}"#);
+    assert_eq!((status, &book["meta"]), (200, &serde_json::Value::Null), "{book}");
+    let updated = graphql(&format!(
+        r#"mutation {{ updateBook(id: {}, patch: {{meta: {{n: [1, "x"]}}}}) {{ meta }} }}"#,
+        book["id"]
+    ));
+    assert_eq!(updated["data"]["updateBook"]["meta"], serde_json::json!({"n": [1, "x"]}), "JSON scalar: {updated}");
 }
 
 #[test]
@@ -208,8 +228,10 @@ fn generated_app_serves_full_crud_on_workerd() {
     let sandbox = Sandbox::new();
     sandbox.use_real_wrangler();
     let root = sandbox.new_app("e2e", &["--starter", "blog"]);
-    let (report, ok) =
-        sandbox.json(&["g", "scaffold", "Book", "title:string", "pages:integer", "rating:float", "big:integer"], &root);
+    let (report, ok) = sandbox.json(
+        &["g", "scaffold", "Book", "title:string", "pages:integer", "rating:float", "big:integer", "extras:json?"],
+        &root,
+    );
     assert!(ok, "{report}");
     let server = start(&sandbox, &root);
 
@@ -272,6 +294,20 @@ fn generated_app_serves_full_crud_on_workerd() {
     let typo = post(&server, "/books", &[("title", "x"), ("pages", "many"), ("rating", "1"), ("big", "1")]);
     assert_eq!(typo.status, 422);
     assert!(typo.body.contains("<li>Pages is not a number</li>") && typo.body.contains("value=\"many\""));
+
+    // JSON: typed in a textarea, shown compact and escaped, checked before it reaches D1.
+    let book = [("title", "Emma"), ("pages", "1"), ("rating", "1"), ("big", "1")];
+    let bad = post(&server, "/books", &[&book[..], &[("extras", "{oops")]].concat());
+    assert_eq!(bad.status, 422);
+    assert!(bad.body.contains("<li>Extras is not valid JSON</li>") && bad.body.contains(">{oops</textarea>"));
+    let created = post(&server, "/books", &[&book[..], &[("extras", r#" { "tags": ["<b>", 2] } "#)]].concat());
+    assert_eq!(created.status, 303, "{}", created.body);
+    let compact = "{&#34;tags&#34;:[&#34;&#60;b&#62;&#34;,2]}";
+    assert!(get(&server, &created.location).body.contains(&format!("<dd>{compact}</dd>")));
+    assert!(get(&server, &format!("{}/edit", created.location)).body.contains(&format!(">{compact}</textarea>")));
+    let cleared = post(&server, &created.location, &[&book[..], &[("extras", " ")]].concat());
+    assert_eq!(cleared.status, 303);
+    assert!(get(&server, &created.location).body.contains("<dt>Extras</dt><dd></dd>"), "blank clears");
 
     // Delete.
     let deleted = post(&server, "/posts/1/delete", &[]);

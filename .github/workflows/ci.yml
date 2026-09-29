@@ -25,6 +25,22 @@ jobs:
       - run: cargo check --target wasm32-unknown-unknown -p ocre --no-default-features
       - run: cargo check --target wasm32-unknown-unknown -p ocre --all-features
 
+  # Rustdoc without warnings (missing docs, broken links), doctests with the
+  # default and all features, and docs/api-index.md up to date (rustdoc JSON
+  # needs nightly).
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install nightly --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc -p ocre --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - run: cargo test --doc -p ocre
+      - run: cargo test --doc -p ocre --all-features
+      - run: python3 scripts/api-index.py --check
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -55,13 +71,15 @@ jobs:
       - working-directory: ci-app
         run: |
           ocre g auth --json
+          ocre g model Memo title:string user:references --json
           ocre g model Author name:string^ bio:text?
-          ocre g scaffold Book title:string^ summary:text? pages:integer rating:float? published:boolean released_on:date? author:references --json
-          ocre g api Review body:text stars:integer book:references --graphql --json
+          ocre g scaffold Book title:string^ summary:text? pages:integer rating:float? published:boolean released_on:date? settings:json author:references --json
+          ocre g api Review body:text stars:integer metadata:json? book:references --graphql --json
           ocre g migration add_isbn_to_books isbn:string? --json
+          ocre g migration add_extras_to_books extras:json --json
           ocre g mailer Welcome greeting --json
           ocre g mailbox --json
-          ocre g job SendDigest user_id:integer note:text? --json
+          ocre g job SendDigest user_id:integer note:text? payload:json? --json
           ocre g job Cleanup --json
           ocre g schedule nightly_cleanup "0 3 * * *" --json
           ocre g scaffold Note title:string body:text? --realtime --json

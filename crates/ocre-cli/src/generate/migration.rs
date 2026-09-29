@@ -81,6 +81,7 @@ fn add_columns(table: &str, fields: &[Field]) -> Result<String, CliError> {
         let default = match field.ty {
             _ if field.optional || field.ty == FieldType::Boolean => "",
             _ if field.ty.is_textual() => " DEFAULT ''",
+            FieldType::Json => " DEFAULT '{}'",
             _ => " DEFAULT 0",
         };
         for column in field.sql_columns() {

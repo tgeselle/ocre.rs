@@ -283,9 +283,21 @@ fn model_rs(names: &ModelNames, fields: &[Field], command: &str) -> String {
             row_fields.push_str("    #[serde(deserialize_with = \"ocre::bool_from_sql\")]\n");
             new_fields.push_str("    #[serde(default)]\n");
         }
+        let json = field.ty == FieldType::Json;
+        if json {
+            // D1 returns the column's JSON text; JSON bodies carry the value itself.
+            let reader = if field.optional { "ocre::optional_json_from_sql" } else { "ocre::json_from_sql" };
+            writeln!(row_fields, "    #[serde(deserialize_with = \"{reader}\")]").expect("writing to a String");
+        }
         if field.optional {
-            new_fields.push_str("    #[serde(default, deserialize_with = \"ocre::optional\")]\n");
-            change_fields.push_str("    #[serde(default, deserialize_with = \"ocre::patch\")]\n");
+            let (optional, patch) = if json {
+                ("default", "ocre::patch_json")
+            } else {
+                ("default, deserialize_with = \"ocre::optional\"", "ocre::patch")
+            };
+            writeln!(new_fields, "    #[serde({optional})]").expect("writing to a String");
+            writeln!(change_fields, "    #[serde(default, deserialize_with = \"{patch}\")]")
+                .expect("writing to a String");
             writeln!(change_fields, "    pub {name}: Option<Option<{ty}>>,").expect("writing to a String");
         } else {
             writeln!(change_fields, "    pub {name}: Option<{ty}>,").expect("writing to a String");
@@ -556,7 +568,7 @@ fn has_many_fn(names: &ModelNames, target: &ModelNames, fields: &[Field]) -> Str
     let column = fields.iter().find(|f| f.target.as_ref() == Some(target)).map(|f| f.name.as_str()).unwrap_or("id");
     let (model, singular, plural) = (&names.model, &names.singular, &names.plural);
     format!(
-        "    /// {} of this {}, newest first.\n    pub async fn {plural}(&self, ctx: &Ctx, page: Page) -> Result<Vec<crate::models::{singular}::{model}>> {{\n        ctx.db()?\n            .all(\n                \"SELECT * FROM {plural} WHERE {column} = ?1 ORDER BY id DESC LIMIT ?2 OFFSET ?3\",\n                params![self.id, page.limit, page.offset],\n            )\n            .await\n    }}\n",
+        "    /// {} of this {}, newest first.\n    pub async fn {plural}(&self, ctx: &Ctx, page: ocre::Page) -> Result<Vec<crate::models::{singular}::{model}>> {{\n        ctx.db()?\n            .all(\n                \"SELECT * FROM {plural} WHERE {column} = ?1 ORDER BY id DESC LIMIT ?2 OFFSET ?3\",\n                params![self.id, page.limit, page.offset],\n            )\n            .await\n    }}\n",
         names.human_plural,
         target.human_singular.to_lowercase(),
     )

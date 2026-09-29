@@ -86,3 +86,42 @@ fn statements_carry_sql_and_params() {
     assert_eq!(statement.sql, "DELETE FROM posts WHERE id = ?1");
     assert_eq!(statement.params, vec![number(3.0)]);
 }
+
+#[test]
+fn json_values_bind_as_compact_text() {
+    let value = serde_json::json!({"tags": [1, 2]});
+    assert_eq!(value.into_param(), text(r#"{"tags":[1,2]}"#));
+    assert_eq!(
+        params![Some(serde_json::json!("hi")), None::<serde_json::Value>],
+        vec![text(r#""hi""#), Param(Value::Null)]
+    );
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+struct JsonRow {
+    #[serde(deserialize_with = "json_from_sql")]
+    settings: serde_json::Value,
+    #[serde(deserialize_with = "optional_json_from_sql")]
+    metadata: Option<serde_json::Value>,
+}
+
+fn json_row(json: &str) -> Result<JsonRow, serde_json::Error> {
+    serde_json::from_str(json)
+}
+
+#[test]
+fn json_from_sql_parses_the_stored_text() {
+    let row = json_row(r#"{"settings": "{\"a\":[1,true]}", "metadata": "\"hi\""}"#).unwrap();
+    assert_eq!(row, JsonRow { settings: serde_json::json!({"a": [1, true]}), metadata: Some("hi".into()) });
+    let row = json_row(r#"{"settings": "null", "metadata": null}"#).unwrap();
+    assert_eq!(row, JsonRow { settings: serde_json::Value::Null, metadata: None });
+    // Values that are already JSON (e.g. a row cached as JSON) are kept.
+    let row = json_row(r#"{"settings": {"a": 1}, "metadata": [2]}"#).unwrap();
+    assert_eq!(row, JsonRow { settings: serde_json::json!({"a": 1}), metadata: Some(serde_json::json!([2])) });
+}
+
+#[test]
+fn json_from_sql_rejects_invalid_text() {
+    assert!(json_row(r#"{"settings": "{oops", "metadata": null}"#).is_err());
+    assert!(json_row(r#"{"settings": "1", "metadata": "{oops"}"#).is_err());
+}

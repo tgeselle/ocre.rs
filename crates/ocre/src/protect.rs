@@ -26,9 +26,32 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::session::Session;
 
-/// Worker variable listing extra origins, comma-separated, that may call the
-/// app from a browser (CORS) and submit to it (CSRF), e.g.
-/// `ALLOWED_ORIGINS = "https://app.example.com"` under `[vars]` in wrangler.toml.
+/// Name of the Worker variable listing extra origins that may call the app from a browser.
+///
+/// Comma-separated; spaces and a trailing `/` are ignored and invalid entries
+/// skipped. Listed origins get CORS headers (methods GET, POST, PUT, PATCH,
+/// DELETE; headers `Content-Type`, `Authorization`, `Accept`; credentials
+/// allowed) and pass the CSRF check. When the variable is unset or empty,
+/// [`serve`](crate::serve) adds no CORS layer and only same-origin browser
+/// requests may change data. Read once per request by `serve`; no binding
+/// call.
+///
+/// ```toml
+/// [vars]
+/// ALLOWED_ORIGINS = "https://app.example.com, https://admin.example.com"
+/// ```
+///
+/// # Examples
+///
+/// ```no_run
+/// use axum::extract::State;
+/// use ocre::{ALLOWED_ORIGINS, Ctx, Result};
+///
+/// async fn origins(State(ctx): State<Ctx>) -> Result<String> {
+///     Ok(ctx.env().var(ALLOWED_ORIGINS).map(|v| v.to_string()).unwrap_or_default())
+/// }
+/// # let _ = origins;
+/// ```
 pub const ALLOWED_ORIGINS: &str = "ALLOWED_ORIGINS";
 
 /// Per-request settings read from the Worker environment.

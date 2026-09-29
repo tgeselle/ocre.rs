@@ -19,6 +19,9 @@ use crate::{
 };
 
 const OCRE_GIT: &str = "https://github.com/tgeselle/ocre.rs";
+/// Documentation site, linked from the app's AGENTS.md (`__DOCS_URL__`). Also
+/// `DEFAULT_BASE_URL` in docs/tool/src/main.rs: change both together.
+const DOCS_URL: &str = "https://ocre.rs";
 
 /// (path in the app, template contents), shared by both app kinds.
 const FILES: &[(&str, &str)] = &[
@@ -157,7 +160,10 @@ impl Plan {
         for (relative, template) in FILES.iter().chain(kind_files) {
             let path = self.root.join(relative);
             std::fs::create_dir_all(path.parent().expect("file paths have a parent"))?;
-            let mut contents = template.replace("__APP_NAME__", name).replace("__OCRE_DEP__", &self.ocre_dep);
+            let mut contents = template
+                .replace("__APP_NAME__", name)
+                .replace("__OCRE_DEP__", &self.ocre_dep)
+                .replace("__DOCS_URL__", DOCS_URL);
             match (*relative, &self.account_id) {
                 ("wrangler.toml", Some(id)) => contents = with_account_id(&contents, id),
                 ("Cargo.toml", _) if self.api => contents = contents.replace(ASKAMA_DEP, "") + API_METADATA,

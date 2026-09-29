@@ -29,22 +29,63 @@ use worker::{Env, HttpRequest, web_sys};
 
 use crate::{protect, session};
 
-/// Runs one request through the application router.
+/// Runs one request through the application router: the Worker `fetch` entry point.
 ///
-/// Call it from the Worker entry point:
+/// Builds a [`Ctx`] from `env`, gives it to `routes` as axum state, and wraps
+/// the router with the middleware every Ocre app runs (outermost first):
 ///
-/// ```ignore
+/// 1. Security headers on every response (`X-Content-Type-Options: nosniff`,
+///    `X-Frame-Options: SAMEORIGIN`, `Referrer-Policy`, HSTS on HTTPS...); a
+///    handler's own value wins.
+/// 2. CORS for the origins listed in the [`ALLOWED_ORIGINS`](crate::ALLOWED_ORIGINS)
+///    Worker variable (no CORS layer when it is empty).
+/// 3. Cross-origin request protection (CSRF) without tokens: unsafe requests a
+///    browser sends from another site (`Sec-Fetch-Site`, or `Origin` against
+///    `Host`) get `403 Forbidden`.
+/// 4. The encrypted cookie [`Session`](crate::Session), keyed from the
+///    [`SECRET_KEY_BASE`](crate::SECRET_KEY_BASE) secret.
+///
+/// A missing or short `SECRET_KEY_BASE` does not fail every request: only
+/// handlers that touch the session get [`Error::Internal`](crate::Error::Internal),
+/// naming the fix (`ocre secret`, `.dev.vars`).
+///
+/// Files from [`storage::serve`](crate::storage::serve) go out as R2's own
+/// stream, so the Worker spends no CPU copying them and `Content-Length` is
+/// kept.
+///
+/// # Errors
+///
+/// Returns a [`worker::Error`] only when the response cannot be converted to a
+/// JavaScript `Response`. Handler errors are responses (an HTML page or JSON),
+/// not `Err`.
+///
+/// # Free plan
+///
+/// One call per Worker request (100,000 a day); the middleware itself reads no
+/// D1 rows and no KV keys: sessions live in the cookie.
+///
+/// # Examples
+///
+/// `src/lib.rs` of a generated app:
+///
+/// ```no_run
+/// use axum::{Router, routing::get};
+/// use ocre::Ctx;
+///
+/// fn routes() -> Router<Ctx> {
+///     Router::new().route("/up", get(|| async { "OK" }))
+/// }
+///
 /// #[worker::event(fetch)]
-/// async fn fetch(req: worker::HttpRequest, env: worker::Env, _: worker::Context)
-///     -> worker::Result<worker::web_sys::Response> {
+/// async fn fetch(
+///     req: worker::HttpRequest,
+///     env: worker::Env,
+///     _ctx: worker::Context,
+/// ) -> worker::Result<worker::web_sys::Response> {
 ///     ocre::serve(routes(), req, env).await
 /// }
+/// # fn main() {}
 /// ```
-///
-/// It adds sessions, CSRF protection, CORS (`ALLOWED_ORIGINS`) and security
-/// headers; see the `protect` module. Files from
-/// [`storage::serve`](crate::storage::serve) go out as R2's own stream, so
-/// the Worker spends no CPU copying them and `Content-Length` is kept.
 pub async fn serve(routes: Router<Ctx>, req: HttpRequest, env: Env) -> worker::Result<web_sys::Response> {
     let config = protect::Config {
         key: session::key_from_secret(env.secret(session::SECRET_KEY_BASE).ok().map(|secret| secret.to_string())),

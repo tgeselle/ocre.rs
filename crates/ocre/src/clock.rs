@@ -4,7 +4,19 @@
 //! Workers the time comes from JavaScript's `Date.now()`. Workers advance it
 //! only between I/O operations, which is precise enough for expirations.
 
-/// Current Unix time in seconds.
+/// Current Unix time in seconds, on Workers and in native tests.
+///
+/// On Workers it reads JavaScript's `Date.now()`, which Workers advance only
+/// between I/O operations: precise enough for expirations (sessions, tokens,
+/// JWT `exp`, cache TTLs), not for measuring CPU time. Natively it reads
+/// [`std::time::SystemTime`]. Use it instead of `SystemTime::now()` in app
+/// code: that one panics on `wasm32-unknown-unknown`. Costs no binding call.
+///
+/// # Panics
+///
+/// Natively only, if the system clock is set before 1970.
+///
+/// # Examples
 ///
 /// ```
 /// let issued_at = ocre::now();

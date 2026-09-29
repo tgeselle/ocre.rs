@@ -1,0 +1,12 @@
+[package]
+name = "ocre-docs"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Builds, checks and deploys the Ocre documentation site (docs/)."
+
+# Standalone: documentation tooling stays out of the framework workspace, its
+# tests and its coverage gate. Run it with `cargo docs-site <command>`.
+[workspace]
+
+[dependencies]

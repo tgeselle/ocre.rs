@@ -1,17 +1,46 @@
-//! Background jobs on Cloudflare Queues, and scheduled tasks on Cron Triggers.
+//! Background jobs (Cloudflare Queues) and scheduled tasks (Cron Triggers).
 //!
-//! A job is a serde value, usually the app's `Job` enum (`src/jobs/mod.rs`,
-//! written by `ocre g job`). A handler enqueues it and returns at once; the
-//! Worker's `queue` event runs it moments later:
+//! Rails' Active Job, on [Cloudflare Queues](https://developers.cloudflare.com/queues/)
+//! (in the Workers Free plan since February 2026). The app's Worker is both
+//! the producer and the consumer of one queue, `<app>-jobs`, bound as
+//! [`QUEUE_BINDING`]. A job is a serde value, usually the app's `Job` enum
+//! (`src/jobs/mod.rs`, written by `ocre g job`), and dispatch is a plain
+//! `match` in the app's `perform` function, not a registry.
 //!
-//! ```ignore
-//! use crate::jobs::{Job, SendWelcome};
+//! A handler enqueues with [`enqueue`] or
+//! [`enqueue_in`] and returns as soon as Cloudflare
+//! stored the message; the Worker's `queue` event runs it moments later
+//! through [`consume`]. Scheduled tasks run from the
+//! `scheduled` event through [`cron`]:
 //!
-//! ocre::jobs::enqueue(&ctx, &Job::SendWelcome(SendWelcome { user_id: user.id })).await?;
-//! ocre::jobs::enqueue_in(&ctx, &job, std::time::Duration::from_secs(3600)).await?;
-//! ```
+//! ```no_run
+//! mod jobs {
+//!     use ocre::{Ctx, Result};
+//!     use serde::{Deserialize, Serialize};
 //!
-//! ```ignore
+//!     #[derive(Serialize, Deserialize)]
+//!     #[serde(rename_all = "snake_case")]
+//!     pub enum Job {
+//!         SendWelcome { user_id: i64 },
+//!     }
+//!
+//!     pub async fn perform(_ctx: Ctx, job: Job) -> Result<()> {
+//!         match job {
+//!             Job::SendWelcome { user_id } => {
+//!                 # let _ = user_id;
+//!                 Ok(())
+//!             }
+//!         }
+//!     }
+//! }
+//!
+//! mod schedules {
+//!     pub async fn run(_ctx: ocre::Ctx, cron: String) -> ocre::Result<()> {
+//!         # let _ = cron;
+//!         Ok(())
+//!     }
+//! }
+//!
 //! // src/lib.rs
 //! #[worker::event(queue)]
 //! async fn queue(batch: worker::MessageBatch<String>, env: worker::Env, _ctx: worker::Context) -> worker::Result<()> {
@@ -22,15 +51,42 @@
 //! async fn scheduled(event: worker::ScheduledEvent, env: worker::Env, _ctx: worker::ScheduleContext) {
 //!     ocre::jobs::cron(event, env, schedules::run).await
 //! }
+//!
+//! // A handler
+//! async fn create(axum::extract::State(ctx): axum::extract::State<ocre::Ctx>) -> ocre::Result<&'static str> {
+//!     ocre::jobs::enqueue(&ctx, &jobs::Job::SendWelcome { user_id: 1 }).await?;
+//!     Ok("created")
+//! }
+//! # fn main() {}
 //! ```
 //!
-//! [`consume`] acknowledges a job that returns `Ok`, retries one that returns
-//! `Err` with a growing delay (about 30 s, 1 min, 3 min, 9 min, 27 min: twice
-//! the time since it was due), and drops, with a log line, a message it
-//! cannot decode (an unknown or changed job), so it is never retried forever.
-//! After `max_retries` (wrangler.toml) Cloudflare moves a failing message to
-//! the dead-letter queue. Every line Ocre logs starts with [`LOG_PREFIX`] or
-//! [`CRON_LOG_PREFIX`].
+//! A message is JSON text, `{"at": <due unix time>, "job": {"send_welcome": {"user_id": 1}}}`.
+//! [`consume`] acknowledges a job that returns `Ok`,
+//! retries one that returns `Err` with a growing delay (30 s, 1 min, 3 min,
+//! 9 min, 27 min: twice the time since it was due), and drops, with a log
+//! line, a message it cannot decode (an unknown or changed job), so it is
+//! never retried forever. After `max_retries = 5` (wrangler.toml) Cloudflare
+//! moves a failing message to the dead-letter queue `<app>-jobs-failed`,
+//! kept 24 hours. Delivery is at-least-once: write jobs to be safe to
+//! repeat. Every line Ocre logs starts with [`LOG_PREFIX`]
+//! or [`CRON_LOG_PREFIX`].
+//!
+//! # Free-plan budget (September 2026)
+//!
+//! - **Queues operations**: 10,000 a day. A message costs 3 (write, read,
+//!   delete), each retry 1 more read, a dead-lettered message 1 more write.
+//!   Ocre sends one message per job: about 3,300 jobs a day.
+//! - **Retention**: 24 hours on Free; the last retry comes after about 40 minutes.
+//! - **Message size**: 128 KB; [`enqueue`] refuses larger jobs (pass ids).
+//! - **Delay**: 24 hours at most, on send and on retry;
+//!   [`enqueue_in`] refuses longer delays
+//!   ([`MAX_DELAY`]).
+//! - **Batches**: up to 100 messages and 60 s wait; the generated
+//!   `max_batch_size = 10`, `max_batch_timeout = 5` make one consumer run
+//!   (one Worker invocation) per 10 jobs.
+//! - **CPU**: 10 ms per invocation, consumer batches and cron runs included:
+//!   jobs should be I/O (D1, mail, `fetch`); lower `max_batch_size` for CPU-heavy jobs.
+//! - **Cron Triggers**: 5 per account; run several tasks from one cron.
 
 use std::time::Duration;
 
@@ -41,8 +97,13 @@ pub use crate::runtime::jobs::{consume, cron, enqueue, enqueue_in};
 
 use crate::{Error, Result, mail::Email};
 
-/// Name of the queue producer binding every Ocre app sends jobs to
-/// (`[[queues.producers]] binding = "JOBS"` in wrangler.toml).
+/// Name of the queue producer binding every Ocre app sends jobs to.
+///
+/// `ocre g job` adds `[[queues.producers]] binding = "JOBS"` (and the
+/// consumer) to wrangler.toml; without it, enqueueing is an
+/// [`Error::Internal`] naming that entry.
+///
+/// # Examples
 ///
 /// ```
 /// assert_eq!(ocre::jobs::QUEUE_BINDING, "JOBS");
@@ -51,6 +112,12 @@ pub const QUEUE_BINDING: &str = "JOBS";
 
 /// Prefix of every line Ocre logs about jobs, e.g. `[ocre jobs] send_welcome done`.
 ///
+/// [`consume`] logs `<prefix> <job> done`,
+/// `<prefix> <job> failed, retrying in <n> s: <error>` and
+/// `<prefix> dropped message <id>: <reason>`.
+///
+/// # Examples
+///
 /// ```
 /// assert!("[ocre jobs] send_welcome done".starts_with(ocre::jobs::LOG_PREFIX));
 /// ```
@@ -58,12 +125,21 @@ pub const LOG_PREFIX: &str = "[ocre jobs]";
 
 /// Prefix of every line Ocre logs about Cron Triggers, e.g. `[ocre cron] 0 3 * * * done`.
 ///
+/// [`cron`] logs `<prefix> <cron> done` or `<prefix> <cron> failed: <error>`.
+///
+/// # Examples
+///
 /// ```
 /// assert!("[ocre cron] 0 3 * * * done".starts_with(ocre::jobs::CRON_LOG_PREFIX));
 /// ```
 pub const CRON_LOG_PREFIX: &str = "[ocre cron]";
 
-/// Longest delay Cloudflare Queues accepts, for [`enqueue_in`] and retries.
+/// Longest delay Cloudflare Queues accepts: 24 hours, for [`enqueue_in`] and retries.
+///
+/// A longer delay makes [`enqueue_in`] fail; retry
+/// delays are capped to it.
+///
+/// # Examples
 ///
 /// ```
 /// assert_eq!(ocre::jobs::MAX_DELAY.as_secs(), 24 * 60 * 60);

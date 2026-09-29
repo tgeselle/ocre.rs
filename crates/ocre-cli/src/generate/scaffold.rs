@@ -59,6 +59,8 @@ fn from_form(field: &Field) -> String {
     let name = &field.name;
     match (field.ty, field.optional) {
         (FieldType::Boolean, _) => format!("self.{name}"),
+        (FieldType::Json, false) => format!("v.json(\"{name}\", &self.{name}).unwrap_or_default()"),
+        (FieldType::Json, true) => format!("v.optional_json(\"{name}\", &self.{name})"),
         (ty, false) if ty.is_numeric() => format!("v.number(\"{name}\", &self.{name}).unwrap_or_default()"),
         (ty, true) if ty.is_numeric() => format!("v.optional_number(\"{name}\", &self.{name})"),
         (_, false) => format!("self.{name}.clone()"),
@@ -66,11 +68,15 @@ fn from_form(field: &Field) -> String {
     }
 }
 
-/// Expression turning the model value into form text.
+/// Expression turning the model value into form text (compact JSON for `json`).
 fn to_form(field: &Field, record: &str) -> String {
     let name = &field.name;
     match (field.ty, field.optional) {
         (FieldType::Boolean, _) => format!("{record}.{name}"),
+        (FieldType::Json, false) => format!("{record}.{name}.to_string()"),
+        (FieldType::Json, true) => {
+            format!("{record}.{name}.as_ref().map(|value| value.to_string()).unwrap_or_default()")
+        }
         (ty, false) if ty.is_numeric() => format!("{record}.{name}.to_string()"),
         (ty, true) if ty.is_numeric() => format!("{record}.{name}.map(|value| value.to_string()).unwrap_or_default()"),
         (_, false) => format!("{record}.{name}.clone()"),
@@ -594,6 +600,9 @@ fn form_fields_html(fields: &[Field]) -> String {
             FieldType::Text => {
                 format!(r#"<textarea name="{name}" rows="5"{required}>{{{{ form.{name} }}}}</textarea>"#)
             }
+            FieldType::Json => format!(
+                r#"<textarea name="{name}" rows="5" spellcheck="false" placeholder="{{}}"{required}>{{{{ form.{name} }}}}</textarea>"#
+            ),
             FieldType::Integer | FieldType::References => {
                 format!(r#"<input type="number" step="1" name="{name}" value="{{{{ form.{name} }}}}"{required}>"#)
             }

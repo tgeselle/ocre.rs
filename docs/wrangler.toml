@@ -1,0 +1,15 @@
+# The documentation site: an assets-only Worker (no code runs). Workers Static
+# Assets serves every file of book/ for free, without counting Worker
+# requests. Build and deploy with `cargo docs-site deploy`; preview with
+# `cargo docs-site serve`.
+name = "ocre-docs"
+compatibility_date = "2026-09-01"
+
+[assets]
+directory = "book"
+# /guides/models serves guides/models.html; /guides/models.md the Markdown twin.
+html_handling = "auto-trailing-slash"
+not_found_handling = "404-page"
+
+# Custom domain, once bought:
+# routes = [{ pattern = "ocre.rs", custom_domain = true }]

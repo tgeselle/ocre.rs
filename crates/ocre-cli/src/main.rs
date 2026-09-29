@@ -137,7 +137,7 @@ enum GenerateCommand {
     /// associations). Scaffold and api create the model when it is missing.
     ///
     /// Example: `ocre g model Post title:string^ body:text author:references`.
-    /// Types: string, text, integer, float, boolean, date, datetime, references;
+    /// Types: string, text, integer, float, boolean, date, datetime, references, attachment, json;
     /// suffix `?` for optional, `^` for unique.
     Model {
         /// Singular model name, PascalCase or snake_case (e.g. `BlogPost`).

@@ -1,47 +1,149 @@
 //! Ocre: a Rails-like Rust web framework for Cloudflare Workers, built to run
 //! on the Workers free plan and to be written by AI agents.
 //!
-//! Design rules:
-//! - Plain axum handlers. Every Ocre type is `Send`, so handlers never need
-//!   `#[worker::send]`.
-//! - One way to do each thing; failures surface at compile time or as errors
-//!   that name the fix.
+//! An Ocre app is one Worker compiled to WebAssembly. Requests go through
+//! [`serve`], which runs a plain [axum](https://docs.rs/axum) router with
+//! sessions, CSRF protection, CORS and security headers. Handlers reach the
+//! Worker's bindings (D1, KV, R2, Queues, Durable Objects, email) through the
+//! per-request [`Ctx`]. The `ocre` command-line tool (crate `ocre-cli`)
+//! generates the app, its models, scaffolds and migrations, and deploys it.
+//!
+//! Guides and the generated app's conventions live in the repository
+//! [README](https://github.com/tgeselle/ocre.rs#readme); a one-page list of
+//! every public item is in `docs/api-index.md`.
+//!
+//! # Design rules
+//!
+//! - **Plain axum handlers.** Every Ocre type is `Send`, so handlers never
+//!   need `#[worker::send]`. Extractors ([`Session`], [`Flash`], [`Json`],
+//!   [`Page`], [`storage::Multipart`], [`i18n::I18n`], [`cache::Conditional`])
+//!   and responses ([`Created`], [`cache::CacheControl`], [`cache::ETag`])
+//!   are ordinary axum types.
+//! - **One way to do each thing.** SQL with `?N` placeholders and
+//!   [`params!`], askama templates compiled at build time, htmx for
+//!   interactivity, a single [`Error`] type that knows its HTTP status.
+//! - **Errors name the fix.** A missing binding answers 500 and logs which
+//!   `wrangler.toml` entry to add; internal details are logged, never shown
+//!   to users.
+//! - **Free plan first.** Nothing costs a request, a KV write or a database
+//!   row unless the app asks for it: sessions live in an encrypted cookie
+//!   (no storage), static files are served by Workers Static Assets before
+//!   the Worker runs, R2 downloads stream without passing through
+//!   WebAssembly, and features that add binary size or startup CPU
+//!   (GraphQL, realtime) are opt-in cargo features. The free plan allows
+//!   10 ms of CPU per request; functions note their cost in D1 rows, KV
+//!   operations, Queue operations, R2 operations or CPU where it matters.
+//!
+//! # Modules
+//!
+//! | Module | Contents |
+//! |---|---|
+//! | crate root | [`serve`], [`Ctx`], [`Db`] and [`params!`] (D1), [`Error`] / [`Result`], [`Json`] / [`ApiError`] / [`Page`] (JSON APIs), [`Session`] / [`Flash`], [`Validator`], `render` / `Htmx` (feature `html`), serde helpers ([`optional`], [`patch`], [`bool_from_sql`], ...) |
+//! | [`cache`] | Read-through values in Workers KV, `Cache-Control`, `ETag` and `304 Not Modified` |
+#![cfg_attr(
+    feature = "graphql",
+    doc = "| [`graphql`] | `/graphql` endpoint and GraphiQL for an async-graphql schema (feature `graphql`) |"
+)]
+#![cfg_attr(
+    not(feature = "graphql"),
+    doc = "| `graphql` | `/graphql` endpoint and GraphiQL (feature `graphql`, off in this build) |"
+)]
+//! | [`i18n`] | Translations from `locales/*.yml`, plurals, the request's locale |
+//! | [`jobs`] | Background jobs on Cloudflare Queues, scheduled tasks on Cron Triggers |
+//! | [`jwt`] | HS256 JSON Web Tokens for API clients |
+//! | [`mail`] | Sending email (log, Resend, Cloudflare adapters) and receiving it from Email Routing |
+//! | [`password`] | PBKDF2-HMAC-SHA256 password digests |
+#![cfg_attr(
+    feature = "realtime",
+    doc = "| [`realtime`] | WebSocket channels on a Durable Object, htmx broadcasts (feature `realtime`) |"
+)]
+#![cfg_attr(
+    not(feature = "realtime"),
+    doc = "| `realtime` | WebSocket channels on a Durable Object (feature `realtime`, off in this build) |"
+)]
+//! | [`storage`] | Files in Cloudflare R2: multipart uploads, attachments, streamed downloads |
+//! | [`token`] | Random tokens for emailed links and API keys, stored as SHA-256 digests |
+//!
+//! # A complete app
+//!
+//! A generated app's `src/lib.rs` (crate type `cdylib`) is the Worker entry
+//! point plus an axum router whose state is [`Ctx`]:
+//!
+//! ```no_run
+//! use axum::{Router, extract::{Path, State}, routing::get};
+//! use ocre::{ApiResult, Ctx, Json, OptionExt, params};
+//! use serde::{Deserialize, Serialize};
+//! use worker::{Context, Env, HttpRequest, event};
+//!
+//! #[event(fetch)]
+//! async fn fetch(req: HttpRequest, env: Env, _ctx: Context) -> worker::Result<worker::web_sys::Response> {
+//!     ocre::serve(routes(), req, env).await
+//! }
+//!
+//! fn routes() -> Router<Ctx> {
+//!     Router::new().route("/up", get(up)).route("/posts/{id}", get(show))
+//! }
+//!
+//! async fn up() -> &'static str {
+//!     "OK"
+//! }
+//!
+//! #[derive(Serialize, Deserialize)]
+//! struct Post {
+//!     id: i64,
+//!     title: String,
+//! }
+//!
+//! // GET /posts/1: the row as JSON, or a JSON 404 when there is none. `ApiResult`
+//! // answers errors as JSON; HTML pages return `ocre::Result` (feature `html`).
+//! async fn show(State(ctx): State<Ctx>, Path(id): Path<i64>) -> ApiResult<Json<Post>> {
+//!     let post = ctx.db()?.first::<Post>("SELECT id, title FROM posts WHERE id = ?1", params![id]).await?;
+//!     Ok(Json(post.or_404()?))
+//! }
+//! # fn main() {}
+//! ```
+//!
+//! `wrangler.toml` binds the D1 database as `DB`; `ocre new` writes it, and
+//! `ocre dev` / `ocre deploy` run it.
+//!
+//! # Cargo features
+//!
+//! | Feature | Default | Enables |
+//! |---|---|---|
+//! | `html` | yes | askama templates (`render`), HTML error pages, the `Htmx` extractor. API-only apps (`ocre new --api`) turn it off |
+//! | `graphql` | no | The `graphql` module (async-graphql). About 1.1 MB more WebAssembly and 20-60 ms of CPU when a Worker instance starts |
+//! | `realtime` | no | The `realtime` module and the exported `OcreChannel` Durable Object class (WebSocket Hibernation) |
+#![cfg_attr(docsrs, feature(doc_cfg))]
+#![warn(missing_docs)]
+#![warn(rustdoc::broken_intra_doc_links)]
 
 mod api;
-/// Caching: read-through values in Workers KV, HTTP `Cache-Control`/`ETag` and 304 responses.
 pub mod cache;
 mod clock;
 mod error;
 mod fields;
-/// GraphQL support (feature `graphql`).
 #[cfg(feature = "graphql")]
+#[cfg_attr(docsrs, doc(cfg(feature = "graphql")))]
 pub mod graphql;
 #[cfg(feature = "html")]
 mod htmx;
-/// Translations: `locales/*.yml`, `%{name}` interpolation, plurals, locale per request.
 pub mod i18n;
-/// Background jobs (Cloudflare Queues) and scheduled tasks (Cron Triggers).
 pub mod jobs;
-/// JSON Web Tokens (HS256) for API clients.
 pub mod jwt;
-/// Email: send with adapters (log, Resend, Cloudflare), receive from Email Routing.
 pub mod mail;
 mod names;
-/// Password hashing (PBKDF2-HMAC-SHA256).
 pub mod password;
 mod protect;
-/// Realtime updates: WebSocket channels on a Durable Object, HTML broadcasts for htmx (feature `realtime`).
 #[cfg(feature = "realtime")]
+#[cfg_attr(docsrs, doc(cfg(feature = "realtime")))]
 pub mod realtime;
 mod runtime;
 mod session;
 mod sql;
-/// File storage in Cloudflare R2: multipart uploads, attachments, streamed downloads.
 pub mod storage;
 #[cfg(test)]
 #[path = "../tests/support.rs"]
 mod support;
-/// Random tokens for emailed links and API keys, stored as digests.
 pub mod token;
 mod validate;
 #[cfg(feature = "html")]
@@ -50,18 +152,42 @@ mod view;
 pub use api::{ApiError, ApiResult, Created, Json, Page};
 pub use clock::now;
 pub use error::{Error, OptionExt, Result};
-pub use fields::{optional, patch};
+pub use fields::{optional, patch, patch_json};
 #[cfg(feature = "html")]
+#[cfg_attr(docsrs, doc(cfg(feature = "html")))]
 pub use htmx::Htmx;
 pub use protect::ALLOWED_ORIGINS;
 pub use runtime::{Ctx, Db, serve};
+/// JSON values (`serde_json::Value`, the `json!` macro) for `json` fields,
+/// without adding `serde_json` to the app.
+pub use serde_json;
 pub use session::{Flash, SECRET_KEY_BASE, SESSION_COOKIE, Session};
-pub use sql::{IntoParam, MAX_SAFE_INTEGER, Param, Statement, bool_from_sql};
+pub use sql::{IntoParam, MAX_SAFE_INTEGER, Param, Statement, bool_from_sql, json_from_sql, optional_json_from_sql};
 pub use validate::{FieldError, Validator};
 #[cfg(feature = "html")]
+#[cfg_attr(docsrs, doc(cfg(feature = "html")))]
 pub use view::render;
 
-/// Builds query parameters for [`Db`] methods: `params![title, id]`.
+/// Builds the parameter list of a [`Db`] query: `params![title, id]`.
+///
+/// Each value goes through [`IntoParam`], so strings, integers, floats,
+/// booleans, `Option`s of those (`None` binds `NULL`) and JSON values can be
+/// mixed. Values bind to the `?1`, `?2`, ... placeholders in order. The result
+/// is a `Vec<Param>`, the type every [`Db`] method and [`Statement::new`]
+/// take; `params![]` binds nothing.
+///
+/// # Examples
+///
+/// ```
+/// use ocre::{Param, params};
+///
+/// let title = "Hello";
+/// let published: Option<bool> = None;
+/// let params: Vec<Param> = params![title, 42, published];
+/// assert_eq!(params.len(), 3);
+/// let none: Vec<Param> = params![];
+/// assert!(none.is_empty());
+/// ```
 #[macro_export]
 macro_rules! params {
     ($($value:expr),* $(,)?) => {

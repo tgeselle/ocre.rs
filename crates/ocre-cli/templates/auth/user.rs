@@ -23,6 +23,10 @@ pub struct User {
     pub updated_at: String,
 }
 
+impl User {
+    // ocre:associations
+}
+
 /// Sign-up values, as typed (HTML form or JSON). Missing fields are empty,
 /// so they fail validation with a message instead of a 400.
 #[derive(Debug, Clone, Default, Deserialize)]

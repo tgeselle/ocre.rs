@@ -4,6 +4,17 @@ Ocre app: Rust compiled to WebAssembly, running on Cloudflare Workers (free
 plan) with a D1 (SQLite) database. Full-stack apps render HTML with askama and
 htmx; API-only apps (`mode = "api"` in Cargo.toml) serve JSON only.
 
+## Documentation
+
+Ocre's documentation is written for agents: fetch
+`__DOCS_URL__/llms.txt` (every page with a one-line description) and then
+the pages you need as Markdown by adding `.md` to their URL, for example
+`__DOCS_URL__/guides/models.md`, `__DOCS_URL__/reference/generators.md`,
+`__DOCS_URL__/reference/limits.md`. `__DOCS_URL__/llms-full.txt` is every
+page in one file; `__DOCS_URL__/api-index.md` lists every public item of the
+`ocre` crate. Pages are self-contained and their examples compile. This file
+wins when they disagree about this app.
+
 ## Commands
 
 Run from the app root. Add `--json` to any `ocre` command for one JSON object
@@ -45,7 +56,9 @@ Field types: `string`, `text`, `integer`, `float`, `boolean`, `date`
 (`YYYY-MM-DD`), `datetime`, `references` (`author:references` adds
 `author_id`, a foreign key deleted with its parent), `attachment` (a file in
 R2 stored as `<name>_key`, `_filename`, `_content_type`, `_size` columns; must
-be optional `?` in JSON APIs). Suffix `?` makes a field
+be optional `?` in JSON APIs), `json` (any JSON value as
+`ocre::serde_json::Value`, stored as JSON text; build values with
+`ocre::serde_json::json!`; cannot be unique `^`). Suffix `?` makes a field
 optional (NULL allowed), `^` unique. Integers must stay within
 ±`ocre::MAX_SAFE_INTEGER` (2^53 - 1): D1 returns numbers as JavaScript
 numbers; generated validations already reject larger values.
@@ -88,7 +101,10 @@ wrangler.toml       Cloudflare config; the D1 binding must be named DB; MAIL_FRO
 - Read rows with `db.all::<T>`, `db.first::<T>` (`INSERT ... RETURNING *` to get
   the new row), write with `db.execute` (returns rows changed).
 - Booleans are INTEGER 0/1 in SQLite: read them with
-  `#[serde(deserialize_with = "ocre::bool_from_sql")]`.
+  `#[serde(deserialize_with = "ocre::bool_from_sql")]`. JSON columns hold
+  JSON text: bind a `serde_json::Value` with `params![value]` and read it
+  with `deserialize_with = "ocre::json_from_sql"` (`optional_json_from_sql`
+  for `Option`); HTML forms parse the text with `v.json(field, &text)`.
 - Missing record: `.or_404()?`. Bad input: `Error::bad_request("...")`.
   Unexpected failure: `Error::internal("...")` (logged, not shown to users).
 - Validation: collect every problem with `ocre::Validator` (`required`,
@@ -112,7 +128,9 @@ wrangler.toml       Cloudflare config; the D1 binding must be named DB; MAIL_FRO
   "message"}}`), take bodies with `ocre::Json<T>` and lists with `Page`.
   Optional fields use `#[serde(default, deserialize_with = "ocre::optional")]`
   (empty or `null` = `None`) and, in `<Model>Changes`,
-  `deserialize_with = "ocre::patch"` (missing keeps the value, `null` clears it).
+  `deserialize_with = "ocre::patch"` (missing keeps the value, `null` clears it);
+  optional `json` fields use `#[serde(default)]` and `ocre::patch_json`, so a
+  JSON string stays a string.
 - Sessions: take `session: ocre::Session` in a handler; `session.insert("user_id", id)?`,
   `session.get::<i64>("user_id")?`, `session.remove(..)?`, `session.clear()?`. The
   session is an encrypted cookie (4 KB max): store ids, never records or secrets.

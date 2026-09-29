@@ -1,32 +1,77 @@
-//! Files in Cloudflare R2: uploads from HTML forms and API clients, stored
-//! under generated keys and served back through the Worker.
+//! File storage in Cloudflare R2: multipart uploads, attachments, streamed downloads.
 //!
-//! ```ignore
-//! use ocre::storage::{self, Disposition, Multipart, Rules};
+//! Like Active Storage without its extra tables: a file lives in the R2 bucket
+//! bound as `STORAGE` in wrangler.toml, and the record that owns it keeps four
+//! columns (`<name>_key`, `<name>_filename`, `<name>_content_type`,
+//! `<name>_size`), read back as an [`Attachment`].
+//!
+//! The flow of an upload: the [`Multipart`] extractor reads the request,
+//! [`MultipartForm::file`] takes an [`Upload`], [`Validator::file`](crate::Validator::file)
+//! checks it against [`Rules`], [`store`] writes it to R2 and returns the
+//! [`Attachment`] to save with [`columns`] / [`column_changes`]. Downloads go
+//! through [`serve`] (ETag/304, `Range`, safe `Content-Disposition`); [`read`],
+//! [`delete`] and [`delete_attachments`] cover the rest. [`store_bytes`] stores
+//! app-made files and [`store_body`] streams a raw request body.
+//!
+//! Keys are random (`<prefix>/<22 characters>`, 128 bits, never derived from
+//! file names) and never reused, so a stored object never changes: replacing
+//! a file means storing a new key and deleting the old one. `ocre g scaffold
+//! Post avatar:attachment` adds the binding, `ocre dev` keeps a local copy
+//! under `.wrangler/state`, `ocre deploy` creates the bucket.
+//!
+//! # Free plan
+//!
+//! R2 (free every month): 10 GB-month stored, 1M class A operations (each
+//! upload is one), 10M class B operations (each download or 304 is one),
+//! deletes free, no egress fees. R2 has to be enabled once in the dashboard,
+//! which asks for a payment method even for the free tier.
+//!
+//! CPU: downloads never pass through WebAssembly ([`serve`] hands R2's stream
+//! to [`crate::serve`]). Uploads are read into memory and split: about 1.2 ms
+//! per 10 MB in WebAssembly, plus 0.15 ms per 10 MB to copy them to R2. A
+//! Worker has 128 MB and Cloudflare refuses request bodies over 100 MB on the
+//! Free plan, so keep limits in the tens of MB.
+//!
+//! # Examples
+//!
+//! ```rust,no_run
+//! use axum::{
+//!     extract::{Path, State},
+//!     http::HeaderMap,
+//!     response::Response,
+//! };
+//! use ocre::storage::{self, Attachment, Disposition, Multipart, Rules};
+//! use ocre::{Ctx, Error, IntoParam, OptionExt, Result, Validator, params};
 //!
 //! const AVATAR: Rules = Rules { max_bytes: 5 * 1024 * 1024, content_types: &["image/png", "image/jpeg"] };
 //! const FORM_LIMIT: usize = AVATAR.max_bytes + 1024 * 1024;
 //!
-//! async fn upload(State(ctx): State<Ctx>, Multipart(mut form): Multipart<FORM_LIMIT>) -> ocre::Result<String> {
-//!     let upload = form.file("avatar").ok_or_else(|| Error::bad_request("choose a file"))?;
-//!     let mut v = Validator::new();
-//!     v.file("avatar", &upload, &AVATAR).finish()?;
-//!     let attachment = storage::store(&ctx, "avatars", upload).await?;
-//!     Ok(attachment.key) // save it with the record: key, filename, content_type, size
+//! async fn upload(
+//!     State(ctx): State<Ctx>,
+//!     Path(id): Path<i64>,
+//!     Multipart(mut form): Multipart<FORM_LIMIT>,
+//! ) -> Result<String> {
+//!     let upload = form.file("avatar").ok_or_else(|| Error::bad_request("Choose a file"))?;
+//!     Validator::new().file("avatar", &upload, &AVATAR).finish()?;
+//!     let avatar = storage::store(&ctx, "users/avatar", upload).await?;
+//!     let mut values = Vec::from(storage::columns(Some(&avatar)));
+//!     values.push(id.into_param());
+//!     let sql = "UPDATE users SET avatar_key = ?1, avatar_filename = ?2, avatar_content_type = ?3, \
+//!                avatar_size = ?4 WHERE id = ?5";
+//!     if let Err(err) = ctx.db()?.execute(sql, values).await {
+//!         storage::delete(&ctx, &avatar.key).await?; // no row points to it
+//!         return Err(err);
+//!     }
+//!     Ok(avatar.key)
 //! }
 //!
-//! async fn download(State(ctx): State<Ctx>, headers: HeaderMap) -> ocre::Result<Response> {
-//!     let attachment = /* loaded from the record */;
-//!     storage::serve(&ctx, &attachment, &headers, Disposition::Inline).await
+//! async fn download(State(ctx): State<Ctx>, Path(id): Path<i64>, headers: HeaderMap) -> Result<Response> {
+//!     let sql = "SELECT avatar_key AS key, avatar_filename AS filename, avatar_content_type AS content_type, \
+//!                avatar_size AS size FROM users WHERE id = ?1 AND avatar_key IS NOT NULL";
+//!     let avatar: Attachment = ctx.db()?.first(sql, params![id]).await?.or_404()?;
+//!     storage::serve(&ctx, &avatar, &headers, Disposition::Inline).await
 //! }
 //! ```
-//!
-//! Every file lives in the R2 bucket bound as `STORAGE` in wrangler.toml
-//! (`ocre g scaffold Post avatar:attachment` adds the binding, `ocre dev`
-//! keeps a local copy under `.wrangler/state`, `ocre deploy` creates the
-//! bucket). Keys are random (`<prefix>/<22 characters>`) and never reused, so
-//! a stored object never changes: replacing a file means storing a new key
-//! and deleting the old one.
 
 mod multipart;
 
@@ -44,16 +89,60 @@ pub use crate::runtime::storage::{delete, delete_attachments, read, serve, store
 use crate::{IntoParam, Param, Validator, token::random_bytes};
 pub use multipart::{Multipart, MultipartForm};
 
-/// Name of the R2 binding holding every file: `[[r2_buckets]] binding = "STORAGE"`.
+/// Name of the R2 binding holding every file: `[[r2_buckets]] binding = "STORAGE"` in wrangler.toml.
+///
+/// The bucket itself is `<app>-storage`; the first generator that needs it
+/// adds the entry, and `ocre deploy` creates the bucket. Every function of
+/// this module fails with [`Error::Internal`](crate::Error::Internal) naming
+/// this entry when the binding is missing.
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(ocre::storage::STORAGE_BINDING, "STORAGE");
+/// ```
 pub const STORAGE_BINDING: &str = "STORAGE";
 
-/// `Cache-Control` of served files: browsers keep them but ask again each
-/// time, and get a body-less `304 Not Modified` while the `ETag` matches.
-/// Override it on the returned response for files that may be cached longer.
+/// `Cache-Control` of files sent by [`serve`]: browsers keep them but revalidate each time.
+///
+/// While the `ETag` matches, the browser gets a body-less `304 Not Modified`
+/// (still one R2 class B operation). `private` keeps shared caches from
+/// storing files that may belong to one user. Override the header on the
+/// returned response for files that may be cached longer.
+///
+/// # Examples
+///
+/// ```no_run
+/// use axum::{extract::State, http::{HeaderMap, HeaderValue, header}, response::Response};
+/// use ocre::{Ctx, Result, storage::{self, Attachment, Disposition}};
+///
+/// async fn logo(State(ctx): State<Ctx>, headers: HeaderMap) -> Result<Response> {
+///     let logo = Attachment {
+///         key: "public/logo".into(),
+///         filename: "logo.png".into(),
+///         content_type: "image/png".into(),
+///         size: 4096,
+///     };
+///     let mut response = storage::serve(&ctx, &logo, &headers, Disposition::Inline).await?;
+///     // Keys never change, so a public file can be cached for a year.
+///     let forever = HeaderValue::from_static("public, max-age=31536000, immutable");
+///     response.headers_mut().insert(header::CACHE_CONTROL, forever);
+///     Ok(response)
+/// }
+/// # assert_eq!(storage::CACHE_CONTROL, "private, no-cache");
+/// ```
 pub const CACHE_CONTROL: &str = "private, no-cache";
 
-/// A stored file, as saved with its record in four columns
-/// (`avatar_key`, `avatar_filename`, `avatar_content_type`, `avatar_size`).
+/// A stored file, as saved with its record in four columns.
+///
+/// The columns of an attachment named `avatar` are `avatar_key`,
+/// `avatar_filename`, `avatar_content_type` and `avatar_size` (NULL-able for
+/// an optional attachment). [`store`] returns it, [`columns`] /
+/// [`column_changes`] bind it, and it deserializes from a row whose columns
+/// are aliased to `key`, `filename`, `content_type` and `size` (generated
+/// models expose it as `photo.image()`). It also serializes to JSON as is.
+///
+/// # Examples
 ///
 /// ```
 /// use ocre::storage::Attachment;
@@ -65,14 +154,18 @@ pub const CACHE_CONTROL: &str = "private, no-cache";
 ///     size: 2048,
 /// };
 /// assert_eq!(avatar.human_size(), "2 KB");
+///
+/// let row = serde_json::json!({ "key": "k", "filename": "a.pdf", "content_type": "application/pdf", "size": 10 });
+/// let from_row: Attachment = serde_json::from_value(row).unwrap();
+/// assert_eq!(from_row.filename, "a.pdf");
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attachment {
-    /// Object key in the R2 bucket.
+    /// Object key in the R2 bucket: `<prefix>/<22 random URL-safe characters>`.
     pub key: String,
     /// The uploader's file name, without directories or control characters.
     pub filename: String,
-    /// `image/png`: lowercase, without parameters.
+    /// Content type, lowercase and without parameters (`image/png`).
     pub content_type: String,
     /// Size in bytes.
     pub size: i64,
@@ -90,7 +183,11 @@ impl Attachment {
         }
     }
 
-    /// The size for people: `512 bytes`, `2 KB`, `1.5 MB`.
+    /// Formats the size for people with [`human_size`]: `512 bytes`, `2 KB`, `1.5 MB`.
+    ///
+    /// A negative size (only possible from a hand-edited row) reads `0 bytes`.
+    ///
+    /// # Examples
     ///
     /// ```
     /// let file = ocre::storage::Attachment { size: 1536 * 1024, ..Default::default() };
@@ -102,8 +199,13 @@ impl Attachment {
 }
 
 /// A file received in a `multipart/form-data` request, before it is stored.
+///
 /// Get it with [`MultipartForm::file`], check it with
-/// [`Validator::file`](crate::Validator::file), store it with [`store`].
+/// [`Validator::file`](crate::Validator::file), store it with [`store`]. The
+/// bytes are a slice of the request body held in memory (no copy until R2
+/// gets them).
+///
+/// # Examples
 ///
 /// ```
 /// use ocre::storage::Upload;
@@ -113,31 +215,54 @@ impl Attachment {
 /// ```
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Upload {
-    /// File name sent by the browser, cleaned up (no directories or control characters).
+    /// File name sent by the browser, cleaned up.
+    ///
+    /// Directories (`C:\Users\me\` from old Windows browsers) and control
+    /// characters are removed, the name is trimmed to 200 characters with its
+    /// extension kept, and `file` stands in when nothing is left.
     pub filename: String,
-    /// Content type sent by the browser, lowercase without parameters
-    /// (`application/octet-stream` when none was sent). The client chooses
-    /// it: check it against an allowlist with [`Validator::file`](crate::Validator::file).
+    /// Content type sent by the browser, lowercase without parameters.
+    ///
+    /// `application/octet-stream` when none was sent. The client chooses it:
+    /// check it against an allowlist with [`Validator::file`](crate::Validator::file).
     pub content_type: String,
     /// The file's bytes.
     pub bytes: axum::body::Bytes,
 }
 
 impl Upload {
-    /// Size in bytes.
+    /// Returns the size of the file in bytes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ocre::storage::{Upload, human_size};
+    ///
+    /// let upload = Upload { bytes: vec![0; 1536].into(), ..Default::default() };
+    /// assert_eq!(upload.size(), 1536);
+    /// assert_eq!(human_size(upload.size()), "1.5 KB");
+    /// ```
     pub fn size(&self) -> u64 {
         self.bytes.len() as u64
     }
 }
 
-/// What a file field accepts, checked by [`Validator::file`](crate::Validator::file).
-/// A `const`, so the request limit can be computed from it:
+/// Describes what a file field accepts: a size limit and a content-type allowlist.
+///
+/// Checked by [`Validator::file`](crate::Validator::file) before anything is
+/// stored. A `const`, so the [`Multipart`] request limit can be computed from
+/// it (generated forms use the sum of their files' limits plus 1 MB). The
+/// content type comes from the browser: the allowlist limits it, nothing
+/// sniffs file contents.
+///
+/// # Examples
 ///
 /// ```
 /// use ocre::storage::Rules;
 ///
 /// const AVATAR: Rules = Rules { max_bytes: 5 * 1024 * 1024, content_types: &["image/png", "image/jpeg"] };
 /// const FORM_LIMIT: usize = AVATAR.max_bytes + 1024 * 1024;
+/// assert_eq!(FORM_LIMIT, 6 * 1024 * 1024);
 /// assert!(AVATAR.allows("image/PNG"));
 /// assert!(!AVATAR.allows("image/svg+xml"));
 /// ```
@@ -145,13 +270,29 @@ impl Upload {
 pub struct Rules {
     /// Largest accepted file, in bytes.
     pub max_bytes: usize,
-    /// Accepted content types, exact and lowercase (`image/png`). There is no
-    /// wildcard: `image/*` would admit SVG, which can carry scripts.
+    /// Accepted content types, exact and lowercase (`image/png`).
+    ///
+    /// There is no wildcard: `image/*` would admit SVG, which can carry scripts.
     pub content_types: &'static [&'static str],
 }
 
 impl Rules {
-    /// Whether `content_type` (parameters and case ignored) is in the list.
+    /// Returns whether `content_type` is in the allowlist, ignoring case and parameters.
+    ///
+    /// `Image/PNG; charset=binary` is compared as `image/png`; an empty type
+    /// counts as `application/octet-stream`. There is no wildcard matching.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ocre::storage::Rules;
+    ///
+    /// const DOC: Rules = Rules { max_bytes: 1024, content_types: &["application/pdf", "text/plain"] };
+    /// assert!(DOC.allows("text/plain; charset=utf-8"));
+    /// assert!(DOC.allows("Application/PDF"));
+    /// assert!(!DOC.allows("text/html"));
+    /// assert!(!DOC.allows(""));
+    /// ```
     pub fn allows(&self, content_type: &str) -> bool {
         let essence = essence(content_type);
         self.content_types.contains(&essence.as_str())
@@ -159,8 +300,16 @@ impl Rules {
 }
 
 impl Validator {
-    /// An uploaded file within `rules`: "is too large (maximum is 5 MB)" and
-    /// "has an unsupported type (allowed: image/png, image/jpeg)".
+    /// Checks an uploaded file against `rules`: its size and its content type.
+    ///
+    /// Adds "is too large (maximum is 5 MB)" when the file is over
+    /// [`Rules::max_bytes`] and "has an unsupported type (allowed: image/png,
+    /// image/jpeg)" when [`Rules::allows`] refuses its type; both can be
+    /// reported at once. Run it before [`store`], so a refused file costs no
+    /// R2 operation. Returns `self` for chaining; [`finish`](crate::Validator::finish)
+    /// turns the collected messages into a 422.
+    ///
+    /// # Examples
     ///
     /// ```
     /// use ocre::{Validator, storage::{Rules, Upload}};
@@ -172,6 +321,9 @@ impl Validator {
     ///     err.to_string(),
     ///     "invalid: Doc is too large (maximum is 4 bytes), Doc has an unsupported type (allowed: text/plain)"
     /// );
+    ///
+    /// let note = Upload { filename: "a.txt".into(), content_type: "text/plain".into(), bytes: "ok".into() };
+    /// assert!(Validator::new().file("doc", &note, &DOC).finish().is_ok());
     /// ```
     pub fn file(&mut self, field: &str, upload: &Upload, rules: &Rules) -> &mut Self {
         let too_large = upload.size() > rules.max_bytes as u64;
@@ -181,20 +333,44 @@ impl Validator {
     }
 }
 
-/// How [`serve`] asks the browser to handle a file.
+/// Tells [`serve`] whether the browser shows a file or downloads it.
+///
+/// Either way `Content-Disposition` carries the original file name (ASCII in
+/// `filename=`, UTF-8 in `filename*=` when needed, RFC 6266).
+///
+/// # Examples
+///
+/// ```
+/// use ocre::storage::Disposition;
+///
+/// // A download link: `?download=1` forces the "Save as" dialog.
+/// let download = true;
+/// let disposition = if download { Disposition::Download } else { Disposition::Inline };
+/// assert_eq!(disposition, Disposition::Download);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Disposition {
-    /// Show it in the page or tab when its type is safe to display (images,
-    /// PDF, plain text, audio, video); download anything else, so an uploaded
-    /// HTML or SVG file never runs as part of the app.
+    /// Shows the file in the page or tab when its type is safe to display, and downloads anything else.
+    ///
+    /// Safe types: raster images (PNG, JPEG, GIF, WebP, AVIF, BMP, TIFF,
+    /// icons), PDF, plain text, audio and video (MPEG, Ogg, WAV, WebM, MP4).
+    /// HTML, SVG, XML and JavaScript are sent as `application/octet-stream`
+    /// downloads, so an uploaded file never runs as part of the app (Rails'
+    /// `content_types_allowed_inline` / `content_types_to_serve_as_binary`).
     Inline,
-    /// Always download, with the original file name.
+    /// Always downloads the file, with its original name.
     Download,
 }
 
-/// Query parameters for the columns of one attachment, in column order
-/// (`<name>_key, <name>_filename, <name>_content_type, <name>_size`); `None`
-/// binds four NULLs. Generated `create` functions extend their `params!` with it.
+/// Builds the query parameters for the four columns of one attachment, in column order.
+///
+/// The order is `<name>_key, <name>_filename, <name>_content_type,
+/// <name>_size`; `None` binds four NULLs (an optional attachment left empty).
+/// Generated `create` functions extend their `params!` with it. Reading the
+/// columns back needs no helper: `Attachment` deserializes from a row with
+/// `key`, `filename`, `content_type` and `size` columns.
+///
+/// # Examples
 ///
 /// ```
 /// use ocre::{params, storage::{self, Attachment}};
@@ -203,6 +379,9 @@ pub enum Disposition {
 /// let mut values = params!["Ada"];
 /// values.extend(storage::columns(Some(&avatar)));
 /// assert_eq!(values, params!["Ada", "k", "a.png", "image/png", 3_i64]);
+///
+/// let empty = storage::columns(None);
+/// assert_eq!(empty[..], params![None::<i64>, None::<i64>, None::<i64>, None::<i64>]);
 /// ```
 pub fn columns(attachment: Option<&Attachment>) -> [Param; 4] {
     match attachment {
@@ -218,27 +397,50 @@ pub fn columns(attachment: Option<&Attachment>) -> [Param; 4] {
     }
 }
 
-/// Parameters for an `UPDATE` of one attachment's columns: a flag (whether
-/// they change), then the four [`columns`]. `None` keeps the file,
-/// `Some(None)` clears the columns, `Some(Some(file))` points them to `file`.
-/// The generated SQL reads `avatar_key = CASE WHEN ?1 THEN ?2 ELSE avatar_key END, ...`.
+/// Builds the parameters of an `UPDATE` of one attachment's columns: a change flag, then the four [`columns`].
+///
+/// `None` keeps the stored file (flag `false`, four NULLs that the SQL
+/// ignores), `Some(None)` clears the columns (flag `true`, four NULLs),
+/// `Some(Some(file))` points them to `file`. The generated SQL reads
+/// `avatar_key = CASE WHEN ?1 THEN ?2 ELSE avatar_key END, ...`, so one
+/// statement handles "unchanged", "removed" and "replaced" without building
+/// SQL at runtime. Deleting the replaced object is up to the caller
+/// ([`delete_attachments`], after the write succeeds).
+///
+/// # Examples
 ///
 /// ```
-/// use ocre::{params, storage};
+/// use ocre::{params, storage::{self, Attachment}};
 ///
+/// let photo = Attachment { key: "k".into(), filename: "a.png".into(), content_type: "image/png".into(), size: 3 };
+/// assert_eq!(storage::column_changes(Some(Some(&photo))), params![true, "k", "a.png", "image/png", 3_i64][..]);
+/// let null = None::<i64>;
+/// assert_eq!(storage::column_changes(Some(None))[..], params![true, null, null, null, null]);
 /// assert_eq!(storage::column_changes(None)[0], params![false][0]);
-/// assert_eq!(storage::column_changes(Some(None))[0], params![true][0]);
 /// ```
 pub fn column_changes(change: Option<Option<&Attachment>>) -> [Param; 5] {
     let [key, filename, content_type, size] = columns(change.flatten());
     [change.is_some().into_param(), key, filename, content_type, size]
 }
 
-/// Bytes for people, in powers of 1024 like Rails' `number_to_human_size`:
-/// `512 bytes`, `2 KB`, `1.5 MB`, `10 GB`.
+/// Formats a byte count for people, in powers of 1024 like Rails' `number_to_human_size`.
+///
+/// Below 1024 the count is exact (`1 byte`, `512 bytes`); above, it is
+/// rounded to one decimal, dropped when it is zero (`2 KB`, `1.5 MB`,
+/// `10 GB`). Units stop at TB. Used in the "is too large (maximum is 5 MB)"
+/// validation message and the 413 of [`Multipart`].
+///
+/// # Examples
 ///
 /// ```
-/// assert_eq!(ocre::storage::human_size(10 * 1024 * 1024), "10 MB");
+/// use ocre::storage::human_size;
+///
+/// assert_eq!(human_size(1), "1 byte");
+/// assert_eq!(human_size(512), "512 bytes");
+/// assert_eq!(human_size(2048), "2 KB");
+/// assert_eq!(human_size(1536 * 1024), "1.5 MB");
+/// assert_eq!(human_size(10 * 1024 * 1024), "10 MB");
+/// assert_eq!(human_size(3 * 1024_u64.pow(5)), "3072 TB");
 /// ```
 pub fn human_size(bytes: u64) -> String {
     const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];

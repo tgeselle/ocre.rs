@@ -1,40 +1,72 @@
-//! Translations, like Rails' `I18n.t`: YAML files in `locales/` compiled
-//! into the Worker, `%{name}` interpolation, CLDR plurals, fallback to the
-//! default locale and locale selection per request.
+//! Translations: `locales/*.yml`, `%{name}` interpolation, plurals, locale per request.
+//!
+//! Works like Rails' `I18n.t`: YAML files in `locales/` compiled into the
+//! Worker, `%{name}` interpolation, CLDR plurals, fallback to the default
+//! locale and locale selection per request.
 //!
 //! ```yaml
-//! # locales/fr.yml
+//! # locales/fr.yml (a YAML subset: nested keys and strings)
 //! fr:
 //!   posts:
 //!     created: "Article créé."
 //!     greeting: "Bonjour %{name} !"
 //!     count:
-//!       one: "%{count} article"
+//!       one: "%{count} article"     # CLDR categories: zero, one, two, few, many, other
 //!       other: "%{count} articles"
 //! ```
 //!
-//! ```ignore
-//! // src/lib.rs: the first code is the default locale.
-//! static LOCALES: ocre::i18n::Locales = ocre::locales!("en", "fr");
+//! An app declares its locales once in `src/lib.rs` (`ocre g locale en fr`
+//! writes it) and adds [`layer`] at the end of
+//! `routes()`; handlers then take the [`I18n`] extractor:
 //!
-//! fn routes() -> Router<Ctx> {
-//!     Router::new()
-//!         .route("/", get(home))
-//!         .layer(ocre::i18n::layer(&LOCALES))
-//! }
+//! ```ignore
+//! // Not compiled here: `locales!` includes `locales/en.yml` and `locales/fr.yml` from the app's root.
+//! static LOCALES: ocre::i18n::Locales = ocre::locales!("en", "fr");
+//! ```
+//!
+//! ```
+//! use std::sync::LazyLock;
+//! use axum::{Router, routing::get};
+//! use ocre::{Ctx, i18n::{Catalog, I18n, Locales}};
+//!
+//! // `ocre::locales!("en", "fr")` expands to this, with the files' contents.
+//! static LOCALES: Locales = LazyLock::new(|| {
+//!     Catalog::load(&[
+//!         ("en", "en:\n  posts:\n    count:\n      one: \"%{count} post\"\n      other: \"%{count} posts\"\n"),
+//!         ("fr", "fr:\n  posts:\n    count:\n      one: \"%{count} article\"\n      other: \"%{count} articles\"\n"),
+//!     ])
+//! });
 //!
 //! async fn home(i18n: I18n) -> String {
 //!     i18n.t("posts.count").count(3).to_string() // "3 articles" for French visitors
 //! }
+//!
+//! fn routes() -> Router<Ctx> {
+//!     Router::new()
+//!         .route("/", get(home))
+//!         // ocre:routes
+//!         .layer(ocre::i18n::layer(&LOCALES))
+//! }
+//! # let _ = routes;
+//!
+//! // Outside requests (mailers, jobs):
+//! assert_eq!(LOCALES.locale("fr").t("posts.count").count(3).to_string(), "3 articles");
 //! ```
 //!
-//! The files are parsed once per Worker instance, on the first translation.
-//! [`I18n`] picks the locale from a `{locale}` path segment, then the
-//! `locale` cookie, then `Accept-Language`, then the default locale.
-//! A key missing from the request's locale falls back to the default locale
-//! in release builds (`ocre deploy`); debug builds (`ocre dev`) show
+//! In templates, translations are [`Display`](std::fmt::Display) values that
+//! askama writes (escaped) straight into the page:
+//! `<p>{{ i18n.t("posts.greeting").arg("name", user.name) }}</p>`. Never mark
+//! them `|safe`.
+//!
+//! The files are parsed once per Worker instance, on the first translation,
+//! by a small parser for this YAML subset; lookups are a `BTreeMap` search.
+//! No D1, KV or other billed resource is used. [`I18n`] picks the locale from
+//! a `{locale}` path segment, then the `locale` cookie, then
+//! `Accept-Language`, then the default locale. A key missing from the
+//! request's locale falls back to the default locale in release builds
+//! (`ocre deploy`); debug builds (`ocre dev`) show
 //! `translation missing: fr.posts.created` instead, so gaps are visible.
-//! `ocre i18n missing` lists them.
+//! `ocre i18n missing` lists them (see [`check`]).
 
 mod plural;
 mod yaml;
@@ -55,26 +87,55 @@ use axum::{
 use crate::{Error, Result};
 use plural::{Category, Rule};
 
-/// Cookie that remembers a visitor's chosen locale (see [`I18n::cookie`]).
+/// Name of the cookie that remembers a visitor's chosen locale.
+///
+/// [`I18n`] reads it after the path segment; [`I18n::cookie`] builds its
+/// `Set-Cookie` value.
 pub const LOCALE_COOKIE: &str = "locale";
 
-/// Name of the path parameter [`I18n`] reads: `.nest("/{locale}", pages())`.
+/// Name of the path parameter [`I18n`] reads the locale from.
+///
+/// Nest localized routes under it: `.nest("/{locale}", pages())`. An unknown
+/// code in the path is a 404.
 pub const LOCALE_PARAM: &str = "locale";
 
-/// The app's translations, declared once in `src/lib.rs` with
-/// [`locales!`](crate::locales) and parsed on first use.
+/// The app's translations: a [`Catalog`] parsed on first use, declared once as a `static`.
+///
+/// Build it with [`locales!`](crate::locales), which compiles the files into
+/// the binary; the first access in a Worker instance parses them, once, and
+/// later accesses reuse the parsed tables.
+///
+/// # Examples
 ///
 /// ```ignore
+/// // Not compiled here: `locales!` includes `locales/*.yml` from the app's root.
 /// static LOCALES: ocre::i18n::Locales = ocre::locales!("en", "fr");
+/// ```
+///
+/// Without files, e.g. in tests:
+///
+/// ```
+/// use std::sync::LazyLock;
+/// static LOCALES: ocre::i18n::Locales =
+///     LazyLock::new(|| ocre::i18n::Catalog::load(&[("en", "en:\n  title: Posts\n")]));
+/// assert_eq!(LOCALES.locale("en").t("title").to_string(), "Posts");
 /// ```
 pub type Locales = LazyLock<Catalog>;
 
-/// Declares the app's locales: `ocre::locales!("en", "fr")` compiles
-/// `locales/en.yml` and `locales/fr.yml` (paths from the app root) into the
-/// binary. The first code is the default locale, used for fallbacks. A
-/// missing file is a compile error.
+/// Declares the app's locales as a [`Locales`] static, compiling `locales/<code>.yml` into the binary.
+///
+/// `ocre::locales!("en", "fr")` includes `locales/en.yml` and
+/// `locales/fr.yml` (paths from the app root, `CARGO_MANIFEST_DIR`) with
+/// `include_str!` and hands them to [`Catalog::load`](crate::i18n::Catalog::load)
+/// on first use. The first code is the default locale, used for fallbacks. A
+/// missing file is a compile error; a file that does not parse is logged and
+/// listed in [`Catalog::errors`](crate::i18n::Catalog::errors) (`ocre dev` and
+/// `ocre deploy` refuse it earlier).
+///
+/// # Examples
 ///
 /// ```ignore
+/// // Not compiled here: needs `locales/en.yml` and `locales/fr.yml` next to the app's Cargo.toml.
 /// static LOCALES: ocre::i18n::Locales = ocre::locales!("en", "fr");
 /// ```
 #[macro_export]
@@ -89,14 +150,30 @@ macro_rules! locales {
     };
 }
 
-/// Makes the catalog available to the [`I18n`] extractor. Add it last in
-/// `routes()`, after the `// ocre:routes` marker, so it covers every route:
+/// Makes the catalog available to the [`I18n`] extractor, as an axum layer.
 ///
-/// ```ignore
-/// Router::new()
+/// Forces `locales` (parsing the files if no translation did yet) and returns
+/// an [`Extension`] holding it. Add it last in `routes()`, after the
+/// `// ocre:routes` marker, so it covers every route; without it, [`I18n`]
+/// fails with a 500 whose log line names this fix.
+///
+/// # Examples
+///
+/// ```
+/// use std::sync::LazyLock;
+/// use axum::{Router, routing::get};
+/// use ocre::{Ctx, i18n::{Catalog, I18n, Locales}};
+///
+/// static LOCALES: Locales = LazyLock::new(|| Catalog::load(&[("en", "en:\n  title: Posts\n")]));
+///
+/// async fn home(i18n: I18n) -> String {
+///     i18n.t("title").to_string()
+/// }
+///
+/// let _app: Router<Ctx> = Router::new()
 ///     .route("/", get(home))
 ///     // ocre:routes
-///     .layer(ocre::i18n::layer(&LOCALES))
+///     .layer(ocre::i18n::layer(&LOCALES));
 /// ```
 pub fn layer(locales: &'static Locales) -> Extension<&'static Catalog> {
     Extension(LazyLock::force(locales))
@@ -135,9 +212,15 @@ impl Table {
     }
 }
 
-/// All locales of an app, built by [`locales!`](crate::locales). Files that
-/// fail to parse are empty (so every key falls back) and listed in
-/// [`errors`](Self::errors), which are also logged.
+/// All locales of an app, parsed: one table of dotted keys per locale code, the first being the default.
+///
+/// Built by [`locales!`](crate::locales) inside a [`Locales`] static. Files
+/// that fail to parse are empty (so every key falls back to the default
+/// locale) and listed in [`errors`](Self::errors), which are also logged to
+/// the Worker logs. [`locale`](Self::locale) gives translations outside
+/// requests; in handlers, the [`I18n`] extractor picks the locale.
+///
+/// # Examples
 ///
 /// ```
 /// use std::sync::LazyLock;
@@ -158,7 +241,16 @@ pub struct Catalog {
 }
 
 impl Catalog {
-    /// Parses `(code, file contents)` pairs; the first is the default locale.
+    /// Parses `(code, file contents)` pairs into a catalog; the first pair is the default locale.
+    ///
+    /// Each file must start with its code as the root key (`en:`); plural
+    /// rules come from the code (`fr-CH` uses French rules). A file that does
+    /// not parse becomes an empty table and one entry in
+    /// [`errors`](Self::errors); each error is logged. An empty `sources`
+    /// gives an empty `en` catalog with an error telling to declare locales.
+    /// Never fails: missing translations show up at lookup time instead.
+    ///
+    /// # Examples
     ///
     /// ```
     /// let catalog = ocre::i18n::Catalog::load(&[("en", "en:\n  title: Posts\n")]);
@@ -187,17 +279,28 @@ impl Catalog {
         Self { tables, errors }
     }
 
-    /// Parse errors, one line each (`locales/fr.yml line 3: ...`).
+    /// Parse errors from [`load`](Self::load), one line each (`locales/fr.yml line 3: ...`).
+    ///
+    /// Empty when every file parsed. `ocre dev` and `ocre deploy` check the
+    /// same files before building, so a deployed app normally has none.
+    ///
+    /// # Examples
     ///
     /// ```
     /// let catalog = ocre::i18n::Catalog::load(&[("en", "en:\n  title: [Posts]\n")]);
     /// assert_eq!(catalog.errors().len(), 1);
+    /// assert!(catalog.errors()[0].starts_with("locales/en.yml line 2: "));
     /// ```
     pub fn errors(&self) -> &[String] {
         &self.errors
     }
 
-    /// The default locale: the first code given to [`locales!`](crate::locales).
+    /// Returns the default locale code: the first code given to [`locales!`](crate::locales).
+    ///
+    /// Keys missing from another locale fall back to it in release builds,
+    /// and requests without a usable locale get it.
+    ///
+    /// # Examples
     ///
     /// ```
     /// let catalog = ocre::i18n::Catalog::load(&[("fr", "fr:\n"), ("en", "en:\n")]);
@@ -207,7 +310,9 @@ impl Catalog {
         self.tables[0].code
     }
 
-    /// Every locale code, default first; for language switchers.
+    /// Returns every locale code, default first, e.g. for a language switcher.
+    ///
+    /// # Examples
     ///
     /// ```
     /// let catalog = ocre::i18n::Catalog::load(&[("en", "en:\n"), ("pt-BR", "pt-BR:\n")]);
@@ -217,12 +322,24 @@ impl Catalog {
         self.tables.iter().map(|table| table.code)
     }
 
-    /// Translations in `code` (case-insensitive), or in the default locale
-    /// when the app has no such locale. For code outside requests: mailers,
-    /// jobs.
+    /// Returns translations in locale `code`, for code outside requests such as mailers and jobs.
     ///
-    /// ```ignore
-    /// let subject = LOCALES.locale(&user.locale).t("mailers.welcome.subject").to_string();
+    /// `code` matches case-insensitively and exactly (`fr-CH` does not match
+    /// `fr` here, unlike `Accept-Language`); an unknown code gives the
+    /// default locale. Requires a `'static` catalog, i.e. a [`Locales`]
+    /// static.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::LazyLock;
+    /// static LOCALES: ocre::i18n::Locales = LazyLock::new(|| {
+    ///     ocre::i18n::Catalog::load(&[("en", "en:\n  subject: Welcome\n"), ("fr", "fr:\n  subject: Bienvenue\n")])
+    /// });
+    ///
+    /// let user_locale = "FR";
+    /// assert_eq!(LOCALES.locale(user_locale).t("subject").to_string(), "Bienvenue");
+    /// assert_eq!(LOCALES.locale("de").locale(), "en");
     /// ```
     pub fn locale(&'static self, code: &str) -> I18n {
         I18n { catalog: self, index: self.find(code).unwrap_or(0) }
@@ -310,14 +427,40 @@ fn group<'t>(entries: Vec<(String, Cow<'t, str>)>) -> BTreeMap<String, Value<'t>
     values
 }
 
-/// A problem found by [`check`].
+/// A problem in the locale files, found by [`check`].
+///
+/// Displays as one line pointing at the file, as `ocre i18n missing` prints
+/// it: `locales/fr.yml: missing posts.title`.
+///
+/// # Examples
+///
+/// ```
+/// use ocre::i18n::Problem;
+///
+/// let missing = Problem::Missing { locale: "fr".into(), key: "posts.title".into() };
+/// assert_eq!(missing.to_string(), "locales/fr.yml: missing posts.title");
+/// let invalid = Problem::Invalid { locale: "fr".into(), line: 3, message: "expected `key: value`".into() };
+/// assert_eq!(invalid.to_string(), "locales/fr.yml:3: expected `key: value`");
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub enum Problem {
     /// The file is not valid locale YAML; nothing in it is used.
-    Invalid { locale: String, line: usize, message: String },
+    Invalid {
+        /// Locale code of the file, e.g. `fr` for `locales/fr.yml`.
+        locale: String,
+        /// 1-based line of the first error.
+        line: usize,
+        /// What is wrong, and how to fix it.
+        message: String,
+    },
     /// A key of the default locale (or a plural form this language needs)
     /// is missing from `locale`.
-    Missing { locale: String, key: String },
+    Missing {
+        /// Locale code of the file lacking the key.
+        locale: String,
+        /// Full dotted key, e.g. `posts.title` or `posts.count.few`.
+        key: String,
+    },
 }
 
 impl fmt::Display for Problem {
@@ -329,10 +472,18 @@ impl fmt::Display for Problem {
     }
 }
 
-/// Checks locale files the way [`Catalog::load`] reads them: syntax, then
-/// every key of the default (first) locale in every other one, with the
-/// plural forms each language needs (Russian needs `few` and `many`,
-/// Japanese only `other`). `ocre i18n missing` prints the result.
+/// Checks locale files for syntax errors and keys missing from non-default locales.
+///
+/// Reads `(code, file contents)` pairs the way [`Catalog::load`] does: first
+/// the syntax of each file ([`Problem::Invalid`]), then every key of the
+/// default (first) locale in every other one ([`Problem::Missing`]), with the
+/// plural forms each language needs (Russian needs `one`, `few`, `many` and
+/// `other`; Japanese only `other`). A plural key present as plain text counts
+/// as present. When the default file is invalid, only syntax problems are
+/// reported. Nothing is logged; `ocre i18n missing` prints the result and
+/// fails when it is not empty.
+///
+/// # Examples
 ///
 /// ```
 /// use ocre::i18n::{Problem, check};
@@ -342,6 +493,14 @@ impl fmt::Display for Problem {
 ///     ("fr", "fr:\n  count:\n    one: \"%{count} article\"\n    other: \"%{count} articles\"\n"),
 /// ]);
 /// assert_eq!(problems, [Problem::Missing { locale: "fr".into(), key: "title".into() }]);
+///
+/// // Russian needs more plural forms than English.
+/// let problems = check(&[
+///     ("en", "en:\n  count:\n    one: \"%{count} post\"\n    other: \"%{count} posts\"\n"),
+///     ("ru", "ru:\n  count:\n    one: \"%{count} пост\"\n    other: \"%{count} поста\"\n"),
+/// ]);
+/// let lines: Vec<String> = problems.iter().map(ToString::to_string).collect();
+/// assert_eq!(lines, ["locales/ru.yml: missing count.few", "locales/ru.yml: missing count.many"]);
 /// ```
 pub fn check(sources: &[(&str, &str)]) -> Vec<Problem> {
     let mut problems = Vec::new();
@@ -380,15 +539,38 @@ pub fn check(sources: &[(&str, &str)]) -> Vec<Problem> {
     problems
 }
 
-/// Extractor: translations in the request's locale. The locale comes from
-/// the `{locale}` path segment (routes nested with `.nest("/{locale}", ..)`;
-/// an unknown code is a 404), else the `locale` cookie, else
-/// `Accept-Language`, else the default locale. Needs [`layer`].
+/// Axum extractor giving translations in the request's locale, like Rails' `I18n.t` with a per-request locale.
 ///
-/// ```ignore
-/// async fn show(i18n: I18n) -> Result<Html<String>> {
-///     render(&ShowView { i18n })       // template: {{ i18n.t("posts.title") }}
+/// The locale comes from the `{locale}` path segment (routes nested with
+/// `.nest("/{locale}", ..)`, see [`LOCALE_PARAM`]), else the `locale` cookie
+/// ([`LOCALE_COOKIE`]), else `Accept-Language` (by quality; `fr-CH` matches
+/// `fr`, `pt` matches `pt-BR`), else the default locale. It is `Copy`: pass
+/// it by value to template structs, where `{{ i18n.t("posts.title") }}`
+/// writes the text. Selecting the locale reads headers only; no billed
+/// resource is used.
+///
+/// Rejections render as HTML pages in full-stack apps and as JSON in
+/// API-only apps:
+/// - [`Error::NotFound`] (404) when the `{locale}`
+///   path segment is not one of the app's locales;
+/// - [`Error::Internal`] (500) when [`layer`] is
+///   missing; the log line names the fix.
+///
+/// # Examples
+///
+/// ```
+/// use axum::{Router, routing::get};
+/// use ocre::{Ctx, i18n::I18n};
+///
+/// async fn title(i18n: I18n) -> String {
+///     i18n.t("posts.title").to_string()
 /// }
+///
+/// // `/en/posts`, `/fr/posts`; `/de/posts` is a 404 unless the app has German.
+/// fn routes() -> Router<Ctx> {
+///     Router::new().nest("/{locale}", Router::new().route("/posts", get(title)))
+/// }
+/// # let _ = routes;
 /// ```
 #[derive(Clone, Copy)]
 pub struct I18n {
@@ -403,7 +585,9 @@ impl fmt::Debug for I18n {
 }
 
 impl I18n {
-    /// The locale code, e.g. for `<html lang="{{ i18n.locale() }}">`.
+    /// Returns the locale code, e.g. for `<html lang="{{ i18n.locale() }}">`.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use std::sync::LazyLock;
@@ -414,7 +598,9 @@ impl I18n {
         self.catalog.tables[self.index].code
     }
 
-    /// Every locale of the app, default first; for language switchers.
+    /// Returns every locale code of the app, default first, e.g. for a language switcher.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use std::sync::LazyLock;
@@ -426,9 +612,15 @@ impl I18n {
         self.catalog.codes()
     }
 
-    /// The translation of a dotted key. It is a [`Display`](fmt::Display)
-    /// value: askama writes it (escaped) into the page without an extra
-    /// string, `.to_string()` gives a `String`.
+    /// Starts the translation of a dotted key, like Rails' `t("posts.created")`.
+    ///
+    /// The returned [`Translation`] is a [`Display`](fmt::Display) value:
+    /// askama writes it (escaped) into the page without an extra `String`,
+    /// `.to_string()` gives one (for flashes, emails). Add `%{name}` values
+    /// with [`Translation::arg`] and the plural count with
+    /// [`Translation::count`]. The lookup happens when it is displayed.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use std::sync::LazyLock;
@@ -442,14 +634,29 @@ impl I18n {
         Translation { i18n: *self, key, count: None, args: Vec::new() }
     }
 
-    /// `Set-Cookie` value remembering this locale for a year; send it when
-    /// the visitor picks a language:
+    /// Returns a `Set-Cookie` value remembering this locale for a year.
     ///
-    /// ```ignore
-    /// async fn switch(Form(form): Form<LocaleForm>) -> impl IntoResponse {
-    ///     let cookie = LOCALES.locale(&form.locale).cookie(); // unknown codes give the default
+    /// The cookie is `locale=<code>; Path=/; Max-Age=31536000; SameSite=Lax`;
+    /// later requests without a `{locale}` path segment use it. Send it
+    /// when the visitor picks a language.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::LazyLock;
+    /// use axum::{extract::Path, http::header, response::{IntoResponse, Redirect}};
+    ///
+    /// static LOCALES: ocre::i18n::Locales =
+    ///     LazyLock::new(|| ocre::i18n::Catalog::load(&[("en", "en:\n"), ("fr", "fr:\n")]));
+    ///
+    /// // POST /locale/{code}
+    /// async fn switch(Path(code): Path<String>) -> impl IntoResponse {
+    ///     let cookie = LOCALES.locale(&code).cookie(); // unknown codes give the default
     ///     ([(header::SET_COOKIE, cookie)], Redirect::to("/"))
     /// }
+    /// # let _ = switch;
+    ///
+    /// assert_eq!(LOCALES.locale("fr").cookie(), "locale=fr; Path=/; Max-Age=31536000; SameSite=Lax");
     /// ```
     pub fn cookie(&self) -> String {
         format!("{LOCALE_COOKIE}={}; Path=/; Max-Age=31536000; SameSite=Lax", self.locale())
@@ -504,9 +711,17 @@ impl<S: Send + Sync> FromRequestParts<S> for I18n {
     }
 }
 
-/// A translation being built by [`I18n::t`]; add `%{name}` values with
-/// [`arg`](Self::arg) and the plural count with [`count`](Self::count).
-/// A key missing everywhere displays as `translation missing: fr.posts.title`.
+/// A translation being built by [`I18n::t`], displayed (looked up and interpolated) when written.
+///
+/// Add `%{name}` values with [`arg`](Self::arg) and the plural count with
+/// [`count`](Self::count). Displaying it looks the key up in the locale,
+/// then (release builds only) in the default locale, and replaces each
+/// `%{name}` with its value; a placeholder without a value stays as written.
+/// A key missing everywhere, and in debug builds (`ocre dev`, tests) a key
+/// missing from the locale, displays as `translation missing: fr.posts.title`.
+/// The text is not escaped here: askama escapes it when it writes it.
+///
+/// # Examples
 ///
 /// ```
 /// # use std::sync::LazyLock;
@@ -531,7 +746,12 @@ pub struct Translation<'a> {
 }
 
 impl<'a> Translation<'a> {
-    /// Value for `%{name}`.
+    /// Sets the value for the `%{name}` placeholder.
+    ///
+    /// `value` is formatted with [`Display`](fmt::Display) right away.
+    /// Calling it twice with the same name keeps the first value.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use std::sync::LazyLock;
@@ -544,8 +764,14 @@ impl<'a> Translation<'a> {
         self
     }
 
-    /// Picks the plural form for `n` (by the locale's CLDR rule; `zero` when
-    /// given and `n` is 0) and sets `%{count}`.
+    /// Sets the plural count: picks the form for `n` and fills `%{count}`.
+    ///
+    /// The form follows the locale's CLDR rule (French: 0 and 1 are `one`;
+    /// Russian: `one`, `few`, `many`); a `zero` form, when present, wins
+    /// for 0. A missing form falls back to `other`. An explicit
+    /// [`arg`](Self::arg)`("count", ..)` overrides the `%{count}` text.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # use std::sync::LazyLock;
@@ -583,9 +809,12 @@ impl<'a> Translation<'a> {
     }
 }
 
-/// Numbers [`Translation::count`] accepts: every integer type, and
-/// references to them (askama passes template fields by reference).
-/// Values beyond `i64` count as `i64::MAX`.
+/// A number [`Translation::count`] accepts: every integer type, and references to them.
+///
+/// References are accepted because askama passes template fields by
+/// reference. Values outside the `i64` range count as `i64::MAX`.
+///
+/// # Examples
 ///
 /// ```
 /// use ocre::i18n::Count;
@@ -594,7 +823,14 @@ impl<'a> Translation<'a> {
 /// assert_eq!(u64::MAX.to_count(), i64::MAX);
 /// ```
 pub trait Count {
-    /// The number as `i64`.
+    /// Returns the number as `i64`, or `i64::MAX` when it does not fit.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ocre::i18n::Count;
+    /// assert_eq!(7_u8.to_count(), 7);
+    /// ```
     fn to_count(&self) -> i64;
 }
 

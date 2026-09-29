@@ -1,0 +1,4 @@
+# Built site (`cargo docs-site build`).
+/book/
+# Copy of api-index.md rendered by the book.
+/src/api-index.md

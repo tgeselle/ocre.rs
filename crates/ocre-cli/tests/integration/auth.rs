@@ -168,3 +168,13 @@ fn auth_needs_the_lib_markers() {
     assert!(report["hint"].as_str().unwrap().contains("// ocre:modules"), "{report}");
     assert!(snapshot(&root) == before, "nothing written on failure");
 }
+
+#[test]
+fn models_can_reference_the_generated_user() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    assert!(sandbox.json(&["g", "auth"], &root).1);
+    let (report, ok) = sandbox.json(&["g", "model", "Note", "title:string", "user:references"], &root);
+    assert!(ok, "{report}");
+    assert!(read(&root, "src/models/user.rs").contains("pub async fn notes(&self, ctx: &Ctx, page: ocre::Page)"));
+}

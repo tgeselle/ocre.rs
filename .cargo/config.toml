@@ -1,0 +1,3 @@
+[alias]
+# Documentation site: `cargo docs-site build|serve|deploy|check` (see docs/tool).
+docs-site = "run --quiet --manifest-path docs/tool/Cargo.toml --"

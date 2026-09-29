@@ -1,23 +1,54 @@
-//! Email: sending with [`send`](crate::mail::send) and receiving with [`receive`](crate::mail::receive).
+//! Email: send with adapters (log, Resend, Cloudflare), receive from Email Routing.
 //!
-//! ```ignore
+//! Sending is Rails' Action Mailer without the class: build an [`Email`] and
+//! hand it to [`send`], or to
+//! [`deliver_later`] to send it from the
+//! background jobs queue (see [`jobs`](crate::jobs)) so the request does not
+//! wait for the provider and a failed delivery is retried. Receiving is
+//! Action Mailbox: [`receive`] is the Worker's `email`
+//! entry point and hands each message to the app as an [`InboundEmail`].
+//!
+//! ```no_run
+//! use axum::extract::State;
 //! use ocre::mail::{self, Email};
+//! use ocre::{Ctx, Result};
 //!
-//! let email = Email::new("ada@example.com", "Welcome", "Hello Ada,\n\nhttps://example.com/start\n")
-//!     .html("<p>Hello Ada,</p><p><a href=\"https://example.com/start\">Start</a></p>");
-//! mail::send(&ctx, email).await?;
+//! async fn welcome(State(ctx): State<Ctx>) -> Result<&'static str> {
+//!     let email = Email::new("ada@example.com", "Welcome", "Hello Ada,\n\nhttps://example.com/start\n")
+//!         .html("<p>Hello Ada,</p><p><a href=\"https://example.com/start\">Start</a></p>");
+//!     mail::send(&ctx, email).await?;
+//!     Ok("sent")
+//! }
 //! ```
 //!
-//! The `MAIL_ADAPTER` Worker variable picks how mail leaves the Worker, with
-//! no guessing: `log` (print it to the Worker console; `ocre new` sets it in
-//! `.dev.vars` for `ocre dev`), `resend` (Resend's HTTP API, key in the
-//! `RESEND_API_KEY` secret) or `cloudflare` (the `EMAIL` send_email binding).
-//! The sender is the `MAIL_FROM` variable, `noreply@example.com` or
-//! `Name <noreply@example.com>`.
+//! # Configuration
 //!
-//! [`deliver_later`] sends from the background jobs queue instead (see
-//! [`jobs`](crate::jobs)): the request does not wait for the provider, and a
-//! failed delivery is retried.
+//! The [`MAIL_ADAPTER`] Worker variable picks how
+//! mail leaves the Worker, with no guessing from which keys happen to be set,
+//! so a development machine holding a real API key never sends by accident:
+//!
+//! - `log`: prints the whole email (headers, text, HTML) to the Worker console
+//!   between [`LOG_PREFIX`] lines, like Rails'
+//!   letter_opener. `ocre new` writes `MAIL_ADAPTER=log` to `.dev.vars`, which
+//!   overrides `[vars]` in `ocre dev`. No configuration, no limits.
+//! - `resend`: `POST https://api.resend.com/emails` with the
+//!   [`RESEND_API_KEY`] secret, `MAIL_FROM` on a
+//!   domain verified in Resend. Free plan (September 2026): 100 emails a day,
+//!   3,000 a month, one domain; any recipient.
+//! - `cloudflare`: Cloudflare Email Service through the
+//!   [`EMAIL_BINDING`] `[[send_email]]` binding,
+//!   `MAIL_FROM` on a domain onboarded to Email Service. Workers Free
+//!   (September 2026) only delivers to verified destination addresses of the
+//!   account; any recipient needs Workers Paid (3,000 a month included).
+//!
+//! The sender is the [`MAIL_FROM`] variable,
+//! `noreply@example.com` or `Name <noreply@example.com>`. With `MAIL_ADAPTER`
+//! unset, sending fails with an [`Error::Internal`]
+//! naming the fix, so a production Worker never drops mail silently. For
+//! sign-up and password-reset mail on the free plan, use Resend.
+//!
+//! Receiving uses Cloudflare Email Routing, free and unlimited on every plan.
+//! Every line Ocre logs about mail starts with [`LOG_PREFIX`].
 
 mod parse;
 
@@ -29,19 +60,80 @@ pub(crate) use parse::Message;
 
 use crate::{Error, Result, validate::is_email};
 
-/// Worker variable choosing the adapter: `log`, `resend` or `cloudflare`.
+/// Name of the Worker variable that chooses the adapter: `log`, `resend` or `cloudflare`.
+///
+/// Read on every [`send`] and [`deliver_later`]; unset or any other value is
+/// an [`Error::Internal`] that names the fix. Set it under
+/// `[vars]` in wrangler.toml, or in `.dev.vars` for `ocre dev` (which overrides `[vars]`).
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(ocre::mail::MAIL_ADAPTER, "MAIL_ADAPTER");
+/// ```
 pub const MAIL_ADAPTER: &str = "MAIL_ADAPTER";
-/// Worker variable with the sender: `noreply@example.com` or `Name <noreply@example.com>`.
+/// Name of the Worker variable holding the sender address.
+///
+/// Either `noreply@example.com` or `Name <noreply@example.com>` (the name
+/// may be quoted). Missing or unparsable is an
+/// [`Error::Internal`] when sending. With Resend or
+/// Cloudflare the domain must be verified with that provider.
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(ocre::mail::MAIL_FROM, "MAIL_FROM");
+/// ```
 pub const MAIL_FROM: &str = "MAIL_FROM";
-/// Worker secret with the Resend API key (`MAIL_ADAPTER = "resend"`).
+/// Name of the Worker secret holding the Resend API key, used when `MAIL_ADAPTER = "resend"`.
+///
+/// Set it with `npx wrangler secret put RESEND_API_KEY` (and in `.dev.vars`
+/// to send for real from `ocre dev`). Missing or blank is an
+/// [`Error::Internal`] when sending.
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(ocre::mail::RESEND_API_KEY, "RESEND_API_KEY");
+/// ```
 pub const RESEND_API_KEY: &str = "RESEND_API_KEY";
-/// Name of the `[[send_email]]` binding (`MAIL_ADAPTER = "cloudflare"`).
+/// Name of the `[[send_email]]` binding used when `MAIL_ADAPTER = "cloudflare"`.
+///
+/// `ocre new` leaves the entry commented out in wrangler.toml; a missing
+/// binding is an [`Error::Internal`] naming the entry to add.
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(ocre::mail::EMAIL_BINDING, "EMAIL");
+/// ```
 pub const EMAIL_BINDING: &str = "EMAIL";
 /// Prefix of every line Ocre logs about mail, e.g. in `ocre dev` output.
+///
+/// The `log` adapter frames each email between lines with this prefix, and
+/// [`receive`] logs `[ocre mail] received from ... to ...: <subject>`.
+///
+/// # Examples
+///
+/// ```
+/// assert!("[ocre mail] end".starts_with(ocre::mail::LOG_PREFIX));
+/// ```
 pub const LOG_PREFIX: &str = "[ocre mail]";
 
-/// An email to send with [`send`]. Build it with [`Email::new`], then add an
-/// HTML version with [`html`](Self::html):
+/// An outgoing email: one recipient, a subject, a plain-text body and an optional HTML body.
+///
+/// Build it with [`Email::new`], then add an HTML version with
+/// [`html`](Self::html) and a `Reply-To` with [`reply_to`](Self::reply_to);
+/// send it with [`send`] or [`deliver_later`]. Nothing is checked while
+/// building: addresses and the subject are checked when sending (an invalid
+/// recipient is a 400, a subject that is empty or spans several lines a 500).
+/// Generated mailers (`ocre g mailer`) return one per action, rendered from
+/// `templates/mailers/<name>/<action>.{txt,html}`.
+///
+/// It is serde-serializable because [`deliver_later`]
+/// puts it in a queue message.
+///
+/// # Examples
 ///
 /// ```
 /// use ocre::mail::Email;
@@ -50,33 +142,46 @@ pub const LOG_PREFIX: &str = "[ocre mail]";
 ///     .html("<a href=\"https://example.com/reset/abc\">Reset your password</a>")
 ///     .reply_to("support@example.com");
 /// assert_eq!(email.to, "ada@example.com");
+/// assert_eq!(email.subject, "Reset your password");
+/// assert_eq!(email.text, "Open https://example.com/reset/abc");
+/// assert_eq!(email.html.as_deref(), Some("<a href=\"https://example.com/reset/abc\">Reset your password</a>"));
+/// assert_eq!(email.reply_to.as_deref(), Some("support@example.com"));
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Email {
-    /// Recipient address, `ada@example.com`.
+    /// Recipient address, `ada@example.com`; an invalid one makes sending a 400.
     pub to: String,
-    /// One line of text.
+    /// Subject line: one non-empty line of text.
     pub subject: String,
     /// Plain-text body; always sent, so every mail client can read it.
     pub text: String,
     /// Optional HTML body, shown instead of `text` by clients that render HTML.
     pub html: Option<String>,
-    /// Where replies go, when not to `MAIL_FROM`.
+    /// Where replies go, when not to `MAIL_FROM`; checked like `to`.
     pub reply_to: Option<String>,
 }
 
 impl Email {
-    /// Text-only email to one recipient.
+    /// Creates a text-only email to one recipient.
+    ///
+    /// `html` and `reply_to` start empty. Nothing is validated here.
+    ///
+    /// # Examples
     ///
     /// ```
     /// let email = ocre::mail::Email::new("ada@example.com", "Hi", "Hello Ada");
-    /// assert_eq!((email.subject.as_str(), email.html), ("Hi", None));
+    /// assert_eq!((email.subject.as_str(), email.html, email.reply_to), ("Hi", None, None));
     /// ```
     pub fn new(to: impl Into<String>, subject: impl Into<String>, text: impl Into<String>) -> Self {
         Self { to: to.into(), subject: subject.into(), text: text.into(), html: None, reply_to: None }
     }
 
-    /// Adds the HTML version of the body.
+    /// Adds the HTML version of the body, replacing any previous one.
+    ///
+    /// The text body is still sent alongside it. The HTML is sent as given:
+    /// escape user input when building it (askama templates do).
+    ///
+    /// # Examples
     ///
     /// ```
     /// let email = ocre::mail::Email::new("ada@example.com", "Hi", "Hello").html("<p>Hello</p>");
@@ -87,7 +192,11 @@ impl Email {
         self
     }
 
-    /// Sets the `Reply-To` address.
+    /// Sets the `Reply-To` address, so replies go there instead of to `MAIL_FROM`.
+    ///
+    /// Checked when sending: an invalid address is a 400, like the recipient.
+    ///
+    /// # Examples
     ///
     /// ```
     /// let email = ocre::mail::Email::new("ada@example.com", "Hi", "Hello").reply_to("team@example.com");

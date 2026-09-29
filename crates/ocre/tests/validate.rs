@@ -31,6 +31,19 @@ fn numbers_from_form_text() {
 }
 
 #[test]
+fn json_from_form_text() {
+    let mut v = Validator::new();
+    assert_eq!(v.json("settings", r#" {"theme": "dark"} "#), Some(serde_json::json!({"theme": "dark"})));
+    assert_eq!(v.json("settings", "null"), Some(serde_json::Value::Null));
+    assert_eq!(v.optional_json("metadata", "  "), None);
+    assert_eq!(v.optional_json("metadata", "[1, 2]"), Some(serde_json::json!([1, 2])));
+    assert!(v.is_valid());
+    assert_eq!(v.json("settings", ""), None);
+    assert_eq!(v.optional_json("metadata", "{theme: dark}"), None);
+    assert_eq!(messages(&mut v), ["Settings is not valid JSON", "Metadata is not valid JSON"]);
+}
+
+#[test]
 fn dates_and_datetimes() {
     for ok in ["2024-02-29", "2026-12-31", "2026-04-30"] {
         assert!(Validator::new().date("on", ok).is_valid(), "{ok}");

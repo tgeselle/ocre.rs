@@ -26,7 +26,11 @@ ocre deploy    # deploys, creates the D1 database if needed, applies remote migr
 ```
 
 Each generated app has an `AGENTS.md` with the conventions, commands and
-free-plan limits an agent needs.
+free-plan limits an agent needs, and a link to the documentation site
+(<https://ocre.rs>; sources in [`docs/`](docs/), see
+[Documentation](#documentation)): tutorial, guides, reference and
+explanations, each page also as Markdown (`<page>.md`), with
+[`llms.txt`](https://ocre.rs/llms.txt) and `llms-full.txt` for agents.
 
 ## CLI
 
@@ -71,7 +75,12 @@ free-plan limits an agent needs.
 
 Field types: `string`, `text`, `integer`, `float`, `boolean`, `date`,
 `datetime`, `references` (`author:references` adds `author_id` with a foreign
-key, `ON DELETE CASCADE`), `attachment` (a file in R2, see [Files](#files)). Suffixes: `?` optional (NULL allowed), `^` unique.
+key, `ON DELETE CASCADE`), `attachment` (a file in R2, see [Files](#files)),
+`json` (any JSON value, `ocre::serde_json::Value`, stored as text in a `TEXT`
+column with `CHECK (json_valid(...))`; JSON APIs take and return the value
+itself, GraphQL uses the `JSON` scalar, scaffold forms a `<textarea>` checked
+with `Validator::json`). Suffixes: `?` optional (NULL allowed), `^` unique
+(not for `attachment` and `json`).
 Scaffold routes: `GET /posts`, `GET /posts/new`, `POST /posts`,
 `GET /posts/{id}`, `GET /posts/{id}/edit`, `POST /posts/{id}` (update),
 `POST /posts/{id}/delete`.
@@ -643,6 +652,11 @@ crates/ocre-cli/             `ocre` command-line tool
   tests/integration/         the `ocre` binary against a fake wrangler, and the terminal wizard
   tests/system/              generated apps running on workerd (`wrangler dev`)
   tests/support/             shared test helpers and the fake wrangler script
+docs/                        documentation site (mdBook), built by `cargo docs-site`
+  src/                       pages: SUMMARY.md (order), getting-started/, guides/, reference/, explanations/
+  api-index.md               one-page API index, generated from rustdoc
+  tool/                      build/check/deploy tool (standalone crate, outside the workspace)
+  wrangler.toml              hosting: assets-only Worker (Workers Static Assets)
 ```
 
 Unit tests sit in `tests/` at the same path as the code they test, like
@@ -673,6 +687,8 @@ can reach private items while living apart from the code. Both crates set
 | `Page { limit, offset }` | `?limit=&offset=` extractor with bounds; `Page::new` for GraphQL |
 | `ocre::graphql::routes(schema)` | `/graphql` endpoint and GraphiQL (feature `graphql`) |
 | `#[serde(deserialize_with = "ocre::bool_from_sql")]` | Read SQLite INTEGER 0/1 as `bool` |
+| `#[serde(deserialize_with = "ocre::json_from_sql")]` | Read a JSON text column as `serde_json::Value` (`optional_json_from_sql` for `Option`); a `Value` binds as its JSON text |
+| `#[serde(default, deserialize_with = "ocre::patch_json")]` | `Option<Option<Value>>` for PATCH bodies: missing keeps, `null` clears |
 | `session: Session` | Encrypted cookie session: `get::<T>`, `insert`, `remove`, `clear`, `flash(kind, msg)` |
 | `flash: Flash` | Previous request's flash: `notice()`, `alert()`, `get(kind)`, `iter()` |
 | `Validator`, `FieldError` | Collect field errors; `finish()?` returns `Error::Invalid` (422) |
@@ -727,14 +743,55 @@ cargo llvm-cov --workspace --all-features \
 | `crates/ocre-cli/tests/integration/` | The `ocre` binary with a fake wrangler (`tests/support/fake_npx.sh`): every command, `--json` contract, every error hint; `ocre new` in a pseudo-terminal |
 | `crates/ocre-cli/tests/system/e2e.rs` | Generated apps built to WebAssembly (dev build, shared `target/e2e-app`), served by `wrangler dev`: CRUD, sessions, CSRF, auth, email over HTTP, realtime broadcasts to WebSocket clients, background jobs and cron runs, translations by `Accept-Language`/cookie/path, KV read-through cache, 304 responses |
 
-CI (manual trigger for now) runs lint, coverage and a generated-app build as parallel jobs, and requires
+CI (manual trigger for now) runs lint, docs, coverage and a generated-app build as parallel jobs, and requires
 100% line coverage. The generated-app job runs `ocre new` and every generator,
-then compiles the result to WebAssembly.
+then compiles the result to WebAssembly. The docs job fails on any rustdoc
+warning (`crates/ocre` denies missing docs and broken links), runs the
+doctests with default and all features, and checks that `docs/api-index.md`
+is up to date.
 The e2e test is not part of CI (it needs Node.js and a full WebAssembly
 build); run it locally before merging changes to the runtime or generators.
 `crates/ocre/src/runtime/` calls the Workers JavaScript runtime and only runs
 inside workerd, where it cannot be instrumented; it is excluded from the
 measurement and exercised by the e2e test.
+
+## Documentation
+
+The site in `docs/` is built with [mdBook](https://rust-lang.github.io/mdBook/)
+0.5.4 (`cargo install mdbook --version 0.5.4 --locked`) and a small tool,
+`docs/tool`, run through the `cargo docs-site` alias (`.cargo/config.toml`)
+from the repository root:
+
+```sh
+cargo docs-site build    # docs/book/: HTML + search, <page>.md twins, llms.txt, llms-full.txt, /api/
+cargo docs-site serve    # build, then wrangler dev: http://localhost:8787
+cargo docs-site check    # compile the `rust,check` examples in a generated app: ~1 min cold, ~15 s warm
+cargo docs-site deploy   # build, then wrangler deploy (assets-only Worker `ocre-docs`)
+```
+
+`build` also copies every page's Markdown source next to its HTML
+(`/guides/models` and `/guides/models.md`), writes `llms.txt` (sections and
+one-line descriptions from `docs/src/SUMMARY.md` and each page's first
+paragraph) and `llms-full.txt` (every page in reading order, links made
+absolute), serves `docs/api-index.md` as `/api-index.md`, and puts
+`cargo doc -p ocre --all-features --no-deps` under `/api/`. The base URL in
+those files is `https://ocre.rs` (`OCRE_DOCS_URL` overrides it; the generated
+AGENTS.md uses `DOCS_URL` in `crates/ocre-cli/src/new.rs`).
+
+Writing pages: start with `# Title` and a one-paragraph summary, keep each
+page self-contained (prerequisites, complete code, commands, real output),
+and mark Rust examples that are complete modules as ```` ```rust,check ````.
+`check` builds the current `ocre` CLI, generates `target/docs-examples/docs-app`
+(`ocre new --starter blog` plus the generators listed in `FIXTURE` in
+`docs/tool/src/main.rs`), adds each checked block as a module
+(`src/doc_examples/<page>_<n>.rs`, warnings denied) and runs
+`cargo check --target wasm32-unknown-unknown`. `cargo docs-site check
+guides/caching.md` checks one page. Run it when pages or generators change.
+
+`docs/api-index.md` (every public item: path, signature, first doc sentence)
+is generated from rustdoc JSON: `rustup toolchain install nightly --profile
+minimal`, then `python3 scripts/api-index.py`; `--check` fails when it is
+stale. Rustdoc: `cargo doc -p ocre --all-features --no-deps --open`.
 
 ## Measured
 

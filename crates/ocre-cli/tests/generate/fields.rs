@@ -14,6 +14,11 @@ fn parses_types_and_modifiers() {
     let field = Field::parse("author:references").unwrap();
     assert_eq!(field.name, "author_id");
     assert_eq!(field.target.unwrap().plural, "authors");
+    let field = Field::parse("settings:json?").unwrap();
+    assert_eq!(
+        (field.ty, field.optional, field.column_type().as_str()),
+        (FieldType::Json, true, "Option<ocre::serde_json::Value>")
+    );
 }
 
 #[test]
@@ -30,6 +35,7 @@ fn rejects_bad_fields() {
     assert!(parse_fields(&["a:string".into(), "a:text".into()]).is_err(), "duplicate");
     assert_eq!(error("avatar:attachment^"), "attachment `avatar` cannot be unique");
     assert_eq!(error("edit:attachment"), "attachment name `edit` clashes with a scaffold route");
+    assert_eq!(error("settings:json^"), "json field `settings` cannot be unique");
     let clash = parse_fields(&["avatar:attachment".into(), "avatar_size:integer".into()]).unwrap_err();
     assert_eq!(clash.message, "field `avatar_size` is listed twice");
 }

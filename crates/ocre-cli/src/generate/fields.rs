@@ -1,6 +1,6 @@
 //! Field language shared by `model`, `scaffold` and `api`:
 //! `name:type`, with `?` for optional (NULL allowed) and `^` for unique,
-//! e.g. `title:string^ summary:text? author:references avatar:attachment?`.
+//! e.g. `title:string^ summary:text? author:references avatar:attachment? settings:json`.
 
 use crate::{
     names::{ModelNames, humanize, is_identifier},
@@ -79,7 +79,7 @@ pub(super) const RESERVED: &[&str] = &[
     "values",
 ];
 
-pub(super) const TYPES: &str = "string, text, integer, float, boolean, date, datetime, references, attachment";
+pub(super) const TYPES: &str = "string, text, integer, float, boolean, date, datetime, references, attachment, json";
 
 /// Content types an attachment accepts until the app edits its `Rules`:
 /// common images, PDF and plain text, all safe to display inline.
@@ -106,6 +106,9 @@ pub(super) enum FieldType {
     References,
     /// A file in R2: four columns (`<name>_key`, `_filename`, `_content_type`, `_size`).
     Attachment,
+    /// Any JSON value (`serde_json::Value`), stored as its text in a `TEXT`
+    /// column checked with `json_valid`.
+    Json,
 }
 
 impl FieldType {
@@ -120,6 +123,7 @@ impl FieldType {
             "datetime" => Self::DateTime,
             "references" => Self::References,
             "attachment" => Self::Attachment,
+            "json" => Self::Json,
             _ => return None,
         })
     }
@@ -176,6 +180,10 @@ impl Field {
             return Err(CliError::new(format!("attachment `{name}` cannot be unique"))
                 .hint("every stored file gets its own random key already; drop the `^`"));
         }
+        if ty == FieldType::Json && unique {
+            return Err(CliError::new(format!("json field `{name}` cannot be unique"))
+                .hint("a unique index compares JSON text, where key order and spacing differ; drop the `^`"));
+        }
         if ty == FieldType::Attachment && ["edit", "delete", "new"].contains(&name) {
             return Err(CliError::new(format!("attachment name `{name}` clashes with a scaffold route"))
                 .hint(format!("`/<plural>/{{id}}/{name}` is taken; pick another name, e.g. `{name}_file`")));
@@ -202,6 +210,7 @@ impl Field {
             FieldType::Float => "f64",
             FieldType::Boolean => "bool",
             FieldType::Attachment => "Upload",
+            FieldType::Json => "ocre::serde_json::Value",
         }
     }
 
@@ -253,7 +262,9 @@ impl Field {
             Some(target) => format!(" REFERENCES {}(id) ON DELETE CASCADE", target.plural),
             None => String::new(),
         };
-        vec![format!("{} {sql_type}{null}{default}{reference}", self.name)]
+        let check =
+            if self.ty == FieldType::Json { format!(" CHECK (json_valid({}))", self.name) } else { String::new() };
+        vec![format!("{} {sql_type}{null}{default}{reference}{check}", self.name)]
     }
 
     /// Checks on a value of the Rust type, as `v.<check>` statements for the

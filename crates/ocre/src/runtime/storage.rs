@@ -31,23 +31,86 @@ async fn put(env: &Env, attachment: &Attachment, data: worker::Data) -> Result<(
     Ok(())
 }
 
-/// Stores `upload` in R2 under a new random key starting with `prefix`
-/// (`posts/avatar/...`) and returns what to save with the record. One R2
-/// write (class A operation).
+/// Stores an [`Upload`] in R2 under a new random key starting with `prefix`, and returns the [`Attachment`] to save.
 ///
-/// ```ignore
-/// let upload = form.file("avatar").or_404()?;
-/// let avatar = ocre::storage::store(&ctx, "posts/avatar", upload).await?;
+/// The key is `<prefix>/<22 random characters>` (`posts/avatar/...`),
+/// never derived from the file name; the file name and content type are
+/// cleaned up like [`store_bytes`](crate::storage::store_bytes)'s. Check
+/// the upload with [`Validator::file`](crate::Validator::file) first, and
+/// save the attachment with [`columns`](crate::storage::columns); if saving
+/// the row fails, [`delete`](crate::storage::delete) the new key.
+///
+/// Free plan: one R2 class A operation (1M free per month); copying 10 MB
+/// to R2 takes about 0.15 ms of CPU. Stored files count towards the 10
+/// GB-month of free storage.
+///
+/// # Errors
+///
+/// [`Error::Internal`](crate::Error::Internal) (500) when the `STORAGE`
+/// binding is missing (the message shows the `[[r2_buckets]]` entry to add
+/// to wrangler.toml) or the R2 write fails.
+///
+/// # Examples
+///
+/// ```no_run
+/// use axum::extract::State;
+/// use ocre::storage::{self, Multipart, Rules};
+/// use ocre::{Ctx, Error, Result, Validator};
+///
+/// const DOCUMENT: Rules = Rules { max_bytes: 10 * 1024 * 1024, content_types: &["application/pdf"] };
+///
+/// // PUT /documents with `curl -X PUT -F file=@spec.pdf`.
+/// async fn upload(State(ctx): State<Ctx>, Multipart(mut form): Multipart<{ 11 * 1024 * 1024 }>) -> Result<String> {
+///     let file = form.file("file").ok_or_else(|| Error::bad_request("Send the file as `file`"))?;
+///     Validator::new().file("file", &file, &DOCUMENT).finish()?;
+///     let document = storage::store(&ctx, "documents/file", file).await?;
+///     Ok(document.key)
+/// }
 /// ```
 pub fn store(ctx: &Ctx, prefix: &str, upload: Upload) -> impl Future<Output = Result<Attachment>> + Send + use<> {
     store_bytes(ctx, prefix, &upload.filename, &upload.content_type, Vec::from(upload.bytes))
 }
 
-/// Stores bytes built by the app (a generated report, an export) like
-/// [`store`].
+/// Stores bytes built by the app (a generated report, an export) like [`store`](crate::storage::store).
 ///
-/// ```ignore
-/// let csv = ocre::storage::store_bytes(&ctx, "exports", "posts.csv", "text/csv", rows.into_bytes()).await?;
+/// The object gets a new random key under `prefix`; `filename` is cleaned
+/// up (no directories or control characters, at most 200 characters) and
+/// `content_type` normalized (lowercase, no parameters; empty becomes
+/// `application/octet-stream`). The returned [`Attachment`] records all
+/// four, ready to save with [`columns`](crate::storage::columns).
+///
+/// Free plan: one R2 class A operation (1M free per month); copying 10 MB
+/// to R2 takes about 0.15 ms of CPU.
+///
+/// # Errors
+///
+/// [`Error::Internal`](crate::Error::Internal) (500) when the `STORAGE`
+/// binding is missing (the message shows the `[[r2_buckets]]` entry to add
+/// to wrangler.toml) or the R2 write fails.
+///
+/// # Examples
+///
+/// ```no_run
+/// use axum::extract::State;
+/// use ocre::{Ctx, Result, storage};
+/// use serde::Deserialize;
+///
+/// #[derive(Deserialize)]
+/// struct Post {
+///     id: i64,
+///     title: String,
+/// }
+///
+/// // POST /exports: writes every post to a CSV kept in R2.
+/// async fn export(State(ctx): State<Ctx>) -> Result<String> {
+///     let posts: Vec<Post> = ctx.db()?.all("SELECT id, title FROM posts ORDER BY id", vec![]).await?;
+///     let mut csv = String::from("id,title\n");
+///     for post in posts {
+///         csv.push_str(&format!("{},\"{}\"\n", post.id, post.title.replace('"', "\"\"")));
+///     }
+///     let file = storage::store_bytes(&ctx, "exports", "posts.csv", "text/csv", csv.into_bytes()).await?;
+///     Ok(file.key)
+/// }
 /// ```
 pub fn store_bytes(
     ctx: &Ctx,
@@ -64,15 +127,44 @@ pub fn store_bytes(
     })
 }
 
-/// Streams `body` (exactly `size` bytes, for example a request body with a
-/// `Content-Length`) into R2 without holding it in memory. R2 needs the
-/// length up front; a body of another length fails.
+/// Streams `body` (exactly `size` bytes) into R2 without holding it in memory, and returns its [`Attachment`].
 ///
-/// ```ignore
-/// async fn upload(State(ctx): State<Ctx>, headers: HeaderMap, body: Body) -> ocre::Result<String> {
-///     let size = headers.get(CONTENT_LENGTH).and_then(|v| v.to_str().ok()?.parse().ok()).ok_or_else(|| Error::bad_request("Content-Length required"))?;
-///     let attachment = ocre::storage::store_body(&ctx, "raw", "upload.bin", "application/octet-stream", size, body).await?;
-///     Ok(attachment.key)
+/// For a raw request body with a `Content-Length` (`curl -T big.zip`),
+/// where [`Multipart`](crate::storage::Multipart) would hold the whole body
+/// in memory. R2 needs the length up front: a body of another length makes
+/// the write fail and nothing is stored. The file name and content type are
+/// cleaned up like [`store_bytes`]'s; no [`Rules`](crate::storage::Rules)
+/// are checked, so check `size` and `content_type` first.
+///
+/// Free plan: one R2 class A operation (1M free per month). Chunks still
+/// pass through WebAssembly, but memory stays flat; Cloudflare refuses
+/// request bodies over 100 MB on the Free plan.
+///
+/// # Errors
+///
+/// [`Error::Internal`](crate::Error::Internal) (500) when the `STORAGE`
+/// binding is missing (the message shows the `[[r2_buckets]]` entry to add
+/// to wrangler.toml), the body is not `size` bytes long, or the R2 write fails.
+///
+/// # Examples
+///
+/// ```no_run
+/// use axum::{body::Body, extract::State, http::{HeaderMap, header}};
+/// use ocre::{Ctx, Error, Result, storage};
+///
+/// const MAX: u64 = 50 * 1024 * 1024;
+///
+/// // PUT /backups with `curl -T backup.zip`.
+/// async fn upload(State(ctx): State<Ctx>, headers: HeaderMap, body: Body) -> Result<String> {
+///     let size: u64 = headers
+///         .get(header::CONTENT_LENGTH)
+///         .and_then(|value| value.to_str().ok()?.parse().ok())
+///         .ok_or_else(|| Error::bad_request("Content-Length required"))?;
+///     if size > MAX {
+///         return Err(Error::PayloadTooLarge("The backup is too large (maximum is 50 MB)".into()));
+///     }
+///     let backup = storage::store_body(&ctx, "backups", "backup.zip", "application/zip", size, body).await?;
+///     Ok(backup.key)
 /// }
 /// ```
 pub fn store_body(
@@ -94,12 +186,33 @@ pub fn store_body(
     })
 }
 
-/// The whole object, or `None` when `key` does not exist. One R2 read
-/// (class B operation). For sending a file to a browser use [`serve`], which
-/// streams it.
+/// Reads a whole object into memory, or returns `None` when `key` does not exist.
 ///
-/// ```ignore
-/// let bytes = ocre::storage::read(&ctx, &post.avatar().key).await?.or_404()?;
+/// Meant for files the Worker itself processes (parsing an uploaded CSV,
+/// attaching a file to an email). To send a file to a browser use
+/// [`serve`](crate::storage::serve), which streams it without copying it
+/// into WebAssembly and handles 304 and `Range`.
+///
+/// Free plan: one R2 class B operation (10M free per month); the bytes are
+/// copied into WebAssembly memory (a Worker has 128 MB).
+///
+/// # Errors
+///
+/// [`Error::Internal`](crate::Error::Internal) (500) when the `STORAGE`
+/// binding is missing (the message shows the `[[r2_buckets]]` entry to add
+/// to wrangler.toml) or R2 fails.
+///
+/// # Examples
+///
+/// ```no_run
+/// use axum::extract::{Path, State};
+/// use ocre::{Ctx, OptionExt, Result, storage};
+///
+/// // Counts the lines of an uploaded CSV.
+/// async fn line_count(State(ctx): State<Ctx>, Path(key): Path<String>) -> Result<String> {
+///     let bytes = storage::read(&ctx, &key).await?.or_404()?;
+///     Ok(bytes.split(|&b| b == b'\n').filter(|line| !line.is_empty()).count().to_string())
+/// }
 /// ```
 pub fn read(ctx: &Ctx, key: &str) -> impl Future<Output = Result<Option<Vec<u8>>>> + Send + use<> {
     let env = ctx.env().clone();
@@ -113,11 +226,30 @@ pub fn read(ctx: &Ctx, key: &str) -> impl Future<Output = Result<Option<Vec<u8>>
     })
 }
 
-/// Deletes the object at `key`; deleting a missing key is not an error. R2
-/// deletes are free.
+/// Deletes the object at `key`.
 ///
-/// ```ignore
-/// ocre::storage::delete(&ctx, &attachment.key).await?;
+/// Deleting a missing key is not an error, so a retried cleanup is safe.
+/// Delete the object only once no row points to it any more (after the
+/// database write succeeded). R2 deletes are free.
+///
+/// # Errors
+///
+/// [`Error::Internal`](crate::Error::Internal) (500) when the `STORAGE`
+/// binding is missing (the message shows the `[[r2_buckets]]` entry to add
+/// to wrangler.toml) or R2 fails.
+///
+/// # Examples
+///
+/// ```no_run
+/// use axum::{extract::{Path, State}, http::StatusCode};
+/// use ocre::{Ctx, Result, params, storage};
+///
+/// // DELETE /exports/{key}: forget a generated export.
+/// async fn destroy(State(ctx): State<Ctx>, Path(key): Path<String>) -> Result<StatusCode> {
+///     ctx.db()?.execute("DELETE FROM exports WHERE file_key = ?1", params![key.as_str()]).await?;
+///     storage::delete(&ctx, &key).await?;
+///     Ok(StatusCode::NO_CONTENT)
+/// }
 /// ```
 pub fn delete(ctx: &Ctx, key: &str) -> impl Future<Output = Result<()>> + Send + use<> {
     let env = ctx.env().clone();
@@ -125,11 +257,40 @@ pub fn delete(ctx: &Ctx, key: &str) -> impl Future<Output = Result<()>> + Send +
     SendFuture::new(async move { Ok(bucket(&env)?.delete(key).await?) })
 }
 
-/// Deletes the objects of every `Some` attachment in one R2 call. Generated
-/// models use it when a record is deleted or its files replaced.
+/// Deletes the objects of every `Some` attachment in one R2 call.
 ///
-/// ```ignore
-/// ocre::storage::delete_attachments(&ctx, &[Some(post.avatar()), post.doc()]).await?;
+/// `None` entries (optional attachments left empty) are skipped, and
+/// nothing is sent when all are `None`. Generated models call it after a
+/// record is deleted, or after an update replaced or removed its files, so
+/// a failed database write never loses a file that a row still points to.
+/// Missing keys are not an error. R2 deletes are free.
+///
+/// # Errors
+///
+/// [`Error::Internal`](crate::Error::Internal) (500) when the `STORAGE`
+/// binding is missing (the message shows the `[[r2_buckets]]` entry to add
+/// to wrangler.toml) or R2 fails.
+///
+/// # Examples
+///
+/// ```no_run
+/// use axum::{extract::{Path, State}, http::StatusCode};
+/// use ocre::storage::{self, Attachment};
+/// use ocre::{Ctx, Result, params};
+///
+/// async fn destroy(State(ctx): State<Ctx>, Path(id): Path<i64>) -> Result<StatusCode> {
+///     let db = ctx.db()?;
+///     let image: Option<Attachment> = db
+///         .first(
+///             "SELECT image_key AS key, image_filename AS filename, image_content_type AS content_type, \
+///              image_size AS size FROM photos WHERE id = ?1 AND image_key IS NOT NULL",
+///             params![id],
+///         )
+///         .await?;
+///     db.execute("DELETE FROM photos WHERE id = ?1", params![id]).await?;
+///     storage::delete_attachments(&ctx, &[image]).await?;
+///     Ok(StatusCode::NO_CONTENT)
+/// }
 /// ```
 pub fn delete_attachments(
     ctx: &Ctx,
@@ -145,20 +306,61 @@ pub fn delete_attachments(
     })
 }
 
-/// Streams a stored file to the client: `Content-Type`, `Content-Length`,
-/// `Content-Disposition` (the original filename; `inline` only for types
-/// safe to display, see [`Disposition`]), `ETag`, `Cache-Control`
-/// ([`CACHE_CONTROL`](crate::storage::CACHE_CONTROL)), 304 for a matching
-/// `If-None-Match`, and 206/416 for a single `Range` (video seeking,
-/// resumed downloads). A missing object is a 404. One R2 read (class B).
+/// Streams a stored file to the client, with the headers a browser needs for caching, seeking and saving it.
+///
+/// The response carries `Content-Type`, `Content-Length`,
+/// `Content-Disposition` (the original file name; `inline` only for types
+/// safe to display, see [`Disposition`](crate::storage::Disposition)),
+/// `ETag` and `Cache-Control` ([`CACHE_CONTROL`](crate::storage::CACHE_CONTROL)).
+/// A matching `If-None-Match` answers `304 Not Modified` without a body; a
+/// single `Range` (video seeking, resumed downloads) answers 206 with
+/// `Content-Range`, or 416 when it lies outside the file (without calling
+/// R2). Several ranges, other units and malformed values send the whole
+/// file, as RFC 9110 allows. The headers come from `attachment`, so it must
+/// be the row saved for that key.
 ///
 /// Check that the user may see the record before calling it: the route is
 /// the only protection.
 ///
-/// ```ignore
-/// async fn avatar(State(ctx): State<Ctx>, Path(id): Path<i64>, headers: HeaderMap) -> ocre::Result<Response> {
-///     let post = post::find(&ctx, id).await?.or_404()?;
-///     storage::serve(&ctx, &post.avatar(), &headers, Disposition::Inline).await
+/// Free plan: one R2 class B operation per call, 304s included (10M free
+/// per month). The bytes never pass through WebAssembly: the R2 stream is
+/// attached to the response and [`crate::serve`] answers with it directly,
+/// so a download costs almost no CPU whatever its size.
+///
+/// # Errors
+///
+/// - [`Error::NotFound`](crate::Error::NotFound) (404) when no object has
+///   `attachment.key`.
+/// - [`Error::Internal`](crate::Error::Internal) (500) when the `STORAGE`
+///   binding is missing (the message shows the `[[r2_buckets]]` entry to add
+///   to wrangler.toml) or R2 fails.
+///
+/// # Examples
+///
+/// ```no_run
+/// use axum::{extract::{Path, Query, State}, http::HeaderMap, response::Response};
+/// use ocre::storage::{self, Attachment, Disposition};
+/// use ocre::{Ctx, OptionExt, Result, params};
+/// use serde::Deserialize;
+///
+/// #[derive(Deserialize)]
+/// struct Download {
+///     #[serde(default)]
+///     download: bool,
+/// }
+///
+/// // GET /photos/{id}/image, or /photos/{id}/image?download=true for "Save as".
+/// async fn image(
+///     State(ctx): State<Ctx>,
+///     Path(id): Path<i64>,
+///     Query(query): Query<Download>,
+///     headers: HeaderMap,
+/// ) -> Result<Response> {
+///     let sql = "SELECT image_key AS key, image_filename AS filename, image_content_type AS content_type, \
+///                image_size AS size FROM photos WHERE id = ?1";
+///     let image: Attachment = ctx.db()?.first(sql, params![id]).await?.or_404()?;
+///     let disposition = if query.download { Disposition::Download } else { Disposition::Inline };
+///     storage::serve(&ctx, &image, &headers, disposition).await
 /// }
 /// ```
 pub fn serve(

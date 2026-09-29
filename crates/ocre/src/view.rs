@@ -6,6 +6,30 @@ use axum::response::{Html, IntoResponse, Response};
 use crate::{Error, Result};
 
 /// Renders an askama template (compiled at build time) into an HTML response.
+///
+/// askama escapes interpolated values; never mark user input `|safe`.
+/// Rendering is plain Rust string building: no binding call, a little CPU.
+/// Requires the `html` feature.
+///
+/// # Errors
+///
+/// [`Error::Internal`] (500, logged) when the template fails at run time,
+/// e.g. a `Display` implementation or a filter returns an error.
+///
+/// # Examples
+///
+/// ```
+/// use askama::Template;
+///
+/// #[derive(Template)]
+/// #[template(source = "<h1>{{ title }}</h1>", ext = "html")]
+/// struct Show<'a> {
+///     title: &'a str,
+/// }
+///
+/// let html = ocre::render(&Show { title: "Tom & Jerry" }).unwrap();
+/// assert_eq!(html.0, "<h1>Tom &#38; Jerry</h1>");
+/// ```
 pub fn render<T: Template>(template: &T) -> Result<Html<String>> {
     Ok(Html(template.render()?))
 }

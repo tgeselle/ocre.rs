@@ -1,74 +1,22 @@
 use axum::response::Response;
 use wasm_bindgen::JsValue;
-use worker::{
-    DurableObject, Env, Headers, Method, Request, RequestInit, State, Stub, WebSocket, WebSocketIncomingMessage,
-    WebSocketPair, durable_object, send::SendFuture,
-};
+use worker::{Env, Headers, Method, Request, RequestInit, Stub, send::SendFuture};
 
 use super::Ctx;
 use crate::{
     Error, Result,
-    realtime::{CHANNELS_BINDING, LOG_PREFIX, WebSocketUpgrade, channel_error, close_code, missing_binding},
+    realtime::{CHANNELS_BINDING, LOG_PREFIX, WebSocketUpgrade, channel_error, missing_binding},
 };
+
+// `#[durable_object]` generates public wasm-bindgen glue (constructor and runtime callbacks) inside
+// a `const _` block, which cannot carry docs and which an `allow` on the struct does not reach.
+#[allow(missing_docs)]
+mod channel;
+
+pub use channel::OcreChannel;
 
 /// Address of requests from the Worker to a channel object; only the method matters.
 const CHANNEL_URL: &str = "https://ocre-channel/";
-
-/// The Durable Object behind each realtime channel, exported by Ocre (feature
-/// `realtime`): one instance per channel name holds that channel's
-/// WebSockets. It accepts them with the WebSocket Hibernation API, so it is
-/// evicted from memory between broadcasts while browsers stay connected, and
-/// it stores nothing. Apps never call it directly: they use
-/// [`broadcast`] and [`WebSocketUpgrade::connect`]. wrangler.toml declares it:
-///
-/// ```toml
-/// [[durable_objects.bindings]]
-/// name = "CHANNELS"
-/// class_name = "OcreChannel"
-///
-/// [[migrations]]
-/// tag = "ocre-realtime-v1"
-/// new_sqlite_classes = ["OcreChannel"]
-/// ```
-#[durable_object(websocket)]
-pub struct OcreChannel {
-    state: State,
-}
-
-impl DurableObject for OcreChannel {
-    fn new(state: State, _env: Env) -> Self {
-        Self { state }
-    }
-
-    /// `POST`: send the body to every socket, answer how many got it.
-    /// Anything else: a WebSocket handshake forwarded by `connect`.
-    async fn fetch(&self, mut req: Request) -> worker::Result<worker::Response> {
-        if req.method() == Method::Post {
-            let message = req.text().await?;
-            let sent = self.state.get_websockets().iter().filter(|ws| ws.send_with_str(&message).is_ok()).count();
-            return worker::Response::ok(sent.to_string());
-        }
-        let pair = WebSocketPair::new()?;
-        self.state.accept_web_socket(&pair.server);
-        worker::Response::from_websocket(pair.client)
-    }
-
-    /// Subscribers only listen; what they send is ignored.
-    async fn websocket_message(&self, _ws: WebSocket, _message: WebSocketIncomingMessage) -> worker::Result<()> {
-        Ok(())
-    }
-
-    /// Completes the closing handshake the browser started.
-    async fn websocket_close(&self, ws: WebSocket, code: usize, reason: String, _clean: bool) -> worker::Result<()> {
-        // Already closed when the runtime auto-replied (compatibility date 2026-04-07 or later).
-        let _ = ws.close(Some(close_code(code)), Some(reason));
-        Ok(())
-    }
-
-    async fn websocket_error(&self, _ws: WebSocket, _error: worker::Error) -> worker::Result<()> {
-        Ok(())
-    }
-}
 
 /// The channel object for `channel`.
 fn stub(env: &Env, channel: &str) -> Result<Stub> {
@@ -76,19 +24,46 @@ fn stub(env: &Env, channel: &str) -> Result<Stub> {
     Ok(namespace.get_by_name(channel)?)
 }
 
-/// Sends `message` (an HTML fragment or JSON text) to every browser connected
-/// to `channel`, and returns when the channel object has sent it. Channels
-/// without subscribers cost one Durable Object request and send nothing.
+/// Sends `message` (an HTML fragment or JSON text) to every browser connected to `channel`.
 ///
-/// ```ignore
-/// let row = render(&RowView { post: &post })?.0;
-/// ocre::realtime::broadcast(&ctx, "posts", &ocre::realtime::prepend("posts", &row)).await?;
+/// Returns once the channel's [`OcreChannel`] object has sent it. Build HTML
+/// messages with [`prepend`](crate::realtime::prepend),
+/// [`append`](crate::realtime::append), [`update`](crate::realtime::update),
+/// [`remove`](crate::realtime::remove), or an element with an `id` that
+/// replaces the page element with that id; several can go in one message.
+/// Works from handlers and jobs. The returned future is `Send`, so axum
+/// handlers can await it.
+///
+/// Every failure is logged as `[ocre realtime] broadcast to <channel> failed:
+/// ...` and returned; callers that treat updates as best effort (the
+/// generated controllers do) can ignore it with `.ok()`.
+///
+/// Free plan: each call is one Durable Object request (100,000 a day), even
+/// when the channel has no subscribers, and one subrequest of the current
+/// request; the messages to browsers are free.
+///
+/// # Errors
+///
+/// - [`Error::Internal`] when `channel` is not a valid name (1 to
+///   [`MAX_CHANNEL_LEN`](crate::realtime::MAX_CHANNEL_LEN) ASCII letters,
+///   digits, `_`, `-`, `.` or `:`).
+/// - [`Error::Internal`] when the `CHANNELS` Durable Object binding is
+///   missing; the message names the wrangler.toml entries to add.
+/// - [`Error::Internal`] when the channel object cannot be reached (e.g. the
+///   free-plan quota is exhausted) or answers with a non-200 status.
+///
+/// # Examples
+///
+/// ```no_run
+/// use axum::extract::{Path, State};
+/// use ocre::{Ctx, Result, realtime};
+///
+/// async fn destroy(State(ctx): State<Ctx>, Path(id): Path<i64>) -> Result<()> {
+///     // ... delete the post, then remove its row from every open index page:
+///     realtime::broadcast(&ctx, "posts", &realtime::remove(&format!("post_{id}"))).await.ok();
+///     Ok(())
+/// }
 /// ```
-///
-/// Failures (invalid channel name, missing binding, exhausted free-plan
-/// quota) are logged with an `[ocre realtime]` line and returned; callers
-/// that treat updates as best effort can ignore them with `.ok()`.
-/// The returned future is `Send`, so axum handlers can await it.
 pub fn broadcast(ctx: &Ctx, channel: &str, message: &str) -> impl Future<Output = Result<()>> + Send + use<> {
     let env = ctx.env().clone();
     let invalid = channel_error(channel);
@@ -117,12 +92,30 @@ async fn send(env: &Env, channel: &str, message: &str) -> Result<()> {
 }
 
 impl WebSocketUpgrade {
-    /// Connects the browser to `channel`: the channel object accepts the
-    /// WebSocket and the handler returns its `101 Switching Protocols`
-    /// response. An invalid channel name is a 400. Check who may listen
-    /// before calling it.
+    /// Connects the browser to `channel`, returning the `101 Switching Protocols` response to send back.
     ///
-    /// ```ignore
+    /// The handshake is forwarded to the channel's [`OcreChannel`] object,
+    /// which accepts the WebSocket (hibernating). Check who may listen before
+    /// calling it: list the allowed channels, or use a channel per record or
+    /// user (`post:12`). The returned future is `Send`.
+    ///
+    /// Free plan: one Durable Object request per connection and reconnection.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::BadRequest`] (400) when `channel` is not a valid name (1 to
+    ///   [`MAX_CHANNEL_LEN`](crate::realtime::MAX_CHANNEL_LEN) ASCII letters,
+    ///   digits, `_`, `-`, `.` or `:`).
+    /// - [`Error::Internal`] (500) when the `CHANNELS` Durable Object binding
+    ///   is missing (the message names the wrangler.toml entries to add) or
+    ///   the channel object cannot be reached.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use axum::{extract::{Path, State}, response::Response};
+    /// use ocre::{Ctx, Error, Result, realtime::WebSocketUpgrade};
+    ///
     /// async fn connect(State(ctx): State<Ctx>, Path(channel): Path<String>, upgrade: WebSocketUpgrade)
     ///     -> Result<Response> {
     ///     match channel.as_str() {

@@ -36,6 +36,9 @@ fn new_creates_an_app_without_touching_cloudflare_by_default() {
     assert!(fs::read_to_string(root.join("public/robots.txt")).unwrap().contains("User-agent: *"));
     let gitignore = fs::read_to_string(root.join(".gitignore")).unwrap();
     assert!(gitignore.contains("\n.dev.vars\n.dev.vars.*\n"), "{gitignore}");
+    let agents = fs::read_to_string(root.join("AGENTS.md")).unwrap();
+    assert!(agents.starts_with("# shop\n") && agents.contains("`https://ocre.rs/llms.txt`"), "{agents}");
+    assert!(!agents.contains("__"), "no template placeholder left: {agents}");
     assert!(sandbox.calls().is_empty(), "no wrangler call without --login/--deploy");
 }
 
@@ -322,7 +325,7 @@ fn model_links_associations_both_ways() {
     assert!(ok, "{report}");
     assert_eq!(report["updated"], serde_json::json!(["src/models/author.rs", "src/models/mod.rs"]));
     let author = fs::read_to_string(root.join("src/models/author.rs")).unwrap();
-    assert!(author.contains("pub async fn books(&self, ctx: &Ctx, page: Page)"), "{author}");
+    assert!(author.contains("pub async fn books(&self, ctx: &Ctx, page: ocre::Page)"), "{author}");
     let book = fs::read_to_string(root.join("src/models/book.rs")).unwrap();
     assert!(book.contains("pub async fn author(&self, ctx: &Ctx)"), "{book}");
     let sql = fs::read_to_string(root.join("migrations/0002_create_books.sql")).unwrap();
@@ -355,8 +358,17 @@ fn scaffold_converts_form_text_for_every_type() {
     let sandbox = Sandbox::new();
     let root = sandbox.new_app("shop", &[]);
     sandbox.json(&["g", "model", "Venue", "name:string"], &root);
-    let fields =
-        ["title:string", "note:text?", "seats:integer", "price:float?", "day:date", "at:datetime", "venue:references?"];
+    let fields = [
+        "title:string",
+        "note:text?",
+        "seats:integer",
+        "price:float?",
+        "day:date",
+        "at:datetime",
+        "venue:references?",
+        "settings:json",
+        "extra:json?",
+    ];
     let (report, ok) = sandbox.json(&[&["g", "scaffold", "Event"][..], &fields].concat(), &root);
     assert!(ok, "{report}");
     let module = fs::read_to_string(root.join("src/events.rs")).unwrap();
@@ -368,6 +380,10 @@ fn scaffold_converts_form_text_for_every_type() {
         "            note: record.note.clone().unwrap_or_default(),",
         "            seats: record.seats.to_string(),",
         "            price: record.price.map(|value| value.to_string()).unwrap_or_default(),",
+        "            settings: v.json(\"settings\", &self.settings).unwrap_or_default(),",
+        "            extra: v.optional_json(\"extra\", &self.extra),",
+        "            settings: record.settings.to_string(),",
+        "            extra: record.extra.as_ref().map(|value| value.to_string()).unwrap_or_default(),",
     ] {
         assert!(module.contains(expected), "missing {expected:?} in\n{module}");
     }
@@ -378,11 +394,23 @@ fn scaffold_converts_form_text_for_every_type() {
         r#"<input type="date" name="day" value="{{ form.day }}" required>"#,
         r#"<input type="datetime-local" name="at" value="{{ form.at }}" required>"#,
         r#"<label>Venue <input type="number" step="1" name="venue_id" value="{{ form.venue_id }}">"#,
+        r#"<textarea name="settings" rows="5" spellcheck="false" placeholder="{}" required>{{ form.settings }}</textarea>"#,
+        r#"<textarea name="extra" rows="5" spellcheck="false" placeholder="{}">{{ form.extra }}</textarea>"#,
     ] {
         assert!(form.contains(expected), "missing {expected:?} in\n{form}");
     }
     let model = fs::read_to_string(root.join("src/models/event.rs")).unwrap();
     assert!(model.contains("Some(id) => crate::models::venue::find(ctx, id).await,\n            None => Ok(None),"));
+    for expected in [
+        "    #[serde(deserialize_with = \"ocre::json_from_sql\")]\n    pub settings: ocre::serde_json::Value,",
+        "    #[serde(deserialize_with = \"ocre::optional_json_from_sql\")]\n    pub extra: Option<ocre::serde_json::Value>,",
+        "    #[serde(default)]\n    pub extra: Option<ocre::serde_json::Value>,",
+        "    #[serde(default, deserialize_with = \"ocre::patch_json\")]\n    pub extra: Option<Option<ocre::serde_json::Value>>,",
+    ] {
+        assert!(model.contains(expected), "missing {expected:?} in\n{model}");
+    }
+    let migration = fs::read_to_string(root.join("migrations/0002_create_events.sql")).unwrap();
+    assert!(migration.contains("    settings TEXT NOT NULL CHECK (json_valid(settings)),\n"), "{migration}");
 }
 
 #[test]
@@ -527,8 +555,10 @@ fn api_after_scaffold_reuses_the_table() {
 fn api_with_graphql_wires_the_schema_and_dependency() {
     let sandbox = Sandbox::new();
     let root = sandbox.new_app("shop", &[]);
-    let (report, ok) =
-        sandbox.json(&["g", "api", "Product", "name:string", "active:boolean", "note:text?", "--graphql"], &root);
+    let (report, ok) = sandbox.json(
+        &["g", "api", "Product", "name:string", "active:boolean", "note:text?", "tags:json?", "--graphql"],
+        &root,
+    );
     assert!(ok, "{report}");
     assert_eq!(
         report["created"],
@@ -550,6 +580,7 @@ fn api_with_graphql_wires_the_schema_and_dependency() {
     assert!(module.contains("async fn create_product(&self, ctx: &Context<'_>, input: NewProductInput)"));
     assert!(module.contains("    #[graphql(default)]\n    pub active: bool,"), "unchecked = false");
     assert!(module.contains("    pub note: MaybeUndefined<String>,"), "null clears, missing keeps");
+    assert!(module.contains("    pub tags: MaybeUndefined<ocre::serde_json::Value>,"), "the JSON scalar");
     assert!(module.contains("MaybeUndefined::Null => Some(None),"));
 
     // A second GraphQL resource joins the existing schema.

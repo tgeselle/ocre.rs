@@ -2,28 +2,81 @@ use axum::http::StatusCode;
 
 use crate::FieldError;
 
+/// `Result` with [`Error`] as the default error type, returned by Ocre APIs and handlers.
+///
+/// # Examples
+///
+/// ```
+/// fn parse_id(text: &str) -> ocre::Result<i64> {
+///     text.parse().map_err(|_| ocre::Error::bad_request("id must be a number"))
+/// }
+///
+/// assert_eq!(parse_id("7").unwrap(), 7);
+/// assert!(parse_id("x").is_err());
+/// ```
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-/// Handler error. Internal details are logged, never sent to the client.
-/// Renders as an HTML page (feature `html`); JSON endpoints return
-/// [`ApiError`](crate::ApiError), which converts from it with `?`.
+/// Handler error: an HTTP status plus, for client errors, a message the user may see.
+///
+/// Internal details are logged to the Worker logs (`wrangler tail`), never
+/// sent to the client. With the `html` feature it renders as an HTML error
+/// page (validation errors listed as full messages); JSON endpoints return
+/// [`ApiError`](crate::ApiError), which converts from it with `?`:
+/// `{"error": {"status": 404, "message": "Not found"}}`. `?` also converts a
+/// [`worker::Error`] into [`Error::Internal`].
+///
+/// | Variant | Status | Message sent |
+/// |---|---|---|
+/// | [`NotFound`](Self::NotFound) | 404 | `Not found` |
+/// | [`BadRequest`](Self::BadRequest) | 400 | its message |
+/// | [`Unauthorized`](Self::Unauthorized) | 401 | `Unauthorized` |
+/// | [`Forbidden`](Self::Forbidden) | 403 | `Forbidden` |
+/// | [`Invalid`](Self::Invalid) | 422 | `Validation failed` plus the field errors |
+/// | [`PayloadTooLarge`](Self::PayloadTooLarge) | 413 | its message |
+/// | [`Internal`](Self::Internal) | 500 | `Internal server error` (message logged) |
+///
+/// # Examples
+///
+/// ```
+/// use ocre::{Error, OptionExt, Result};
+///
+/// fn find(id: i64) -> Result<&'static str> {
+///     match id {
+///         0 => Err(Error::bad_request("id must be positive")),
+///         1 => Ok("First post"),
+///         _ => None.or_404(),
+///     }
+/// }
+///
+/// assert_eq!(find(1).unwrap(), "First post");
+/// assert!(matches!(find(2), Err(Error::NotFound)));
+/// assert_eq!(find(0).unwrap_err().to_string(), "bad request: id must be positive");
+/// ```
 #[derive(Debug)]
 pub enum Error {
-    /// 404.
+    /// 404 Not Found: the record or route does not exist.
     NotFound,
-    /// 400 with a message shown to the user.
+    /// 400 Bad Request, with a message shown to the user.
     BadRequest(String),
-    /// 401: missing or invalid credentials (password, session, token).
+    /// 401 Unauthorized: missing or invalid credentials (password, session, token).
+    ///
     /// JSON responses add `WWW-Authenticate: Bearer`.
     Unauthorized,
-    /// 403: signed in, but not allowed to do this.
+    /// 403 Forbidden: signed in, but not allowed to do this.
     Forbidden,
-    /// 422: failed validations, one entry per field error (see [`Validator`](crate::Validator)).
+    /// 422 Unprocessable Entity: failed validations, one entry per field error.
+    ///
+    /// Built by [`Validator::finish`](crate::Validator::finish). JSON answers
+    /// group messages by field: `"fields": {"title": ["can't be blank"]}`.
     Invalid(Vec<FieldError>),
-    /// 413: the request body is over a limit (see
-    /// [`storage::Multipart`](crate::storage::Multipart)); the message is shown to the user.
+    /// 413 Payload Too Large: the request body is over a limit, with a message shown to the user.
+    ///
+    /// See [`storage::Multipart`](crate::storage::Multipart).
     PayloadTooLarge(String),
-    /// 500; the message goes to the Worker logs only.
+    /// 500 Internal Server Error; the message goes to the Worker logs only.
+    ///
+    /// Logged as `[ocre] <message>` when the response is built; the client
+    /// sees `Internal server error`.
     Internal(String),
 }
 
@@ -47,10 +100,28 @@ impl Public {
 }
 
 impl Error {
+    /// Builds a 400 [`Error::BadRequest`] whose message is shown to the user.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let err = ocre::Error::bad_request("limit must be a number");
+    /// assert_eq!(err.to_string(), "bad request: limit must be a number");
+    /// ```
     pub fn bad_request(message: impl Into<String>) -> Self {
         Self::BadRequest(message.into())
     }
 
+    /// Builds a 500 [`Error::Internal`] whose message is logged, never shown to the user.
+    ///
+    /// Name the fix in the message, as Ocre's own errors do.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let err = ocre::Error::internal("KV binding `CACHE` is missing");
+    /// assert!(matches!(&err, ocre::Error::Internal(message) if message.contains("CACHE")));
+    /// ```
     pub fn internal(message: impl Into<String>) -> Self {
         Self::Internal(message.into())
     }
@@ -107,8 +178,22 @@ pub(crate) fn log_internal(message: &str) {
     eprintln!("[ocre] {message}");
 }
 
-/// `option.or_404()?` turns a missing record into a 404 response.
+/// Extension for `Option`: `option.or_404()?` turns a missing record into a 404 response.
+///
+/// # Examples
+///
+/// ```
+/// use ocre::{Error, OptionExt};
+///
+/// assert_eq!(Some(3).or_404().unwrap(), 3);
+/// assert!(matches!(None::<i32>.or_404(), Err(Error::NotFound)));
+/// ```
 pub trait OptionExt<T> {
+    /// The value, or [`Error::NotFound`] (404) when `None`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotFound`] when the option is `None`.
     fn or_404(self) -> Result<T>;
 }
 

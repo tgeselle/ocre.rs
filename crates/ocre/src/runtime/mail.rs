@@ -16,38 +16,89 @@ use crate::{
     },
 };
 
-/// Sends `email` from `MAIL_FROM` with the adapter named by `MAIL_ADAPTER`:
-/// `log` prints it to the Worker console (lines starting with `[ocre mail]`),
-/// `resend` calls Resend's API, `cloudflare` uses the `EMAIL` send_email
-/// binding. Errors name the missing configuration.
+/// Sends `email` now, from `MAIL_FROM`, with the adapter named by `MAIL_ADAPTER`.
 ///
-/// ```ignore
-/// async fn invite(State(ctx): State<Ctx>, Form(form): Form<InviteForm>) -> ocre::Result<Redirect> {
-///     let email = Email::new(&form.email, "You're invited", format!("Join us: {}", form.link));
-///     ocre::mail::send(&ctx, email).await?;
-///     Ok(Redirect::to("/"))
-/// }
-/// ```
+/// `log` prints the whole email to the Worker console between
+/// [`LOG_PREFIX`](crate::mail::LOG_PREFIX) lines and sends nothing; `resend`
+/// makes one `POST https://api.resend.com/emails` subrequest; `cloudflare`
+/// calls the [`EMAIL_BINDING`](crate::mail::EMAIL_BINDING) send_email
+/// binding. The request waits for the provider; use
+/// [`deliver_later`](crate::mail::deliver_later) to answer first and retry failures.
 ///
 /// The returned future is `Send`, so axum handlers can await it.
+///
+/// Free-plan limits (September 2026): Resend sends 100 emails a day and 3,000
+/// a month from one domain, to any recipient; Cloudflare Email Service on
+/// Workers Free only delivers to verified destination addresses of the account.
+///
+/// # Errors
+///
+/// - [`Error::BadRequest`](crate::Error::BadRequest) (400): `to` or `reply_to` is not an email address.
+/// - [`Error::Internal`](crate::Error::Internal) (500), with a log message naming the fix:
+///   `MAIL_ADAPTER` unset or unknown; `MAIL_FROM` unset or not an address; a
+///   subject that is empty or spans several lines; the `RESEND_API_KEY`
+///   secret or the `[[send_email]]` binding named `EMAIL` missing; the
+///   provider refused the email (e.g. Resend's quota reached, an unverified
+///   domain or recipient) or could not be reached.
+///
+/// # Examples
+///
+/// ```no_run
+/// use axum::extract::State;
+/// use ocre::mail::Email;
+/// use ocre::{Ctx, Result};
+///
+/// async fn invite(State(ctx): State<Ctx>) -> Result<&'static str> {
+///     let email = Email::new("ada@example.com", "You're invited", "Join us: https://example.com/join");
+///     ocre::mail::send(&ctx, email).await?;
+///     Ok("invited")
+/// }
+/// ```
 pub fn send(ctx: &Ctx, email: Email) -> impl Future<Output = Result<()>> + Send + use<> {
     let env = ctx.env().clone();
     SendFuture::new(async move { deliver(&env, email).await })
 }
 
-/// Sends `email` later, from the background jobs queue (Rails'
-/// `deliver_later`): the handler answers without waiting for the mail
-/// provider, and a failed delivery is retried (30 s, 1 min, 3 min...) instead
-/// of failing the request. Checks the address, `MAIL_FROM` and
-/// `MAIL_ADAPTER` right away, like [`send`], so a bad address is still a 400.
+/// Checks `email` now and sends it later from the background jobs queue, like Rails' `deliver_later`.
 ///
-/// ```ignore
-/// ocre::mail::deliver_later(&ctx, mailers::user::welcome(&user.email)?).await?;
+/// The address, `MAIL_FROM` and `MAIL_ADAPTER` are checked right away, like
+/// [`send`](crate::mail::send), so a bad address is still a 400 for the
+/// request. The email is then put on the `JOBS` queue and the handler answers
+/// without waiting for the provider; [`consume`](crate::jobs::consume) sends
+/// it with [`send`](crate::mail::send), logs `[ocre jobs] mail done`, and on
+/// failure retries it with the jobs backoff (30 s, 1 min, 3 min, 9 min, 27
+/// min) before the dead-letter queue. The Resend key and the send_email
+/// binding are only looked up when the consumer sends.
+///
+/// Needs the `JOBS` queue: run `ocre g job <Name>` once to wire it.
+///
+/// Free-plan cost: one queue message, i.e. 3 of the 10,000 daily Queues
+/// operations (write, read, delete), one more read per retry and one more
+/// write if it is dead-lettered; plus the provider's limits of
+/// [`send`](crate::mail::send).
+///
+/// # Errors
+///
+/// - [`Error::BadRequest`](crate::Error::BadRequest) (400): `to` or `reply_to` is not an email address.
+/// - [`Error::Internal`](crate::Error::Internal) (500): `MAIL_ADAPTER` unset or
+///   unknown, `MAIL_FROM` unset or not an address, a subject that is empty or
+///   spans several lines, an email over the 128 KB queue message limit, the
+///   `[[queues.producers]]` binding named `JOBS` missing from wrangler.toml, or
+///   Queues refusing the message.
+///
+/// # Examples
+///
+/// ```no_run
+/// use axum::extract::State;
+/// use ocre::mail::Email;
+/// use ocre::{Ctx, Result};
+///
+/// async fn sign_up(State(ctx): State<Ctx>) -> Result<&'static str> {
+///     let email = Email::new("ada@example.com", "Welcome", "Hello Ada");
+///     ocre::mail::deliver_later(&ctx, email).await?;
+///     Ok("check your inbox")
+/// }
 /// ```
-///
-/// Needs the `JOBS` queue: run `ocre g job <Name>` once to wire it. The
-/// queue consumer sends the email with [`send`] and logs
-/// `[ocre jobs] mail done`. Costs 3 Queues operations per email.
 pub fn deliver_later(ctx: &Ctx, email: Email) -> impl Future<Output = Result<()>> + Send + use<> {
     let env = ctx.env();
     let checked = adapter(var(env, MAIL_ADAPTER).as_deref())
@@ -127,13 +178,23 @@ fn js_error(err: &worker::js_sys::Error) -> String {
     }
 }
 
-/// An email that Cloudflare Email Routing delivered to the Worker. Read it
-/// with [`subject`](Self::subject), [`text`](Self::text), [`header`](Self::header)...;
-/// bounce it with [`reject`](Self::reject) or pass it on with [`forward`](Self::forward).
+/// An email that Cloudflare Email Routing delivered to the Worker, handed to the app's mailbox.
 ///
-/// ```ignore
+/// [`receive`](crate::mail::receive) builds it. The envelope ([`from`](Self::from), [`to`](Self::to)) comes from
+/// Cloudflare; headers and bodies are parsed from the raw message
+/// (multipart, quoted-printable, base64, RFC 2047 encoded words; attachments
+/// are skipped, [`raw`](Self::raw) keeps them). Bounce it with
+/// [`reject`](Self::reject) or pass it on with [`forward`](Self::forward).
+/// Receiving is free and unlimited on every plan.
+///
+/// # Examples
+///
+/// ```no_run
+/// use ocre::mail::InboundEmail;
+/// use ocre::{Ctx, Result};
+///
 /// // src/mailbox.rs
-/// pub async fn receive(ctx: Ctx, email: InboundEmail) -> ocre::Result<()> {
+/// pub async fn receive(_ctx: Ctx, email: InboundEmail) -> Result<()> {
 ///     match email.to() {
 ///         "support@example.com" => email.forward("team@example.com").await?,
 ///         _ => email.reject("Unknown address"),
@@ -150,55 +211,164 @@ pub struct InboundEmail {
 }
 
 impl InboundEmail {
-    /// Envelope sender (SMTP `MAIL FROM`), checked by Cloudflare. The
-    /// `From` header may differ: `email.header("From")`.
+    /// Returns the envelope sender (SMTP `MAIL FROM`), checked by Cloudflare.
+    ///
+    /// The `From` header may differ: read it with `email.header("From")`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn mailbox(email: ocre::mail::InboundEmail) {
+    /// if email.from().ends_with("@example.com") {
+    ///     // a colleague
+    /// }
+    /// # }
+    /// ```
     pub fn from(&self) -> &str {
         &self.from
     }
 
-    /// Envelope recipient: the address of this app that received the email.
+    /// Returns the envelope recipient: the address of this app that received the email.
+    ///
+    /// Match on it to route several addresses to one Worker.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn mailbox(email: ocre::mail::InboundEmail) {
+    /// let team = email.to().starts_with("support@");
+    /// # let _ = team;
+    /// # }
+    /// ```
     pub fn to(&self) -> &str {
         &self.to
     }
 
-    /// `Subject` header, decoded; empty when missing.
+    /// Returns the decoded `Subject` header, or `""` when it is missing.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn mailbox(email: ocre::mail::InboundEmail) {
+    /// let urgent = email.subject().contains("URGENT");
+    /// # let _ = urgent;
+    /// # }
+    /// ```
     pub fn subject(&self) -> &str {
         self.message.header("Subject").unwrap_or("")
     }
 
-    /// First header with this name (case-insensitive), decoded:
-    /// `email.header("Message-ID")`.
+    /// Returns the first header with this name (case-insensitive), decoded.
+    ///
+    /// Folded lines are joined and RFC 2047 encoded words decoded. `None`
+    /// when the message has no such header.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn mailbox(email: ocre::mail::InboundEmail) {
+    /// let id = email.header("message-id").unwrap_or("");
+    /// # let _ = id;
+    /// # }
+    /// ```
     pub fn header(&self, name: &str) -> Option<&str> {
         self.message.header(name)
     }
 
-    /// Every header, in order, as `(name, value)`.
+    /// Returns every header, in message order, as decoded `(name, value)` pairs.
+    ///
+    /// Repeated headers (`Received`, ...) appear once per occurrence.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn mailbox(email: ocre::mail::InboundEmail) {
+    /// let hops = email.headers().iter().filter(|(name, _)| name.eq_ignore_ascii_case("Received")).count();
+    /// # let _ = hops;
+    /// # }
+    /// ```
     pub fn headers(&self) -> &[(String, String)] {
         &self.message.headers
     }
 
-    /// The first `text/plain` part, decoded to UTF-8.
+    /// Returns the first `text/plain` part, decoded to UTF-8, or `None` when there is none.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn mailbox(email: ocre::mail::InboundEmail) {
+    /// let body = email.text().unwrap_or_default();
+    /// # let _ = body;
+    /// # }
+    /// ```
     pub fn text(&self) -> Option<&str> {
         self.message.text.as_deref()
     }
 
-    /// The first `text/html` part, decoded to UTF-8. Never render it unescaped.
+    /// Returns the first `text/html` part, decoded to UTF-8, or `None` when there is none.
+    ///
+    /// It is the sender's HTML: never render it unescaped.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn mailbox(email: ocre::mail::InboundEmail) {
+    /// let has_html = email.html().is_some();
+    /// # let _ = has_html;
+    /// # }
+    /// ```
     pub fn html(&self) -> Option<&str> {
         self.message.html.as_deref()
     }
 
-    /// The whole message as received (RFC 5322), e.g. to store it or read attachments.
+    /// Returns the whole message as received (RFC 5322 bytes), e.g. to store it in R2 or read attachments.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn mailbox(email: ocre::mail::InboundEmail) {
+    /// let size = email.raw().len();
+    /// # let _ = size;
+    /// # }
+    /// ```
     pub fn raw(&self) -> &[u8] {
         &self.raw
     }
 
     /// Bounces the email: the sending server gets a permanent SMTP error with `reason`.
+    ///
+    /// The mailbox handler still returns normally; [`receive`](crate::mail::receive)
+    /// also bounces the email when the handler returns an `Err`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn mailbox(email: ocre::mail::InboundEmail) {
+    /// if email.to() != "support@example.com" {
+    ///     email.reject("Unknown address");
+    /// }
+    /// # }
+    /// ```
     pub fn reject(&self, reason: &str) {
         self.inner.set_reject(reason);
     }
 
-    /// Forwards the email unchanged to `to`, which must be a verified
-    /// destination address of the Cloudflare account.
+    /// Forwards the email unchanged to `to`, which must be a verified destination address of the Cloudflare account.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Internal`](crate::Error::Internal) when Cloudflare refuses, typically because
+    /// `to` is not a verified destination address in Email Routing (the
+    /// message says so).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn mailbox(email: ocre::mail::InboundEmail) -> ocre::Result<()> {
+    /// email.forward("team@example.com").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn forward(&self, to: &str) -> Result<()> {
         self.inner.forward(to).await.map_err(|err| {
             Error::internal(format!(
@@ -211,20 +381,45 @@ impl InboundEmail {
     }
 }
 
-/// Runs `handler` for an email from Cloudflare Email Routing. Call it from
-/// the Worker's email entry point (`ocre g mailbox` writes this):
+/// Runs the app's mailbox `handler` for an email from Cloudflare Email Routing; the Worker's `email` entry point.
 ///
-/// ```ignore
+/// Reads the raw message, parses it into an [`InboundEmail`], logs one
+/// `[ocre mail] received from <from> to <to>: <subject>` line and calls
+/// `handler(ctx, email)` with a fresh [`Ctx`](crate::Ctx). When the handler
+/// returns an `Err`, the error is logged (`[ocre mail] the mailbox failed:
+/// ...`) and the email bounced ("The message could not be processed"), so the
+/// sender knows it was not handled. Routing rules in the dashboard (Email
+/// Routing > Routing rules) send an address to the Worker; receiving is free
+/// and unlimited on every plan.
+///
+/// # Errors
+///
+/// A `worker::Error` only when the raw message cannot be read; handler
+/// errors are logged and bounce the email instead.
+///
+/// # Examples
+///
+/// `ocre g mailbox` writes the entry point in `src/lib.rs` and the handler in `src/mailbox.rs`:
+///
+/// ```no_run
+/// mod mailbox {
+///     use ocre::{Ctx, Result, mail::InboundEmail};
+///
+///     pub async fn receive(_ctx: Ctx, email: InboundEmail) -> Result<()> {
+///         email.forward("team@example.com").await
+///     }
+/// }
+///
 /// #[worker::event(email)]
-/// async fn email(message: worker::ForwardableEmailMessage, env: worker::Env, _ctx: worker::Context)
-///     -> worker::Result<()> {
+/// async fn email(
+///     message: worker::ForwardableEmailMessage,
+///     env: worker::Env,
+///     _ctx: worker::Context,
+/// ) -> worker::Result<()> {
 ///     ocre::mail::receive(message, env, mailbox::receive).await
 /// }
+/// # fn main() {}
 /// ```
-///
-/// Logs one `[ocre mail] received ...` line per email. When the handler
-/// fails, the error is logged and the email bounced ("could not be
-/// processed"), so the sender knows it was not handled.
 pub async fn receive<F, Fut>(message: ForwardableEmailMessage, env: Env, handler: F) -> worker::Result<()>
 where
     F: FnOnce(Ctx, InboundEmail) -> Fut,

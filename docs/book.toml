@@ -1,0 +1,30 @@
+# mdBook configuration of the documentation site. Build with
+# `cargo docs-site build` (from the repository root), not `mdbook build`
+# alone: the tool also writes the Markdown twins, llms.txt, llms-full.txt and
+# the API reference.
+[book]
+title = "Ocre"
+description = "Rails-like Rust web framework for Cloudflare Workers, built for the free plan and for AI agents."
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[rust]
+edition = "2024"
+
+[output.html]
+git-repository-url = "https://github.com/tgeselle/ocre.rs"
+edit-url-template = "https://github.com/tgeselle/ocre.rs/edit/main/docs/src/{path}"
+no-section-label = true
+site-url = "/"
+# ```mermaid diagrams (see js/mermaid.js).
+additional-js = ["js/mermaid.js"]
+
+[output.html.playground]
+runnable = false
+
+[output.html.search]
+enable = true

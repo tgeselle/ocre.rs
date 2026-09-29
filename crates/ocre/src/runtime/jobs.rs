@@ -16,33 +16,80 @@ use crate::{
     now,
 };
 
-/// Sends `job` to the `JOBS` queue; the `queue` event runs it within seconds
-/// (`max_batch_timeout` in wrangler.toml). Returns once Cloudflare stored the
-/// message. The job must serialize to at most 128 KB of JSON: pass ids, not
-/// records.
+/// Sends `job` to the `JOBS` queue, to run in the background through [`consume`](crate::jobs::consume).
 ///
-/// ```ignore
-/// use crate::jobs::{Job, SendWelcome};
+/// Returns once Cloudflare stored the message; the `queue` event runs it
+/// within seconds (`max_batch_timeout = 5` in wrangler.toml). The job is
+/// serialized to JSON and wrapped as `{"at": <now>, "job": ...}`; the whole
+/// message must fit in 128 KB, so pass ids, not records. The returned future
+/// is `Send`, so axum handlers can await it.
 ///
-/// async fn create(State(ctx): State<Ctx>, Form(form): Form<NewUser>) -> ocre::Result<Redirect> {
-///     let user = models::user::create(&ctx, form).await?;
-///     ocre::jobs::enqueue(&ctx, &Job::SendWelcome(SendWelcome { user_id: user.id })).await?;
-///     Ok(Redirect::to("/"))
+/// Free-plan cost: each job is one message, 3 of the 10,000 daily Queues
+/// operations (a write now, a read and a delete when consumed), plus one
+/// read per retry and one write if it ends in the dead-letter queue: about
+/// 3,300 jobs a day.
+///
+/// # Errors
+///
+/// [`Error::Internal`](crate::Error::Internal) (500) when the job does not
+/// serialize to JSON, the message is over the 128 KB limit, the
+/// `[[queues.producers]] binding = "JOBS"` entry is missing from wrangler.toml
+/// (run `ocre g job <Name>` once), or Queues refuses the message.
+///
+/// # Examples
+///
+/// ```no_run
+/// use axum::extract::State;
+/// use ocre::{Ctx, Result};
+/// use serde::Serialize;
+///
+/// #[derive(Serialize)]
+/// #[serde(rename_all = "snake_case")]
+/// enum Job {
+///     SendWelcome { user_id: i64 },
+/// }
+///
+/// async fn create(State(ctx): State<Ctx>) -> Result<&'static str> {
+///     ocre::jobs::enqueue(&ctx, &Job::SendWelcome { user_id: 1 }).await?;
+///     Ok("created")
 /// }
 /// ```
-///
-/// Each job costs 3 of the free plan's 10,000 daily Queues operations
-/// (write, read, delete), plus one read per retry.
 pub fn enqueue<J: Serialize>(ctx: &Ctx, job: &J) -> impl Future<Output = Result<()>> + Send + use<J> {
     send(ctx, job_payload(job), Duration::ZERO)
 }
 
-/// Like [`enqueue`], but the job runs after `delay` (24 hours at most, see
-/// [`MAX_DELAY`](crate::jobs::MAX_DELAY)).
+/// Sends `job` to the `JOBS` queue like [`enqueue`](crate::jobs::enqueue), to run after `delay`.
 ///
-/// ```ignore
-/// let reminder = Job::SendReminder(SendReminder { user_id: user.id });
-/// ocre::jobs::enqueue_in(&ctx, &reminder, Duration::from_secs(3600)).await?;
+/// The delay is whole seconds, 24 hours at most
+/// ([`MAX_DELAY`](crate::jobs::MAX_DELAY)); for later work, enqueue from a
+/// scheduled task or store the due time in D1. Costs the same Queues
+/// operations as [`enqueue`](crate::jobs::enqueue).
+///
+/// # Errors
+///
+/// [`Error::Internal`](crate::Error::Internal) (500) when `delay` is over
+/// 24 hours, plus every error of [`enqueue`](crate::jobs::enqueue).
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::time::Duration;
+///
+/// use axum::extract::State;
+/// use ocre::{Ctx, Result};
+/// use serde::Serialize;
+///
+/// #[derive(Serialize)]
+/// #[serde(rename_all = "snake_case")]
+/// enum Job {
+///     SendReminder { user_id: i64 },
+/// }
+///
+/// async fn remind(State(ctx): State<Ctx>) -> Result<&'static str> {
+///     let reminder = Job::SendReminder { user_id: 1 };
+///     ocre::jobs::enqueue_in(&ctx, &reminder, Duration::from_secs(3600)).await?;
+///     Ok("reminder set")
+/// }
 /// ```
 pub fn enqueue_in<J: Serialize>(
     ctx: &Ctx,
@@ -68,24 +115,64 @@ pub(crate) fn send(
     })
 }
 
-/// Runs a batch of queue messages: each job through `perform`, each email
-/// from [`deliver_later`](crate::mail::deliver_later) through
-/// [`mail::send`](crate::mail::send). Call it from the Worker's queue entry
-/// point (`ocre g job` writes this):
+/// Runs a batch of queue messages through the app's `perform`; the Worker's `queue` entry point.
 ///
-/// ```ignore
+/// Each job goes to `perform(ctx, job)`, each email from
+/// [`deliver_later`](crate::mail::deliver_later) to
+/// [`mail::send`](crate::mail::send). Messages run one after the other in one
+/// Worker invocation (10 per batch with the generated `max_batch_size`, all
+/// sharing its CPU limit: 10 ms on Free).
+///
+/// - `Ok` acknowledges the message and logs `[ocre jobs] <job> done`.
+/// - `Err` logs `[ocre jobs] <job> failed, retrying in <n> s: <error>` and
+///   retries the message after twice the time since it was due, between 30 s
+///   and 24 hours (30 s, 1 min, 3 min, 9 min, 27 min), until `max_retries = 5`
+///   sends it to the dead-letter queue `<app>-jobs-failed`.
+/// - A message that does not decode (not an Ocre message, or a job renamed
+///   or changed while messages were queued) is logged as
+///   `[ocre jobs] dropped message <id>: <reason>` and acknowledged, never retried.
+///
+/// Delivery is at-least-once, so a job can run twice: make it safe to repeat.
+///
+/// Free-plan cost: reading and acknowledging a message are 2 Queues
+/// operations (of 10,000 a day); each retry is one more read, a dead-lettered
+/// message one more write.
+///
+/// # Errors
+///
+/// Never returns `Err` itself: job errors are logged and retried.
+///
+/// # Examples
+///
+/// `ocre g job` writes the entry point in `src/lib.rs` and `perform` in `src/jobs/mod.rs`:
+///
+/// ```no_run
+/// mod jobs {
+///     use ocre::{Ctx, Result};
+///     use serde::Deserialize;
+///
+///     #[derive(Deserialize)]
+///     #[serde(rename_all = "snake_case")]
+///     pub enum Job {
+///         SendWelcome { user_id: i64 },
+///     }
+///
+///     pub async fn perform(_ctx: Ctx, job: Job) -> Result<()> {
+///         match job {
+///             Job::SendWelcome { user_id } => {
+///                 # let _ = user_id;
+///                 Ok(())
+///             }
+///         }
+///     }
+/// }
+///
 /// #[worker::event(queue)]
 /// async fn queue(batch: worker::MessageBatch<String>, env: worker::Env, _ctx: worker::Context) -> worker::Result<()> {
 ///     ocre::jobs::consume(batch, env, jobs::perform).await
 /// }
+/// # fn main() {}
 /// ```
-///
-/// Messages run one after the other. `Ok` acknowledges the message and logs
-/// `[ocre jobs] <job> done`; `Err` logs the error and retries the message
-/// after twice the time since it was due (30 s at least), until
-/// `max_retries` sends it to the dead-letter queue. A message that does not
-/// decode (not an Ocre message, or a job the app no longer knows) is logged
-/// and acknowledged, never retried.
 pub async fn consume<J, F, Fut>(batch: MessageBatch<String>, env: Env, perform: F) -> worker::Result<()>
 where
     J: DeserializeOwned,
@@ -131,20 +218,38 @@ where
     Ok(())
 }
 
-/// Runs the task for the Cron Trigger that fired: `run(ctx, cron)`, where
-/// `cron` is the expression from `[triggers] crons` in wrangler.toml. Call
-/// it from the Worker's scheduled entry point (`ocre g schedule` writes this):
+/// Runs the app's task for the Cron Trigger that fired; the Worker's `scheduled` entry point.
 ///
-/// ```ignore
+/// Calls `run(ctx, cron)`, where `cron` is the expression from
+/// `[triggers] crons` in wrangler.toml (UTC), and logs
+/// `[ocre cron] <cron> done` or `[ocre cron] <cron> failed: <error>`.
+/// Cloudflare does not retry a failed run; the next one comes at the next
+/// scheduled time, so enqueue jobs from the task for work that must not be
+/// lost. The Free plan allows 5 Cron Triggers per account and 10 ms of CPU
+/// per run: run several tasks from one cron, and move heavy work to jobs.
+///
+/// # Examples
+///
+/// `ocre g schedule` writes the entry point in `src/lib.rs` and `run` in `src/schedules/mod.rs`:
+///
+/// ```no_run
+/// mod schedules {
+///     use ocre::{Ctx, Error, Result};
+///
+///     pub async fn run(_ctx: Ctx, cron: String) -> Result<()> {
+///         match cron.as_str() {
+///             "0 3 * * *" => Ok(()), // nightly_cleanup
+///             other => Err(Error::internal(format!("no task for cron {other}"))),
+///         }
+///     }
+/// }
+///
 /// #[worker::event(scheduled)]
 /// async fn scheduled(event: worker::ScheduledEvent, env: worker::Env, _ctx: worker::ScheduleContext) {
 ///     ocre::jobs::cron(event, env, schedules::run).await
 /// }
+/// # fn main() {}
 /// ```
-///
-/// Logs `[ocre cron] <cron> done`, or `[ocre cron] <cron> failed: <error>`.
-/// Cloudflare does not retry a failed run; the next one comes at the next
-/// scheduled time. Enqueue jobs from the task for work that must not be lost.
 pub async fn cron<F, Fut>(event: ScheduledEvent, env: Env, run: F)
 where
     F: FnOnce(Ctx, String) -> Fut,
