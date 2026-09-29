@@ -79,3 +79,10 @@ fn bool_from_sql_rejects_other_types() {
     let err = row(r#"{"flag": "yes"}"#).unwrap_err();
     assert!(err.to_string().contains("a boolean or the integer 0 or 1"), "{err}");
 }
+
+#[test]
+fn statements_carry_sql_and_params() {
+    let statement = Statement::new("DELETE FROM posts WHERE id = ?1", params![3]);
+    assert_eq!(statement.sql, "DELETE FROM posts WHERE id = ?1");
+    assert_eq!(statement.params, vec![number(3.0)]);
+}

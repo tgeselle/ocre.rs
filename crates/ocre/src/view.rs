@@ -19,8 +19,16 @@ impl From<askama::Error> for Error {
 /// HTML error page. JSON endpoints return [`ApiError`](crate::ApiError) instead.
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
-        let (status, message) = self.into_public();
-        (status, Html(format!("<h1>{}</h1><p>{}</p>", status.as_u16(), escape(&message)))).into_response()
+        let public = self.into_public();
+        let mut page = format!("<h1>{}</h1><p>{}</p>", public.status.as_u16(), escape(&public.message));
+        if !public.fields.is_empty() {
+            page.push_str("<ul>");
+            for field in &public.fields {
+                page.push_str(&format!("<li>{}</li>", escape(&field.full_message())));
+            }
+            page.push_str("</ul>");
+        }
+        (public.status, Html(page)).into_response()
     }
 }
 

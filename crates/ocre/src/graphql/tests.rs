@@ -22,6 +22,13 @@ impl Query {
     async fn broken(&self) -> async_graphql::Result<i32> {
         Err(Error::internal("D1 query failed: secret"))?
     }
+
+    async fn rejected(&self) -> async_graphql::Result<i32> {
+        let mut v = crate::Validator::new();
+        v.required("title", "").required("body", "");
+        v.finish()?;
+        Ok(1)
+    }
 }
 
 fn run(body: &str) -> (u16, serde_json::Value) {
@@ -47,6 +54,13 @@ fn ocre_errors_carry_a_status_and_hide_internals() {
     assert_eq!(body["errors"][0]["extensions"]["status"], 400);
     let (_, body) = run(r#"{"query": "{ broken }"}"#);
     assert_eq!(body["errors"][0]["message"], "Internal server error");
+    let (_, body) = run(r#"{"query": "{ rejected }"}"#);
+    assert_eq!(body["errors"][0]["message"], "Validation failed");
+    assert_eq!(body["errors"][0]["extensions"]["status"], 422);
+    assert_eq!(
+        body["errors"][0]["extensions"]["fields"],
+        serde_json::json!({"title": ["can't be blank"], "body": ["can't be blank"]})
+    );
 }
 
 #[test]

@@ -34,10 +34,15 @@ free-plan limits an agent needs.
 |---|---|
 | `ocre new [name]` | App skeleton. In a terminal, asks for anything flags did not answer |
 | `ocre login` | Cloudflare login in the browser, unless already logged in |
-| `ocre g scaffold <Model> field:type...` | Migration, model, form, CRUD handlers, routes, templates; registers the module in `src/lib.rs`. In an API-only app: same as `ocre g api` |
-| `ocre g api <Model> field:type... [--graphql]` | JSON REST resource under `/api/<plural>`; `--graphql` also exposes it on `/graphql` |
-| `ocre g migration <name>` | Empty numbered migration |
+| `ocre g model <Model> field:type...` | Migration and `src/models/<model>.rs`: struct, validations, queries, associations |
+| `ocre g scaffold <Model> field:type...` | Model (unless it exists) plus HTML CRUD: handlers, routes, templates; registers modules in `src/lib.rs`. In an API-only app: same as `ocre g api` |
+| `ocre g api <Model> field:type... [--graphql]` | Model (unless it exists) plus JSON REST resource under `/api/<plural>`; `--graphql` also exposes it on `/graphql` |
+| `ocre g migration <name> [field:type...]` | Numbered migration; `create_<table>`, `add_<x>_to_<table>` and `remove_<x>_from_<table>` get their SQL from the name and fields |
 | `ocre migrate [--remote]` | Apply D1 migrations |
+| `ocre migrate --status [--remote]` | Show wrangler's pending-migrations table; `--json` lists them in `pending` |
+| `ocre db seed [--remote]` | Run `db/seeds.sql` |
+| `ocre db reset` | Local only: delete `.wrangler/state/v3/d1`, apply migrations, run `db/seeds.sql` if present |
+| `ocre sql "<query>" [--remote]` | Run SQL and print the rows as a table; `--json` returns wrangler's results in `rows` |
 | `ocre dev [--port N]` | Local migrations, then `wrangler dev` |
 | `ocre deploy` | Existing database: migrate, then deploy. New database: deploy (creates it), then migrate |
 
@@ -54,9 +59,29 @@ free-plan limits an agent needs.
 | `--yes`, `-y` | Never prompt, even in a terminal | |
 | `--ocre-path <dir>` | Use a local `crates/ocre` instead of the git dependency | git |
 
-Field types: `string`, `text`, `integer`, `float`, `boolean`. Scaffold routes:
-`GET /posts`, `GET /posts/new`, `POST /posts`, `GET /posts/{id}`,
-`GET /posts/{id}/edit`, `POST /posts/{id}` (update), `POST /posts/{id}/delete`.
+Field types: `string`, `text`, `integer`, `float`, `boolean`, `date`,
+`datetime`, `references` (`author:references` adds `author_id` with a foreign
+key, `ON DELETE CASCADE`). Suffixes: `?` optional (NULL allowed), `^` unique.
+Scaffold routes: `GET /posts`, `GET /posts/new`, `POST /posts`,
+`GET /posts/{id}`, `GET /posts/{id}/edit`, `POST /posts/{id}` (update),
+`POST /posts/{id}/delete`.
+
+## Models
+
+Models are plain generated Rust, not derive macros: `ocre g model Post
+title:string^ author:references` writes `src/models/post.rs` with the `Post`
+struct, `NewPost` and `PostChanges` (the create and update inputs), their
+`validate()`, and `all`, `count`, `find`, `find_many`, `create`, `update`,
+`delete`, plus `post.author(&ctx)` and, in `author.rs`, `author.posts(&ctx,
+page)`. Every query and rule is visible in one file, so people and agents can
+read, grep and change it.
+
+Validation collects every error before answering, with Rails' messages:
+`create` and `update` add uniqueness ("has already been taken") and
+foreign-key ("must exist") checks. A failed validation is `Error::Invalid`,
+status 422: HTML forms re-render with the messages and the typed values, JSON
+answers `{"error": {"status": 422, "message": "Validation failed", "fields":
+{"title": ["can't be blank"]}}}`, GraphQL puts `fields` in `extensions`.
 
 ## JSON APIs
 
@@ -71,13 +96,12 @@ Field types: `string`, `text`, `integer`, `float`, `boolean`. Scaffold routes:
 | `DELETE /api/posts/{id}` | Delete; `204` |
 
 Errors are JSON: `{"error": {"status": 404, "message": "Not found"}}`;
-internal details are logged, never returned. The module exposes `list`,
-`find`, `create`, `update` and `delete` functions, which the REST handlers and
-the GraphQL resolvers share. When a `CREATE TABLE` migration for the model
-already exists (after `ocre g scaffold`), it is reused.
+internal details are logged, never returned. The handlers and the GraphQL
+resolvers call the model, so both share its rules. When the model already
+exists (after `ocre g scaffold` or `ocre g model`), it is reused.
 
 With `--graphql`, the same resource gets `posts(limit, offset)`, `post(id)`,
-`createPost(input)`, `updatePost(id, changes)` and `deletePost(id)` on
+`createPost(input)`, `updatePost(id, patch)` and `deletePost(id)` on
 `POST /graphql`, and GraphiQL on `GET /graphql`. GraphQL is opt-in because it
 costs on the free plan: about 1.1 MB more WebAssembly, and 20-60 ms of CPU
 each time a new Worker instance starts, measured with `wrangler tail` (the

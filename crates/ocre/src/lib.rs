@@ -9,24 +9,29 @@
 
 mod api;
 mod error;
+mod fields;
 /// GraphQL support (feature `graphql`).
 #[cfg(feature = "graphql")]
 pub mod graphql;
 #[cfg(feature = "html")]
 mod htmx;
+mod names;
 mod runtime;
 mod sql;
 #[cfg(test)]
 mod test_util;
+mod validate;
 #[cfg(feature = "html")]
 mod view;
 
 pub use api::{ApiError, ApiResult, Created, Json, Page};
 pub use error::{Error, OptionExt, Result};
+pub use fields::{optional, patch};
 #[cfg(feature = "html")]
 pub use htmx::Htmx;
 pub use runtime::{Ctx, Db, serve};
-pub use sql::{IntoParam, MAX_SAFE_INTEGER, Param, bool_from_sql};
+pub use sql::{IntoParam, MAX_SAFE_INTEGER, Param, Statement, bool_from_sql};
+pub use validate::{FieldError, Validator};
 #[cfg(feature = "html")]
 pub use view::render;
 

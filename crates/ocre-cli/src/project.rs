@@ -39,11 +39,6 @@ impl Project {
         let api_only = read_api_mode(&root.join("Cargo.toml"));
         Ok(Self { root, database_name, api_only })
     }
-
-    /// Path relative to the app root, for reports.
-    pub fn relative(&self, path: &Path) -> String {
-        path.strip_prefix(&self.root).unwrap_or(path).display().to_string()
-    }
 }
 
 /// A missing or unreadable Cargo.toml means a full-stack app; cargo reports

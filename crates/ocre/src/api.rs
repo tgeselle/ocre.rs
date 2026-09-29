@@ -32,9 +32,13 @@ impl From<worker::Error> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let (status, message) = self.0.into_public();
-        let body = serde_json::json!({ "error": { "status": status.as_u16(), "message": message } });
-        (status, axum::Json(body)).into_response()
+        let public = self.0.into_public();
+        let fields = (!public.fields.is_empty()).then(|| public.fields_json());
+        let mut error = serde_json::json!({ "status": public.status.as_u16(), "message": public.message });
+        if let Some(fields) = fields {
+            error["fields"] = fields;
+        }
+        (public.status, axum::Json(serde_json::json!({ "error": error }))).into_response()
     }
 }
 

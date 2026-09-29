@@ -29,8 +29,35 @@ case "$1" in
         cat "$state/d1_list.json"
         ;;
       migrations)
-        fail_if migrate_fails
-        echo "Migrations applied to $4 ($5)"
+        case "$3" in
+          list)
+            fail_if migrations_list_fails
+            echo "Resource location: ${5#--}"
+            if [ -e "$state/pending_migrations" ]; then
+              echo "Migrations to be applied:"
+              echo "┌───────────┐"
+              echo "│ Name      │"
+              echo "├───────────┤"
+              sed 's/.*/│ & │/' "$state/pending_migrations"
+              echo "└───────────┘"
+            else
+              echo "✅ No migrations to apply!"
+            fi
+            ;;
+          *)
+            fail_if migrate_fails
+            echo "Migrations applied to $4 ($5)"
+            ;;
+        esac
+        ;;
+      execute)
+        fail_if execute_fails
+        if [ "$4" = "--command" ]; then
+          # `--json`: the rows, from execute.json (default: one empty result).
+          if [ -e "$state/execute.json" ]; then cat "$state/execute.json"; else echo '[{"results":[],"success":true}]'; fi
+        else
+          echo "Executed $5 on $3 ($6)"
+        fi
         ;;
     esac
     ;;

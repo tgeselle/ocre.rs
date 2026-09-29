@@ -1,60 +1,45 @@
-//! `ocre generate api`: JSON REST resource, plus GraphQL with `--graphql`.
+//! `ocre generate api`: model + JSON REST resource, plus GraphQL with `--graphql`.
 
-use std::{fmt::Write as _, path::PathBuf};
+use std::fmt::Write as _;
 
-use super::{Field, FieldType, create_table_migration, parse_fields, register_module};
-use crate::{
-    CliResult,
-    names::ModelNames,
-    output::{CliError, Report},
-    project::Project,
+use super::{
+    Edits,
+    fields::{Field, FieldType, parse_fields},
+    model::ensure_model,
+    register_routes,
 };
+use crate::{CliResult, names::ModelNames, output::CliError, project::Project};
 
 const QUERIES_MARKER: &str = "// ocre:graphql-queries";
 const MUTATIONS_MARKER: &str = "// ocre:graphql-mutations";
 const GRAPHQL_DEP: &str = r#"async-graphql = { version = "7.2.1", default-features = false, features = ["graphiql", "custom-error-conversion"] }"#;
 
-pub fn api(project: &Project, name: &str, field_specs: &[String], graphql: bool) -> CliResult {
+pub fn api(project: &Project, name: &str, specs: &[String], graphql: bool) -> CliResult {
     let names = ModelNames::parse(name)?;
-    let fields = parse_fields(field_specs)?;
+    let fields = parse_fields(specs)?;
+    let command = format!("ocre g api {name} {}{}", specs.join(" "), if graphql { " --graphql" } else { "" });
     let module = format!("{}_api", names.plural);
-    let module_path = project.root.join("src").join(format!("{module}.rs"));
-    if module_path.exists() {
-        return Err(CliError::new(format!("{} already exists", project.relative(&module_path))).hint(
-            "api creates new resources only; edit the existing module, or add a migration with `ocre g migration`",
-        ));
-    }
-
-    // Compute every change before writing, so a failure leaves nothing half-done.
-    let lib_path = project.root.join("src/lib.rs");
-    let mut lib = register_module(&std::fs::read_to_string(&lib_path)?, &module)?;
-    let mut files: Vec<(PathBuf, String)> = create_table_migration(project, &names, &fields)?.into_iter().collect();
-    let command = format!("ocre g api {name} {}{}", field_specs.join(" "), if graphql { " --graphql" } else { "" });
-    files.push((module_path, module_rs(&names, &fields, &command, graphql)));
-    let mut updated = vec![(lib_path.clone(), String::new())];
+    let mut edits = Edits::new(project);
+    ensure_model(&mut edits, &names, &fields, &command)?;
+    edits.create(&format!("src/{module}.rs"), module_rs(&names, &fields, &command, graphql))?;
+    register_routes(&mut edits, &module)?;
     if graphql {
-        let cargo_path = project.root.join("Cargo.toml");
-        updated.push((cargo_path.clone(), with_graphql(&std::fs::read_to_string(&cargo_path)?)?));
-        let schema_path = project.root.join("src/graphql.rs");
-        if schema_path.exists() {
-            let schema = add_to_schema(&std::fs::read_to_string(&schema_path)?, &module, &names)?;
-            updated.push((schema_path, schema));
-        } else {
-            lib = register_module(&lib, "graphql")?;
-            files.push((schema_path, new_schema(&module, &names)));
+        let cargo = edits.read("Cargo.toml")?.unwrap_or_default();
+        edits.update("Cargo.toml", with_graphql(&cargo)?);
+        match edits.read("src/graphql.rs")? {
+            Some(schema) => edits.update("src/graphql.rs", add_to_schema(&schema, &module, &names)?),
+            None => {
+                edits.create("src/graphql.rs", new_schema(&module, &names))?;
+                let lib = edits.read("src/lib.rs")?.unwrap_or_default();
+                let lib = super::insert_after_marker(&lib, super::MODULES_MARKER, "mod graphql;")
+                    .expect("register_routes checked the marker");
+                let lib = super::insert_after_marker(&lib, super::ROUTES_MARKER, ".merge(graphql::routes())")
+                    .expect("register_routes checked the marker");
+                edits.update("src/lib.rs", lib);
+            }
         }
     }
-    updated[0].1 = lib;
-
-    let mut report = Report::new("generate api");
-    for (path, contents) in files {
-        std::fs::write(&path, contents)?;
-        report.created.push(project.relative(&path));
-    }
-    for (path, contents) in updated {
-        std::fs::write(&path, contents)?;
-        report.updated.push(project.relative(&path));
-    }
+    let mut report = edits.apply("generate api")?;
     report.next = vec![
         "ocre migrate".to_owned(),
         "ocre dev".to_owned(),
@@ -167,190 +152,143 @@ fn add_to_schema(schema: &str, module: &str, names: &ModelNames) -> Result<Strin
     }
 }
 
-/// Validation shared by the create and update inputs. `optional` fields are
-/// `Option<T>` (PATCH): only present values are checked.
-fn checks(fields: &[Field], optional: bool) -> String {
-    let mut out = String::new();
-    for field in fields {
-        let (name, label) = (&field.name, field.label());
-        let condition = match field.ty {
-            FieldType::String | FieldType::Text => format!("{name}.trim().is_empty()"),
-            FieldType::Integer => format!("{name}.unsigned_abs() > ocre::MAX_SAFE_INTEGER as u64"),
-            FieldType::Float | FieldType::Boolean => continue,
-        };
-        let message = if field.ty.is_textual() { "is required" } else { "is out of range" };
-        let (open, value) = if optional {
-            (format!("if let Some({name}) = &self.{name} {{\n            if "), "")
-        } else {
-            ("if self.".to_owned(), "")
-        };
-        let close = if optional { "\n        }" } else { "" };
-        let inner_indent = if optional { "                " } else { "            " };
-        let end_indent = if optional { "            " } else { "        " };
-        writeln!(
-            out,
-            "        {open}{value}{condition} {{\n{inner_indent}return Err(Error::bad_request(\"{label} {message}.\"));\n{end_indent}}}{close}"
-        )
-        .expect("writing to a String");
-    }
-    out
-}
-
 fn module_rs(names: &ModelNames, fields: &[Field], command: &str, graphql: bool) -> String {
     let ModelNames { model, singular, plural, human_plural, .. } = names;
-    let columns = fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(", ");
-    let placeholders = (1..=fields.len()).map(|i| format!("?{i}")).collect::<Vec<_>>().join(", ");
-    let coalesce = fields
-        .iter()
-        .enumerate()
-        .map(|(i, f)| format!("{0} = COALESCE(?{1}, {0})", f.name, i + 1))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let id_placeholder = fields.len() + 1;
-    let input_params = fields.iter().map(|f| format!("input.{}", f.name)).collect::<Vec<_>>().join(", ");
-    let change_params = fields.iter().map(|f| format!("changes.{}", f.name)).collect::<Vec<_>>().join(", ");
-
-    let (gql_object, gql_input) = if graphql { (", SimpleObject", ", InputObject") } else { ("", "") };
-    let mut model_fields = String::new();
-    let mut new_fields = String::new();
-    let mut change_fields = String::new();
-    for field in fields {
-        let (name, ty) = (&field.name, field.ty.rust_type());
-        if field.ty == FieldType::Boolean {
-            model_fields.push_str("    #[serde(deserialize_with = \"ocre::bool_from_sql\")]\n");
-            new_fields.push_str("    #[serde(default)]\n");
-            if graphql {
-                new_fields.push_str("    #[graphql(default)]\n");
-            }
-        }
-        writeln!(model_fields, "    pub {name}: {ty},").expect("writing to a String");
-        writeln!(new_fields, "    pub {name}: {ty},").expect("writing to a String");
-        writeln!(change_fields, "    pub {name}: Option<{ty}>,").expect("writing to a String");
-    }
-    let new_checks = checks(fields, false);
-    let change_checks = checks(fields, true);
-    let gql_imports = if graphql { "use async_graphql::{Context, InputObject, Object, SimpleObject};\n" } else { "" };
-    let gql_resolvers = if graphql { resolvers(names) } else { String::new() };
-
+    let gql = if graphql { graphql_rs(names, fields) } else { String::new() };
+    let also = if graphql { " and GraphQL" } else { "" };
     format!(
         r#"//! {human_plural} JSON API{also}. Generated by `{command}`.
+//! Queries and rules live in the model, `crate::models::{singular}`.
 //!
 //! GET /api/{plural}?limit=&offset=   list, newest first
 //! GET /api/{plural}/{{id}}             one
-//! POST /api/{plural}                  create (every field), 201
-//! PATCH /api/{plural}/{{id}}           update (only the fields sent)
+//! POST /api/{plural}                  create (every required field), 201
+//! PATCH /api/{plural}/{{id}}           update (only the fields sent; null clears an optional field)
 //! DELETE /api/{plural}/{{id}}          delete, 204
+//! Failed validations answer 422 with {{"error": {{"fields": {{"title": ["can't be blank"]}}}}}}.
 
-{gql_imports}use axum::{{
+use axum::{{
     Router,
     extract::{{Path, State}},
     http::StatusCode,
     routing::get,
 }};
-use ocre::{{ApiResult, Created, Ctx, Error, Json, OptionExt, Page, Result, params}};
-use serde::{{Deserialize, Serialize}};
+use ocre::{{ApiResult, Created, Ctx, Error, Json, OptionExt, Page}};
+
+use crate::models::{singular}::{{self, New{model}, {model}, {model}Changes}};
 
 pub fn routes() -> Router<Ctx> {{
     Router::new()
-        .route("/api/{plural}", get(index_handler).post(create_handler))
-        .route("/api/{plural}/{{id}}", get(show_handler).patch(update_handler).delete(delete_handler))
+        .route("/api/{plural}", get(index).post(create))
+        .route("/api/{plural}/{{id}}", get(show).patch(update).delete(delete))
 }}
 
-/// Row of the `{plural}` table.
-#[derive(Deserialize, Serialize{gql_object})]
-pub struct {model} {{
-    pub id: i64,
-{model_fields}    pub created_at: String,
-    pub updated_at: String,
+async fn index(State(ctx): State<Ctx>, page: Page) -> ApiResult<Json<Vec<{model}>>> {{
+    Ok(Json({singular}::all(&ctx, page).await?))
 }}
 
-/// Body of `POST /api/{plural}`.
-#[derive(Deserialize{gql_input})]
-pub struct New{model} {{
-{new_fields}}}
-
-/// Body of `PATCH /api/{plural}/{{id}}`: absent fields keep their value.
-#[derive(Deserialize{gql_input})]
-pub struct {model}Changes {{
-{change_fields}}}
-
-impl New{model} {{
-    fn validate(&self) -> Result<()> {{
-{new_checks}        Ok(())
-    }}
+async fn show(State(ctx): State<Ctx>, Path(id): Path<i64>) -> ApiResult<Json<{model}>> {{
+    Ok(Json({singular}::find(&ctx, id).await?.or_404()?))
 }}
 
-impl {model}Changes {{
-    fn validate(&self) -> Result<()> {{
-{change_checks}        Ok(())
-    }}
+async fn create(State(ctx): State<Ctx>, Json(new): Json<New{model}>) -> ApiResult<Created<{model}>> {{
+    Ok(Created({singular}::create(&ctx, new).await?))
 }}
 
-pub async fn list(ctx: &Ctx, page: Page) -> Result<Vec<{model}>> {{
-    ctx.db()?.all("SELECT * FROM {plural} ORDER BY id DESC LIMIT ?1 OFFSET ?2", params![page.limit, page.offset]).await
-}}
-
-pub async fn find(ctx: &Ctx, id: i64) -> Result<Option<{model}>> {{
-    ctx.db()?.first("SELECT * FROM {plural} WHERE id = ?1", params![id]).await
-}}
-
-pub async fn create(ctx: &Ctx, input: New{model}) -> Result<{model}> {{
-    input.validate()?;
-    ctx.db()?
-        .first("INSERT INTO {plural} ({columns}) VALUES ({placeholders}) RETURNING *", params![{input_params}])
-        .await?
-        .ok_or_else(|| Error::internal("INSERT ... RETURNING returned no row"))
-}}
-
-/// `None` when there is no {singular} with this id.
-pub async fn update(ctx: &Ctx, id: i64, changes: {model}Changes) -> Result<Option<{model}>> {{
-    changes.validate()?;
-    ctx.db()?
-        .first(
-            "UPDATE {plural} SET {coalesce}, updated_at = datetime('now') WHERE id = ?{id_placeholder} RETURNING *",
-            params![{change_params}, id],
-        )
-        .await
-}}
-
-/// `false` when there is no {singular} with this id.
-pub async fn delete(ctx: &Ctx, id: i64) -> Result<bool> {{
-    Ok(ctx.db()?.execute("DELETE FROM {plural} WHERE id = ?1", params![id]).await? > 0)
-}}
-
-async fn index_handler(State(ctx): State<Ctx>, page: Page) -> ApiResult<Json<Vec<{model}>>> {{
-    Ok(Json(list(&ctx, page).await?))
-}}
-
-async fn show_handler(State(ctx): State<Ctx>, Path(id): Path<i64>) -> ApiResult<Json<{model}>> {{
-    Ok(Json(find(&ctx, id).await?.or_404()?))
-}}
-
-async fn create_handler(State(ctx): State<Ctx>, Json(input): Json<New{model}>) -> ApiResult<Created<{model}>> {{
-    Ok(Created(create(&ctx, input).await?))
-}}
-
-async fn update_handler(
+async fn update(
     State(ctx): State<Ctx>,
     Path(id): Path<i64>,
     Json(changes): Json<{model}Changes>,
 ) -> ApiResult<Json<{model}>> {{
-    Ok(Json(update(&ctx, id, changes).await?.or_404()?))
+    Ok(Json({singular}::update(&ctx, id, changes).await?.or_404()?))
 }}
 
-async fn delete_handler(State(ctx): State<Ctx>, Path(id): Path<i64>) -> ApiResult<StatusCode> {{
-    if delete(&ctx, id).await? {{ Ok(StatusCode::NO_CONTENT) }} else {{ Err(Error::NotFound.into()) }}
+async fn delete(State(ctx): State<Ctx>, Path(id): Path<i64>) -> ApiResult<StatusCode> {{
+    if {singular}::delete(&ctx, id).await? {{ Ok(StatusCode::NO_CONTENT) }} else {{ Err(Error::NotFound.into()) }}
 }}
-{gql_resolvers}"#,
-        also = if graphql { " and GraphQL" } else { "" },
+{gql}"#
     )
 }
 
-fn resolvers(names: &ModelNames) -> String {
+/// GraphQL types mirror the model: `PostNode` (output), `NewPostInput`,
+/// `PostPatch` (`undefined` keeps a value, `null` clears an optional one).
+fn graphql_rs(names: &ModelNames, fields: &[Field]) -> String {
     let ModelNames { model, singular, plural, human_plural, .. } = names;
     let lower_plural = human_plural.to_lowercase();
+    let mut node_fields = String::new();
+    let mut node_values = String::new();
+    let mut input_fields = String::new();
+    let mut input_values = String::new();
+    let mut patch_fields = String::new();
+    let mut patch_values = String::new();
+    for field in fields {
+        let (name, ty, column) = (&field.name, field.rust_type(), field.column_type());
+        writeln!(node_fields, "    pub {name}: {column},").expect("writing to a String");
+        writeln!(node_values, "            {name}: record.{name},").expect("writing to a String");
+        if field.ty == FieldType::Boolean {
+            input_fields.push_str("    #[graphql(default)]\n");
+        }
+        writeln!(input_fields, "    pub {name}: {column},").expect("writing to a String");
+        writeln!(input_values, "            {name}: input.{name},").expect("writing to a String");
+        if field.optional {
+            writeln!(patch_fields, "    pub {name}: MaybeUndefined<{ty}>,").expect("writing to a String");
+            writeln!(
+                patch_values,
+                "            {name}: match patch.{name} {{\n                MaybeUndefined::Undefined => None,\n                MaybeUndefined::Null => Some(None),\n                MaybeUndefined::Value(value) => Some(Some(value)),\n            }},"
+            )
+            .expect("writing to a String");
+        } else {
+            writeln!(patch_fields, "    pub {name}: Option<{ty}>,").expect("writing to a String");
+            writeln!(patch_values, "            {name}: patch.{name},").expect("writing to a String");
+        }
+    }
+    let uses_maybe = if fields.iter().any(|f| f.optional) { ", MaybeUndefined" } else { "" };
     format!(
         r#"
+// ---- GraphQL ----
+
+use async_graphql::{{Context, InputObject, Object, SimpleObject{uses_maybe}}};
+
+#[derive(SimpleObject)]
+#[graphql(name = "{model}")]
+pub struct {model}Node {{
+    pub id: i64,
+{node_fields}    pub created_at: String,
+    pub updated_at: String,
+}}
+
+impl From<{model}> for {model}Node {{
+    fn from(record: {model}) -> Self {{
+        Self {{
+            id: record.id,
+{node_values}            created_at: record.created_at,
+            updated_at: record.updated_at,
+        }}
+    }}
+}}
+
+#[derive(InputObject)]
+pub struct New{model}Input {{
+{input_fields}}}
+
+impl From<New{model}Input> for New{model} {{
+    fn from(input: New{model}Input) -> Self {{
+        Self {{
+{input_values}        }}
+    }}
+}}
+
+#[derive(InputObject)]
+pub struct {model}Patch {{
+{patch_fields}}}
+
+impl From<{model}Patch> for {model}Changes {{
+    fn from(patch: {model}Patch) -> Self {{
+        Self {{
+{patch_values}        }}
+    }}
+}}
+
 #[derive(Default)]
 pub struct {model}Query;
 
@@ -362,12 +300,13 @@ impl {model}Query {{
         ctx: &Context<'_>,
         #[graphql(default = 50)] limit: i64,
         #[graphql(default = 0)] offset: i64,
-    ) -> async_graphql::Result<Vec<{model}>> {{
-        Ok(list(ctx.data::<Ctx>()?, Page::new(limit, offset)?).await?)
+    ) -> async_graphql::Result<Vec<{model}Node>> {{
+        let records = {singular}::all(ctx.data::<Ctx>()?, Page::new(limit, offset)?).await?;
+        Ok(records.into_iter().map(Into::into).collect())
     }}
 
-    async fn {singular}(&self, ctx: &Context<'_>, id: i64) -> async_graphql::Result<Option<{model}>> {{
-        Ok(find(ctx.data::<Ctx>()?, id).await?)
+    async fn {singular}(&self, ctx: &Context<'_>, id: i64) -> async_graphql::Result<Option<{model}Node>> {{
+        Ok({singular}::find(ctx.data::<Ctx>()?, id).await?.map(Into::into))
     }}
 }}
 
@@ -376,22 +315,17 @@ pub struct {model}Mutation;
 
 #[Object]
 impl {model}Mutation {{
-    async fn create_{singular}(&self, ctx: &Context<'_>, input: New{model}) -> async_graphql::Result<{model}> {{
-        Ok(create(ctx.data::<Ctx>()?, input).await?)
+    async fn create_{singular}(&self, ctx: &Context<'_>, input: New{model}Input) -> async_graphql::Result<{model}Node> {{
+        Ok({singular}::create(ctx.data::<Ctx>()?, input.into()).await?.into())
     }}
 
-    /// Only the fields given change. Errors with status 404 for unknown {lower_plural}.
-    async fn update_{singular}(
-        &self,
-        ctx: &Context<'_>,
-        id: i64,
-        changes: {model}Changes,
-    ) -> async_graphql::Result<{model}> {{
-        Ok(update(ctx.data::<Ctx>()?, id, changes).await?.or_404()?)
+    /// Errors with status 404 for unknown {lower_plural}.
+    async fn update_{singular}(&self, ctx: &Context<'_>, id: i64, patch: {model}Patch) -> async_graphql::Result<{model}Node> {{
+        Ok({singular}::update(ctx.data::<Ctx>()?, id, patch.into()).await?.or_404()?.into())
     }}
 
     async fn delete_{singular}(&self, ctx: &Context<'_>, id: i64) -> async_graphql::Result<bool> {{
-        if delete(ctx.data::<Ctx>()?, id).await? {{ Ok(true) }} else {{ Err(Error::NotFound.into()) }}
+        if {singular}::delete(ctx.data::<Ctx>()?, id).await? {{ Ok(true) }} else {{ Err(Error::NotFound.into()) }}
     }}
 }}
 "#

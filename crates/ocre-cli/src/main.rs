@@ -5,6 +5,7 @@
 //! (`{"ok": true, ...}` or `{"ok": false, "error", "hint"}`) and all tool
 //! output (wrangler, cargo) goes to stderr.
 
+mod db;
 mod generate;
 mod names;
 mod new;
@@ -87,6 +88,22 @@ enum Command {
         /// Apply to the production database on Cloudflare.
         #[arg(long)]
         remote: bool,
+        /// List pending migrations instead of applying them.
+        #[arg(long)]
+        status: bool,
+    },
+    /// Database tasks: seed, reset.
+    #[command(subcommand)]
+    Db(DbCommand),
+    /// Run SQL on the D1 database (local unless --remote) and print the rows.
+    ///
+    /// Example: `ocre sql "SELECT * FROM posts LIMIT 5"`.
+    Sql {
+        /// One or more SQL statements separated by `;`.
+        query: String,
+        /// Run on the production database on Cloudflare.
+        #[arg(long)]
+        remote: bool,
     },
     /// Apply local migrations, then run the app with `wrangler dev`.
     Dev {
@@ -99,25 +116,37 @@ enum Command {
 
 #[derive(Subcommand)]
 enum GenerateCommand {
-    /// CRUD resource: migration, model, handlers, routes and templates.
-    /// In an API-only app (`ocre new --api`) this is `ocre g api`.
+    /// Table, migration and `src/models/<model>.rs` (queries, validations,
+    /// associations). Scaffold and api create the model when it is missing.
     ///
-    /// Example: `ocre g scaffold Post title:string body:text published:boolean`.
-    /// Field types: string, text, integer, float, boolean.
-    Scaffold {
+    /// Example: `ocre g model Post title:string^ body:text author:references`.
+    /// Types: string, text, integer, float, boolean, date, datetime, references;
+    /// suffix `?` for optional, `^` for unique.
+    Model {
         /// Singular model name, PascalCase or snake_case (e.g. `BlogPost`).
         name: String,
         /// Fields as `name:type`.
         #[arg(required = true)]
         fields: Vec<String>,
     },
-    /// JSON REST resource under /api/<plural>; with --graphql, also GraphQL.
+    /// Model plus HTML pages for full CRUD.
+    /// In an API-only app (`ocre new --api`) this is `ocre g api`.
+    ///
+    /// Example: `ocre g scaffold Post title:string body:text published:boolean`.
+    Scaffold {
+        /// Singular model name, PascalCase or snake_case (e.g. `BlogPost`).
+        name: String,
+        /// Fields as `name:type` (see `ocre g model --help`).
+        #[arg(required = true)]
+        fields: Vec<String>,
+    },
+    /// Model plus a JSON REST resource under /api/<plural>; with --graphql, also GraphQL.
     ///
     /// Example: `ocre g api Post title:string body:text --graphql`.
     Api {
         /// Singular model name, PascalCase or snake_case (e.g. `BlogPost`).
         name: String,
-        /// Fields as `name:type`.
+        /// Fields as `name:type` (see `ocre g model --help`).
         #[arg(required = true)]
         fields: Vec<String>,
         /// Also expose the resource on /graphql. Adds ~1.1 MB of WebAssembly and
@@ -125,11 +154,28 @@ enum GenerateCommand {
         #[arg(long)]
         graphql: bool,
     },
-    /// Empty numbered SQL migration file.
+    /// Numbered SQL migration. `create_<table>`, `add_<columns>_to_<table>` and
+    /// `remove_<columns>_from_<table>` names get their SQL from the fields.
+    ///
+    /// Example: `ocre g migration add_slug_to_posts slug:string^`.
     Migration {
         /// Migration name in snake_case (e.g. `add_slug_to_posts`).
         name: String,
+        /// Columns, as `name:type` (see `ocre g model --help`).
+        fields: Vec<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum DbCommand {
+    /// Run db/seeds.sql (local database unless --remote).
+    Seed {
+        /// Seed the production database on Cloudflare.
+        #[arg(long)]
+        remote: bool,
+    },
+    /// Local only: delete the local database, apply every migration, then run db/seeds.sql if present.
+    Reset,
 }
 
 /// `--flag` / `--no-flag` pair: `None` when neither was given.
@@ -186,10 +232,17 @@ fn main() -> ExitCode {
         Command::Generate(GenerateCommand::Api { name, fields, graphql }) => {
             Project::find().and_then(|project| generate::api(&project, &name, &fields, graphql))
         }
-        Command::Generate(GenerateCommand::Migration { name }) => {
-            Project::find().and_then(|project| generate::migration(&project, &name))
+        Command::Generate(GenerateCommand::Migration { name, fields }) => {
+            Project::find().and_then(|project| generate::migration(&project, &name, &fields))
         }
-        Command::Migrate { remote } => wrangler::migrate(remote, json),
+        Command::Generate(GenerateCommand::Model { name, fields }) => {
+            Project::find().and_then(|project| generate::model(&project, &name, &fields))
+        }
+        Command::Migrate { remote, status: true } => db::status(remote, json),
+        Command::Migrate { remote, status: false } => wrangler::migrate(remote, json),
+        Command::Db(DbCommand::Seed { remote }) => db::seed(remote, json),
+        Command::Db(DbCommand::Reset) => db::reset(json),
+        Command::Sql { query, remote } => db::sql(&query, remote, json),
         Command::Dev { port } => wrangler::dev(port, json),
         Command::Deploy => wrangler::deploy(json),
     };

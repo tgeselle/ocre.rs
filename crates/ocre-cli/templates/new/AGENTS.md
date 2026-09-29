@@ -11,26 +11,38 @@ on stdout (`"ok": true|false`, plus `error` and `hint` on failure).
 
 | Task | Command |
 |---|---|
-| CRUD resource (HTML pages; JSON in API-only apps) | `ocre g scaffold Post title:string body:text published:boolean` |
+| Model only: table, validations, queries, associations | `ocre g model Author name:string^ bio:text?` |
+| CRUD resource (HTML pages; JSON in API-only apps) | `ocre g scaffold Post title:string body:text published:boolean author:references` |
 | JSON REST resource, `/api/posts` | `ocre g api Post title:string body:text` |
 | Same, also on `/graphql` (costs CPU, see below) | `ocre g api Post title:string --graphql` |
-| Empty migration | `ocre g migration add_slug_to_posts` |
+| Add columns (SQL inferred from the name) | `ocre g migration add_slug_to_posts slug:string?` |
+| Remove a column | `ocre g migration remove_slug_from_posts` |
+| Empty migration (data changes, custom SQL) | `ocre g migration backfill_slugs` |
 | Apply migrations locally | `ocre migrate` |
+| Pending migrations | `ocre migrate --status` |
+| Load seed data (`db/seeds.sql`) | `ocre db seed` |
+| Recreate local database (migrations + seeds) | `ocre db reset` |
+| Query the database (JSON rows with `--json`) | `ocre sql "SELECT * FROM posts LIMIT 5"` |
 | Run locally (http://localhost:8787) | `ocre dev` |
 | Cloudflare login (browser; once) | `ocre login` |
 | Deploy + remote migrations | `ocre deploy` |
 | Type-check | `cargo check --target wasm32-unknown-unknown` |
 
-Scaffold field types: `string`, `text`, `integer`, `float`, `boolean`.
-Integers must stay within ±`ocre::MAX_SAFE_INTEGER` (2^53 - 1): D1 returns
-numbers as JavaScript numbers. Scaffolded forms already reject larger values.
+Field types: `string`, `text`, `integer`, `float`, `boolean`, `date`
+(`YYYY-MM-DD`), `datetime`, `references` (`author:references` adds
+`author_id`, a foreign key deleted with its parent). Suffix `?` makes a field
+optional (NULL allowed), `^` unique. Integers must stay within
+±`ocre::MAX_SAFE_INTEGER` (2^53 - 1): D1 returns numbers as JavaScript
+numbers; generated validations already reject larger values.
 
 ## Layout
 
 ```
 src/lib.rs          entry point and router; keep the `// ocre:` marker comments
-src/<plural>.rs     HTML resource: model, form, routes, handlers
-src/<plural>_api.rs JSON resource: list/find/create/update/delete, REST handlers, GraphQL resolvers
+src/models/<model>.rs  the model: struct, New<Model>/<Model>Changes, validate(),
+                    all/count/find/find_many/create/update/delete, associations
+src/<plural>.rs     HTML resource: form parsing, handlers, routes (calls the model)
+src/<plural>_api.rs JSON resource: REST handlers and GraphQL resolvers (call the model)
 src/graphql.rs      GraphQL schema (when used); keep the `// ocre:graphql-*` markers
 templates/          askama templates, compiled into the binary
 migrations/         numbered D1 SQL migrations, applied in order
@@ -49,15 +61,28 @@ wrangler.toml       Cloudflare config; the D1 binding must be named DB
   `#[serde(deserialize_with = "ocre::bool_from_sql")]`.
 - Missing record: `.or_404()?`. Bad input: `Error::bad_request("...")`.
   Unexpected failure: `Error::internal("...")` (logged, not shown to users).
+- Validation: collect every problem with `ocre::Validator` (`required`,
+  `max_length`, `range`, `email`, `inclusion`, `date`, `check`, ...) and end
+  with `v.finish()?`, which returns `Error::Invalid` (422). JSON answers
+  `{"error": {"fields": {"title": ["can't be blank"]}}}`; generated HTML forms
+  re-render with the messages and the typed values.
+- Data rules live in the model (`src/models/<model>.rs`): `validate()` for
+  checks without the database, `create`/`update` for uniqueness and foreign
+  keys. Handlers and GraphQL resolvers only call model functions. After a
+  migration that changes columns, update the model struct, `New<Model>`,
+  `<Model>Changes`, `validate()` and the SQL in `create`/`update`.
+- Load associations for many rows with `find_many(ctx, &ids)` (one query),
+  never `find` in a loop.
 - Templates escape `{{ value }}` by default; never mark user input `|safe`.
 - Change the schema only with a new migration file; never edit an applied one.
-- New module: `ocre g scaffold` registers it in `src/lib.rs`. By hand, add
+- New module: generators register it in `src/lib.rs`. By hand, add
   `mod name;` under `// ocre:modules` and `.merge(name::routes())` under
-  `// ocre:routes`.
+  `// ocre:routes`. Keep `// ocre:models` and `// ocre:associations` too.
 - JSON handlers return `ApiResult<T>` (errors become `{"error": {"status",
   "message"}}`), take bodies with `ocre::Json<T>` and lists with `Page`.
-  Put logic in the module's `list`/`find`/`create`/`update`/`delete`
-  functions so REST and GraphQL share it.
+  Optional fields use `#[serde(default, deserialize_with = "ocre::optional")]`
+  (empty or `null` = `None`) and, in `<Model>Changes`,
+  `deserialize_with = "ocre::patch"` (missing keeps the value, `null` clears it).
 
 ## Free-plan limits (design for them)
 

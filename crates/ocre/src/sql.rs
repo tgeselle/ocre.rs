@@ -12,6 +12,19 @@ pub(crate) enum Value {
     Text(String),
 }
 
+/// One SQL statement with its parameters, for [`Db::batch`](crate::Db::batch).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Statement {
+    pub sql: String,
+    pub params: Vec<Param>,
+}
+
+impl Statement {
+    pub fn new(sql: impl Into<String>, params: Vec<Param>) -> Self {
+        Self { sql: sql.into(), params }
+    }
+}
+
 /// Types that can be bound as query parameters.
 pub trait IntoParam {
     fn into_param(self) -> Param;

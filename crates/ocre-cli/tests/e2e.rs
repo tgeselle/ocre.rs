@@ -134,8 +134,11 @@ fn api_only_app_serves_rest_and_graphql_on_workerd() {
         (404, serde_json::json!({"error": {"status": 404, "message": "Not found"}}))
     );
     assert_eq!(
-        json(&server, "POST", "/api/books", r#"{"title": " ", "pages": 1}"#).1["error"]["message"],
-        "Title is required."
+        json(&server, "POST", "/api/books", r#"{"title": " ", "pages": 1}"#),
+        (
+            422,
+            serde_json::json!({"error": {"status": 422, "message": "Validation failed", "fields": {"title": ["can't be blank"]}}})
+        )
     );
     assert_eq!(json(&server, "POST", "/api/books", "{").0, 400);
     assert_eq!(json(&server, "POST", "/api/posts", r#"{"title": "Hi", "body": "there"}"#).0, 201, "starter resource");
@@ -150,7 +153,7 @@ fn api_only_app_serves_rest_and_graphql_on_workerd() {
         graphql(r#"mutation { createBook(input: {title: "Emma", pages: 10, available: true}) { id available } }"#);
     assert_eq!(created["data"]["createBook"]["available"], true);
     assert_eq!(created["data"]["createBook"]["id"], 2);
-    let missing = graphql("mutation { updateBook(id: 9, changes: {}) { id } }");
+    let missing = graphql("mutation { updateBook(id: 9, patch: {}) { id } }");
     assert_eq!(missing["errors"][0]["extensions"]["status"], 404);
     assert_eq!(get(&server, "/graphql").status, 200, "GraphiQL");
 
@@ -190,8 +193,10 @@ fn generated_app_serves_full_crud_on_workerd() {
     assert!(shown.body.contains("<dd>Renamed</dd>") && shown.body.contains("<dd>false</dd>"));
 
     // Validation and missing records.
-    let invalid = post(&server, "/posts", &[("title", "  "), ("body", "x")]);
-    assert_eq!((invalid.status, invalid.body.as_str()), (400, "<h1>400</h1><p>Title is required.</p>"));
+    let invalid = post(&server, "/posts", &[("title", "  "), ("body", "kept")]);
+    assert_eq!(invalid.status, 422);
+    assert!(invalid.body.contains("<li>Title can&#39;t be blank</li>"), "{}", invalid.body);
+    assert!(invalid.body.contains(">kept</textarea>"), "form keeps what was typed: {}", invalid.body);
     assert_eq!(get(&server, "/posts/999").status, 404);
     assert_eq!(post(&server, "/posts/999", &[("title", "a"), ("body", "b")]).status, 404);
     assert_eq!(post(&server, "/posts/999/delete", &[]).status, 404);
@@ -205,11 +210,11 @@ fn generated_app_serves_full_crud_on_workerd() {
     assert!(shown.body.contains("<dd>9007199254740991</dd>"), "{}", shown.body);
     let too_big =
         post(&server, "/books", &[("title", "x"), ("pages", "1"), ("rating", "1"), ("big", "9007199254740992")]);
-    assert_eq!((too_big.status, too_big.body.as_str()), (400, "<h1>400</h1><p>Big is out of range.</p>"));
-    assert_eq!(
-        post(&server, "/books", &[("title", "x"), ("pages", "many"), ("rating", "1"), ("big", "1")]).status,
-        422
-    );
+    assert_eq!(too_big.status, 422);
+    assert!(too_big.body.contains("<li>Big must be less than or equal to 9007199254740991</li>"), "{}", too_big.body);
+    let typo = post(&server, "/books", &[("title", "x"), ("pages", "many"), ("rating", "1"), ("big", "1")]);
+    assert_eq!(typo.status, 422);
+    assert!(typo.body.contains("<li>Pages is not a number</li>") && typo.body.contains("value=\"many\""));
 
     // Delete.
     let deleted = post(&server, "/posts/1/delete", &[]);

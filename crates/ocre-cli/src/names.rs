@@ -3,7 +3,7 @@
 use crate::output::CliError;
 
 /// Names derived from a singular model name such as `BlogPost`.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ModelNames {
     /// `BlogPost`
     pub model: String,

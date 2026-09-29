@@ -1,4 +1,5 @@
 //! Everything that runs wrangler: login, migrate, dev, deploy.
+//! Database commands built on it live in `db.rs`.
 
 use std::{
     io::{BufRead, BufReader, Read, Write},
@@ -92,8 +93,7 @@ impl<'a> Wrangler<'a> {
     }
 
     pub fn migrate(&self, database: &str, remote: bool) -> Result<(), CliError> {
-        let target = if remote { "--remote" } else { "--local" };
-        self.run(&["d1", "migrations", "apply", database, target]).map(drop)
+        self.run(&["d1", "migrations", "apply", database, target(remote)]).map(drop)
     }
 
     /// Deploys and returns the workers.dev URL. An existing database is
@@ -182,6 +182,11 @@ impl<'a> Wrangler<'a> {
 
 fn npx_missing(err: std::io::Error) -> CliError {
     CliError::new(format!("could not run npx: {err}")).hint("install Node.js 20 or newer (it provides npx)")
+}
+
+/// Wrangler's D1 location flag.
+pub fn target(remote: bool) -> &'static str {
+    if remote { "--remote" } else { "--local" }
 }
 
 /// Which account to write into wrangler.toml, if any. One account needs no

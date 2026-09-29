@@ -16,6 +16,16 @@ fn errors_are_json_and_hide_internal_details() {
     assert_eq!((status, body["error"]["message"].as_str()), (500, Some("Internal server error")));
     let (status, body) = json_of(ApiError::from(Error::bad_request("<b>")).into_response());
     assert_eq!((status, body["error"]["message"].as_str()), (400, Some("<b>")), "JSON needs no HTML escaping");
+    let invalid = Error::Invalid(vec![
+        crate::FieldError::new("title", "can't be blank"),
+        crate::FieldError::new("title", "is too short (minimum is 3 characters)"),
+    ]);
+    let (status, body) = json_of(ApiError::from(invalid).into_response());
+    assert_eq!(status, 422);
+    assert_eq!(
+        body["error"]["fields"],
+        serde_json::json!({"title": ["can't be blank", "is too short (minimum is 3 characters)"]})
+    );
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]

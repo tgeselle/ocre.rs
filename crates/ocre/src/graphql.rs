@@ -24,8 +24,14 @@ pub use async_graphql;
 
 impl From<Error> for async_graphql::Error {
     fn from(err: Error) -> Self {
-        let (status, message) = err.into_public();
-        async_graphql::Error::new(message).extend_with(|_, extensions| extensions.set("status", status.as_u16()))
+        let public = err.into_public();
+        let fields = (!public.fields.is_empty()).then(|| public.fields_json());
+        async_graphql::Error::new(public.message).extend_with(|_, extensions| {
+            extensions.set("status", public.status.as_u16());
+            if let Some(fields) = fields {
+                extensions.set("fields", async_graphql::Value::from_json(fields).expect("field errors are plain JSON"));
+            }
+        })
     }
 }
 

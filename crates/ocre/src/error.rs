@@ -1,5 +1,7 @@
 use axum::http::StatusCode;
 
+use crate::FieldError;
+
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// Handler error. Internal details are logged, never sent to the client.
@@ -11,8 +13,29 @@ pub enum Error {
     NotFound,
     /// 400 with a message shown to the user.
     BadRequest(String),
+    /// 422: failed validations, one entry per field error (see [`Validator`](crate::Validator)).
+    Invalid(Vec<FieldError>),
     /// 500; the message goes to the Worker logs only.
     Internal(String),
+}
+
+/// What a client may see of an [`Error`].
+pub(crate) struct Public {
+    pub status: StatusCode,
+    pub message: String,
+    pub fields: Vec<FieldError>,
+}
+
+impl Public {
+    /// `{"title": ["can't be blank", ...], ...}`, the shape Rails APIs use.
+    pub fn fields_json(&self) -> serde_json::Value {
+        let mut map = serde_json::Map::new();
+        for field in &self.fields {
+            let messages = map.entry(field.field.clone()).or_insert_with(|| serde_json::Value::Array(vec![]));
+            messages.as_array_mut().expect("inserted as an array").push(field.message.clone().into());
+        }
+        serde_json::Value::Object(map)
+    }
 }
 
 impl Error {
@@ -24,17 +47,19 @@ impl Error {
         Self::Internal(message.into())
     }
 
-    /// Status and client-safe message. Internal details are logged here and
-    /// replaced by a generic message.
-    pub(crate) fn into_public(self) -> (StatusCode, String) {
-        match self {
-            Self::NotFound => (StatusCode::NOT_FOUND, "Not found".to_owned()),
-            Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
+    /// Client-safe form. Internal details are logged here and replaced by a
+    /// generic message.
+    pub(crate) fn into_public(self) -> Public {
+        let (status, message, fields) = match self {
+            Self::NotFound => (StatusCode::NOT_FOUND, "Not found".to_owned(), vec![]),
+            Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message, vec![]),
+            Self::Invalid(fields) => (StatusCode::UNPROCESSABLE_ENTITY, "Validation failed".to_owned(), fields),
             Self::Internal(message) => {
                 log_internal(&message);
-                (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_owned())
+                (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_owned(), vec![])
             }
-        }
+        };
+        Public { status, message, fields }
     }
 }
 
@@ -43,6 +68,10 @@ impl std::fmt::Display for Error {
         match self {
             Self::NotFound => f.write_str("not found"),
             Self::BadRequest(message) => write!(f, "bad request: {message}"),
+            Self::Invalid(fields) => {
+                let messages: Vec<String> = fields.iter().map(FieldError::full_message).collect();
+                write!(f, "invalid: {}", messages.join(", "))
+            }
             Self::Internal(message) => write!(f, "internal error: {message}"),
         }
     }

@@ -15,6 +15,18 @@ pub struct Report {
     /// Cloudflare login email, for commands that check the session.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
+    /// Migrations not yet applied (`ocre migrate --status`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pending: Vec<String>,
+    /// Steps a database command performed, in order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ran: Vec<String>,
+    /// `ocre sql`: wrangler's JSON, one object with `results` per statement.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rows: Option<serde_json::Value>,
+    /// The command targeted the production database on Cloudflare.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub remote: bool,
     /// Commands to run next, in order.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub next: Vec<String>,
@@ -97,6 +109,12 @@ fn print_human(report: &Report) {
     }
     if let Some(email) = &report.email {
         println!("Logged in to Cloudflare as {email}");
+    }
+    for step in &report.ran {
+        println!("  {step}");
+    }
+    if report.remote {
+        println!("Target: remote D1 database on Cloudflare");
     }
     if let Some(url) = &report.url {
         println!("\n{url}");

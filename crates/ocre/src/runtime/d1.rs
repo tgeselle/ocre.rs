@@ -5,7 +5,7 @@ use worker::{
     send::{SendFuture, SendWrapper},
 };
 
-use crate::{Error, Param, Result, sql::Value};
+use crate::{Error, Param, Result, Statement, sql::Value};
 
 /// Handle to the application's D1 database.
 ///
@@ -56,6 +56,33 @@ impl Db {
             let result = stmt?.run().await.map_err(|err| query_error(sql, err))?;
             let meta = result.meta().map_err(|err| query_error(sql, err))?;
             Ok(meta.and_then(|m| m.changes).unwrap_or(0))
+        })
+    }
+
+    /// Whether the query returns at least one row. Use `SELECT 1 FROM ... LIMIT 1`.
+    pub fn exists<'q>(&self, sql: &'q str, params: Vec<Param>) -> impl Future<Output = Result<bool>> + Send + use<'q> {
+        let stmt = self.prepare(sql, params);
+        SendFuture::new(async move {
+            let row = stmt?.first::<serde_json::Value>(None).await.map_err(|err| query_error(sql, err))?;
+            Ok(row.is_some())
+        })
+    }
+
+    /// Runs every statement in one transaction: all succeed or none is applied.
+    /// Returns the rows changed by each statement.
+    pub fn batch(&self, statements: Vec<Statement>) -> impl Future<Output = Result<Vec<usize>>> + Send + '_ {
+        let sql = statements.iter().map(|s| s.sql.as_str()).collect::<Vec<_>>().join("; ");
+        let prepared: Result<Vec<D1PreparedStatement>> =
+            statements.into_iter().map(|s| self.prepare(&s.sql, s.params)).collect();
+        let db = &self.inner;
+        SendFuture::new(async move {
+            let results = db.batch(prepared?).await.map_err(|err| query_error(&sql, err))?;
+            results
+                .iter()
+                .map(|result| {
+                    Ok(result.meta().map_err(|err| query_error(&sql, err))?.and_then(|m| m.changes).unwrap_or(0))
+                })
+                .collect()
         })
     }
 

@@ -49,4 +49,9 @@ fn errors_render_as_escaped_html_pages() {
         (400, "<h1>400</h1><p>&lt;b&gt;&quot;Tom&quot; &amp; &#39;Jerry&#39;&lt;/b&gt;</p>".to_owned())
     );
     assert_eq!(page(Error::internal("secret")), (500, "<h1>500</h1><p>Internal server error</p>".to_owned()));
+    let invalid = Error::Invalid(vec![crate::FieldError::new("title", "can't be <blank>")]);
+    assert_eq!(
+        page(invalid),
+        (422, "<h1>422</h1><p>Validation failed</p><ul><li>Title can&#39;t be &lt;blank&gt;</li></ul>".to_owned())
+    );
 }

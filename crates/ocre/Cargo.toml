@@ -26,3 +26,4 @@ graphql = ["dep:async-graphql"]
 
 [dev-dependencies]
 pollster = "1.0.1"
+serde_urlencoded = "0.7.1"
