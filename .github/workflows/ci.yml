@@ -8,42 +8,43 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Three jobs in parallel: wall time is the slowest one, not the sum.
 jobs:
-  test:
+  lint:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-
       # rust-toolchain.toml selects stable and the wasm32 target.
-      - name: Rust toolchain
-        run: |
-          rustup show active-toolchain || rustup toolchain install
-          rustup component add clippy rustfmt llvm-tools-preview
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
+      - run: rustup component add clippy rustfmt
       - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo check --target wasm32-unknown-unknown -p ocre -p blog
 
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup component add llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-llvm-cov
-
-      - name: Format
-        run: cargo fmt --all --check
-
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Check WebAssembly build
-        run: cargo check --target wasm32-unknown-unknown -p ocre -p blog
-
-      # Unit, CLI, pseudo-terminal and end-to-end (wrangler dev) tests, with
-      # 100% line coverage required. crates/ocre/src/runtime only runs inside
-      # workerd, so it is exercised by the e2e test but cannot be instrumented.
-      - name: Tests with coverage
-        run: >
+      # Unit, CLI (fake wrangler) and pseudo-terminal tests; 100% line coverage.
+      # crates/ocre/src/runtime only runs inside workerd: the e2e job covers it.
+      - run: >
           cargo llvm-cov --workspace --exclude blog
           --ignore-filename-regex 'crates/ocre/src/runtime/'
           --fail-under-lines 100 --show-missing-lines
-          -- --include-ignored
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: worker-build
+      # Generated app on the real `wrangler dev` (workerd + local D1).
+      - run: cargo test -p ocre-cli --test e2e -- --ignored

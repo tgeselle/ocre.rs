@@ -34,13 +34,15 @@ case "$1" in
         ;;
     esac
     ;;
-  deploy)
-    fail_if deploy_fails
-    echo "Uploaded app"
-    echo "  https://app.example.workers.dev"
-    ;;
   dev)
     fail_if dev_fails
+    echo "build $OCRE_BUILD" >> "$state/calls.log"
     echo "Ready on http://localhost:$3"
+    ;;
+  deploy)
+    fail_if deploy_fails
+    echo "build $OCRE_BUILD" >> "$state/calls.log"
+    echo "Uploaded app"
+    echo "  https://app.example.workers.dev"
     ;;
 esac

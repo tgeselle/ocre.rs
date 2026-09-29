@@ -10,6 +10,7 @@ mod common;
 use std::{
     net::TcpListener,
     os::unix::process::CommandExt,
+    path::Path,
     process::{Child, Command},
     time::{Duration, Instant},
 };
@@ -38,21 +39,18 @@ fn agent() -> Agent {
     Agent::config_builder().http_status_as_error(false).max_redirects(0).build().into()
 }
 
-fn start(sandbox: &Sandbox, root: &std::path::Path) -> Server {
+fn start(sandbox: &Sandbox, root: &Path) -> Server {
     let port = free_port().to_string();
     let mut command = sandbox.command(&["dev", "--port", &port], root);
-    // Under `cargo llvm-cov`, keep coverage flags and the shared target dir
-    // away from the app's own wasm32 build (profiler runtime is native-only).
-    for var in [
-        "RUSTFLAGS",
-        "CARGO_ENCODED_RUSTFLAGS",
-        "CARGO_TARGET_DIR",
-        "CARGO_BUILD_TARGET_DIR",
-        "RUSTC_WRAPPER",
-        "RUSTC_WORKSPACE_WRAPPER",
-    ] {
+    // Under `cargo llvm-cov`, keep coverage flags away from the app's own
+    // wasm32 build (the profiler runtime is native-only).
+    for var in
+        ["RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_TARGET_DIR", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"]
+    {
         command.env_remove(var);
     }
+    // One target dir for every run, so the wasm dependencies compile once.
+    command.env("CARGO_TARGET_DIR", Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/e2e-app"));
     let log = sandbox.work.join("dev.log");
     let output = std::fs::File::create(&log).unwrap();
     let child = command.process_group(0).stdout(output.try_clone().unwrap()).stderr(output).spawn().unwrap();

@@ -70,6 +70,7 @@ fn guided_setup_logs_in_and_deploys() {
             "whoami --json",
             "d1 list --json",
             "deploy",
+            "build --release",
             "d1 migrations apply blog --remote"
         ]
     );

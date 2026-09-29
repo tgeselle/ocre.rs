@@ -167,7 +167,10 @@ fn new_with_deploy_logs_in_deploys_and_returns_the_url() {
     assert!(ok, "{report}");
     assert_eq!(report["url"], "https://app.example.workers.dev");
     assert_eq!(report["next"], serde_json::json!(["cd shop", "ocre dev"]));
-    assert_eq!(sandbox.calls(), ["whoami --json", "d1 list --json", "deploy", "d1 migrations apply shop --remote"]);
+    assert_eq!(
+        sandbox.calls(),
+        ["whoami --json", "d1 list --json", "deploy", "build --release", "d1 migrations apply shop --remote"]
+    );
 }
 
 // ---------- ocre login ----------
@@ -361,7 +364,7 @@ fn dev_migrates_then_serves() {
     let (report, ok) = sandbox.json(&["dev", "--port", "9123"], &root);
     assert!(ok, "{report}");
     assert_eq!(report["url"], "http://localhost:9123");
-    assert_eq!(sandbox.calls(), ["d1 migrations apply shop --local", "dev --port 9123"]);
+    assert_eq!(sandbox.calls(), ["d1 migrations apply shop --local", "dev --port 9123", "build --dev"]);
 }
 
 #[test]
@@ -393,7 +396,7 @@ fn deploy_migrates_an_existing_database_before_the_code_goes_live() {
     let (stdout, _) = text(&output);
     assert!(output.status.success());
     assert!(stdout.ends_with("\nhttps://app.example.workers.dev\n"), "{stdout}");
-    assert_eq!(sandbox.calls(), ["d1 list --json", "d1 migrations apply shop --remote", "deploy"]);
+    assert_eq!(sandbox.calls(), ["d1 list --json", "d1 migrations apply shop --remote", "deploy", "build --release"]);
 }
 
 #[test]

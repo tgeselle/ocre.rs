@@ -54,11 +54,18 @@ pub struct Session {
 pub struct Wrangler<'a> {
     cwd: &'a Path,
     echo: Echo,
+    /// `worker-build` mode, read by the app's `[build]` command as `$OCRE_BUILD`.
+    build: &'static str,
 }
 
 impl<'a> Wrangler<'a> {
     pub fn new(cwd: &'a Path, echo: Echo) -> Self {
-        Self { cwd, echo }
+        Self { cwd, echo, build: "--release" }
+    }
+
+    /// Unoptimized builds for `ocre dev`: much faster to compile.
+    pub fn dev_build(self) -> Self {
+        Self { build: "--dev", ..self }
     }
 
     /// The current session, or `None` when not logged in.
@@ -168,7 +175,7 @@ impl<'a> Wrangler<'a> {
 
     fn command(&self) -> Command {
         let mut command = Command::new("npx");
-        command.args(["--yes", WRANGLER]).current_dir(self.cwd);
+        command.args(["--yes", WRANGLER]).current_dir(self.cwd).env("OCRE_BUILD", self.build);
         command
     }
 }
@@ -209,7 +216,7 @@ pub fn migrate(remote: bool, json: bool) -> CliResult {
 pub fn dev(port: u16, json: bool) -> CliResult {
     let project = Project::find()?;
     check_wasm_target()?;
-    let wrangler = Wrangler::new(&project.root, Echo::for_json(json));
+    let wrangler = Wrangler::new(&project.root, Echo::for_json(json)).dev_build();
     wrangler.migrate(&project.database_name, false)?;
     wrangler.run(&["dev", "--port", &port.to_string()])?;
     Ok(Report { url: Some(format!("http://localhost:{port}")), ..Report::new("dev") })

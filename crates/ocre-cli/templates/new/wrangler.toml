@@ -2,8 +2,9 @@ name = "__APP_NAME__"
 main = "build/index.js"
 compatibility_date = "2026-09-01"
 
+# `ocre dev` sets OCRE_BUILD=--dev (fast, unoptimized); deploys build --release.
 [build]
-command = "cargo install -q \"worker-build@^0.8\" && worker-build --release"
+command = "cargo install -q \"worker-build@^0.8\" && worker-build ${OCRE_BUILD:---release}"
 
 # The first `ocre deploy` creates this database; no database_id needed.
 [[d1_databases]]

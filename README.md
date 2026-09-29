@@ -122,11 +122,10 @@ npx wrangler d1 migrations apply ocre-blog --remote
 ## Tests
 
 ```sh
-cargo test --workspace                                  # unit, CLI and terminal tests (~2 s)
-cargo test -p ocre-cli --test e2e -- --ignored          # generated app on real `wrangler dev`
+cargo test --workspace                           # unit, CLI and terminal tests: ~2 s
+cargo test -p ocre-cli --test e2e -- --ignored   # real `wrangler dev`: ~16 s cold, ~6 s warm
 cargo llvm-cov --workspace --exclude blog \
-  --ignore-filename-regex 'crates/ocre/src/runtime/' \
-  --fail-under-lines 100 -- --include-ignored           # what CI runs
+  --ignore-filename-regex 'crates/ocre/src/runtime/' --fail-under-lines 100
 ```
 
 | Suite | What it runs |
@@ -134,11 +133,12 @@ cargo llvm-cov --workspace --exclude blog \
 | Unit (`src/**`) | Pure logic: params, errors, extractors, names, generators |
 | `crates/ocre-cli/tests/cli.rs` | The `ocre` binary with a fake wrangler (`tests/common/fake_npx.sh`): every command, `--json` contract, every error hint |
 | `crates/ocre-cli/tests/wizard.rs` | `ocre new` in a pseudo-terminal: questions, keys, cancel |
-| `crates/ocre-cli/tests/e2e.rs` | Generated app built to WebAssembly, served by `wrangler dev`, full CRUD over HTTP |
+| `crates/ocre-cli/tests/e2e.rs` | Generated app built to WebAssembly (dev build, shared `target/e2e-app`), served by `wrangler dev`, full CRUD over HTTP |
 
-CI requires 100% line coverage. `crates/ocre/src/runtime/` calls the Workers
-JavaScript runtime and only runs inside workerd, where it cannot be
-instrumented; it is excluded from the measurement and exercised by the e2e test.
+CI runs lint, coverage and e2e as three parallel jobs and requires 100% line
+coverage. `crates/ocre/src/runtime/` calls the Workers JavaScript runtime and
+only runs inside workerd, where it cannot be instrumented; it is excluded from
+the measurement and exercised by the e2e test.
 
 ## Measured
 
