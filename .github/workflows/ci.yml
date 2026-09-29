@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml selects stable and the wasm32 target.
+      - name: Rust toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup component add clippy rustfmt llvm-tools-preview
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Check WebAssembly build
+        run: cargo check --target wasm32-unknown-unknown -p ocre -p blog
+
+      # Unit, CLI, pseudo-terminal and end-to-end (wrangler dev) tests, with
+      # 100% line coverage required. crates/ocre/src/runtime only runs inside
+      # workerd, so it is exercised by the e2e test but cannot be instrumented.
+      - name: Tests with coverage
+        run: >
+          cargo llvm-cov --workspace --exclude blog
+          --ignore-filename-regex 'crates/ocre/src/runtime/'
+          --fail-under-lines 100 --show-missing-lines
+          -- --include-ignored

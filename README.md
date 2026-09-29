@@ -11,8 +11,16 @@ not built yet.
 
 ```sh
 cargo install --git https://github.com/tgeselle/ocre.rs ocre-cli   # installs `ocre`
-ocre new my-app && cd my-app
-ocre g scaffold Post title:string body:text published:boolean
+ocre new      # guided setup: name, starter, Cloudflare login, git, first deploy
+```
+
+The guided setup runs in a terminal. Every question has a flag, so the same
+app can be created without prompts (agents, scripts, CI):
+
+```sh
+ocre new my-app --starter blog --git --deploy --json
+cd my-app
+ocre g scaffold Comment author:string body:text
 ocre dev       # applies local migrations, serves http://localhost:8787
 ocre deploy    # deploys, creates the D1 database if needed, applies remote migrations
 ```
@@ -24,21 +32,35 @@ free-plan limits an agent needs.
 
 | Command | Effect |
 |---|---|
-| `ocre new <name> [--ocre-path <dir>]` | App skeleton; `--ocre-path` uses a local `crates/ocre` instead of git |
+| `ocre new [name]` | App skeleton. In a terminal, asks for anything flags did not answer |
+| `ocre login` | Cloudflare login in the browser, unless already logged in |
 | `ocre g scaffold <Model> field:type...` | Migration, model, form, CRUD handlers, routes, templates; registers the module in `src/lib.rs` |
 | `ocre g migration <name>` | Empty numbered migration |
 | `ocre migrate [--remote]` | Apply D1 migrations |
 | `ocre dev [--port N]` | Local migrations, then `wrangler dev` |
 | `ocre deploy` | Existing database: migrate, then deploy. New database: deploy (creates it), then migrate |
 
+`ocre new` flags:
+
+| Flag | Effect | Default without prompts |
+|---|---|---|
+| `--starter empty\|blog` | `blog` adds a `Post` resource (title, body, published) | `empty` |
+| `--login` / `--no-login` | Log in to Cloudflare if needed (opens a browser) | no login |
+| `--account-id <id>` | Account to deploy to; required when the login has several | none |
+| `--git` / `--no-git` | `git init` | no git |
+| `--deploy` / `--no-deploy` | Deploy right away (implies `--login`) | no deploy |
+| `--yes`, `-y` | Never prompt, even in a terminal | |
+| `--ocre-path <dir>` | Use a local `crates/ocre` instead of the git dependency | git |
+
 Field types: `string`, `text`, `integer`, `float`, `boolean`. Scaffold routes:
 `GET /posts`, `GET /posts/new`, `POST /posts`, `GET /posts/{id}`,
 `GET /posts/{id}/edit`, `POST /posts/{id}` (update), `POST /posts/{id}/delete`.
 
-Contract for agents: commands never prompt. With `--json`, stdout carries
-exactly one JSON object, `{"ok": true, "command", "created", "updated", "url",
-"next"}` or `{"ok": false, "error", "hint"}`; wrangler output goes to stderr.
-Exit code is 0 on success, 1 on failure. Generators never overwrite files.
+Contract for agents: with `--json` (or without a terminal) commands never
+prompt, and stdout carries exactly one JSON object, `{"ok": true, "command",
+"created", "updated", "url", "email", "next"}` or `{"ok": false, "error",
+"hint"}`; wrangler output goes to stderr. Exit code is 0 on success, 1 on
+failure. Generators never overwrite files.
 
 ## Rules the framework enforces
 
@@ -96,6 +118,27 @@ migrations run after it:
 npx wrangler deploy
 npx wrangler d1 migrations apply ocre-blog --remote
 ```
+
+## Tests
+
+```sh
+cargo test --workspace                                  # unit, CLI and terminal tests (~2 s)
+cargo test -p ocre-cli --test e2e -- --ignored          # generated app on real `wrangler dev`
+cargo llvm-cov --workspace --exclude blog \
+  --ignore-filename-regex 'crates/ocre/src/runtime/' \
+  --fail-under-lines 100 -- --include-ignored           # what CI runs
+```
+
+| Suite | What it runs |
+|---|---|
+| Unit (`src/**`) | Pure logic: params, errors, extractors, names, generators |
+| `crates/ocre-cli/tests/cli.rs` | The `ocre` binary with a fake wrangler (`tests/common/fake_npx.sh`): every command, `--json` contract, every error hint |
+| `crates/ocre-cli/tests/wizard.rs` | `ocre new` in a pseudo-terminal: questions, keys, cancel |
+| `crates/ocre-cli/tests/e2e.rs` | Generated app built to WebAssembly, served by `wrangler dev`, full CRUD over HTTP |
+
+CI requires 100% line coverage. `crates/ocre/src/runtime/` calls the Workers
+JavaScript runtime and only runs inside workerd, where it cannot be
+instrumented; it is excluded from the measurement and exercised by the e2e test.
 
 ## Measured
 

@@ -1,9 +1,12 @@
-//! Commands that drive wrangler: migrate, dev, deploy.
+//! Everything that runs wrangler: login, migrate, dev, deploy.
 
 use std::{
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
+    path::Path,
     process::{Command, Stdio},
 };
+
+use serde::Deserialize;
 
 use crate::{
     CliResult,
@@ -14,9 +17,191 @@ use crate::{
 /// Pinned major version, so generated apps and the CLI agree on flags.
 const WRANGLER: &str = "wrangler@4";
 
+/// Where wrangler's stdout goes while it runs.
+#[derive(Clone, Copy)]
+pub enum Echo {
+    /// Human mode: show it.
+    Stdout,
+    /// `--json` mode: keep stdout for the JSON result.
+    Stderr,
+    /// Interactive wizard: hide it behind a spinner; include it in errors.
+    Capture,
+}
+
+impl Echo {
+    pub fn for_json(json: bool) -> Self {
+        if json { Self::Stderr } else { Self::Stdout }
+    }
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+pub struct Account {
+    pub id: String,
+    pub name: String,
+}
+
+/// Logged-in Cloudflare user, from `wrangler whoami --json`.
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Session {
+    #[serde(default)]
+    logged_in: bool,
+    pub email: Option<String>,
+    #[serde(default)]
+    pub accounts: Vec<Account>,
+}
+
+pub struct Wrangler<'a> {
+    cwd: &'a Path,
+    echo: Echo,
+}
+
+impl<'a> Wrangler<'a> {
+    pub fn new(cwd: &'a Path, echo: Echo) -> Self {
+        Self { cwd, echo }
+    }
+
+    /// The current session, or `None` when not logged in.
+    pub fn whoami(&self) -> Result<Option<Session>, CliError> {
+        let output = self.command().args(["whoami", "--json"]).stderr(Stdio::piped()).output().map_err(npx_missing)?;
+        if !output.status.success() {
+            return Ok(None);
+        }
+        let session: Session = serde_json::from_slice(&output.stdout)
+            .map_err(|err| CliError::new(format!("unexpected `wrangler whoami --json` output: {err}")))?;
+        Ok(session.logged_in.then_some(session))
+    }
+
+    /// Returns the session, running the browser login first if needed.
+    pub fn ensure_login(&self) -> Result<Session, CliError> {
+        if let Some(session) = self.whoami()? {
+            return Ok(session);
+        }
+        self.run(&["login"])?;
+        self.whoami()?.ok_or_else(|| {
+            CliError::new("Cloudflare login did not complete")
+                .hint("run `ocre login` and approve access in the browser, or set CLOUDFLARE_API_TOKEN")
+        })
+    }
+
+    pub fn migrate(&self, database: &str, remote: bool) -> Result<(), CliError> {
+        let target = if remote { "--remote" } else { "--local" };
+        self.run(&["d1", "migrations", "apply", database, target]).map(drop)
+    }
+
+    /// Deploys and returns the workers.dev URL. An existing database is
+    /// migrated before the new code goes live; a new one is created by the
+    /// first deploy, then migrated.
+    pub fn deploy(&self, database: &str) -> Result<Option<String>, CliError> {
+        let output = if self.database_exists(database)? {
+            self.migrate(database, true)?;
+            self.run(&["deploy"])?
+        } else {
+            let output = self.run(&["deploy"])?;
+            self.migrate(database, true)?;
+            output
+        };
+        Ok(output
+            .split_whitespace()
+            .find(|word| word.starts_with("https://") && word.contains(".workers.dev"))
+            .map(str::to_owned))
+    }
+
+    fn database_exists(&self, name: &str) -> Result<bool, CliError> {
+        let output =
+            self.command().args(["d1", "list", "--json"]).stderr(Stdio::piped()).output().map_err(npx_missing)?;
+        if !output.status.success() {
+            return Err(CliError::new(format!(
+                "`wrangler d1 list` failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))
+            .hint("log in with `ocre login`, or set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID"));
+        }
+        let databases: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)
+            .map_err(|err| CliError::new(format!("unexpected `wrangler d1 list --json` output: {err}")))?;
+        Ok(databases.iter().any(|db| db["name"] == name))
+    }
+
+    /// Runs wrangler with its stdout routed by `echo`, and returns that stdout.
+    pub fn run(&self, args: &[&str]) -> Result<String, CliError> {
+        let mut command = self.command();
+        command.args(args).stdout(Stdio::piped());
+        if let Echo::Capture = self.echo {
+            command.stderr(Stdio::piped());
+        }
+        let mut child = command.spawn().map_err(npx_missing)?;
+        // Drain stderr concurrently so a full pipe never blocks wrangler.
+        let stderr = child.stderr.take().map(|mut pipe| {
+            std::thread::spawn(move || {
+                let mut text = String::new();
+                let _ = pipe.read_to_string(&mut text);
+                text
+            })
+        });
+        let mut captured = String::new();
+        for line in BufReader::new(child.stdout.take().expect("stdout is piped")).lines() {
+            let line = line?;
+            match self.echo {
+                Echo::Stdout => writeln!(std::io::stdout(), "{line}")?,
+                Echo::Stderr => writeln!(std::io::stderr(), "{line}")?,
+                Echo::Capture => {}
+            }
+            captured.push_str(&line);
+            captured.push('\n');
+        }
+        let status = child.wait()?;
+        let stderr = stderr.map(|reader| reader.join().expect("stderr reader does not panic")).unwrap_or_default();
+        if status.success() {
+            return Ok(captured);
+        }
+        let mut message = format!("`wrangler {}` failed ({status})", args.join(" "));
+        let hint = if let Echo::Capture = self.echo {
+            captured.push_str(&stderr);
+            message.push_str(":\n");
+            message.push_str(captured.trim_end());
+            "the wrangler output above names the cause"
+        } else {
+            "read the wrangler output above; the first error line names the cause"
+        };
+        Err(CliError::new(message).hint(hint))
+    }
+
+    fn command(&self) -> Command {
+        let mut command = Command::new("npx");
+        command.args(["--yes", WRANGLER]).current_dir(self.cwd);
+        command
+    }
+}
+
+fn npx_missing(err: std::io::Error) -> CliError {
+    CliError::new(format!("could not run npx: {err}")).hint("install Node.js 20 or newer (it provides npx)")
+}
+
+/// Which account to write into wrangler.toml, if any. One account needs no
+/// `account_id`; several need the caller to choose.
+pub fn pick_account(session: &Session, requested: Option<&str>) -> Result<Option<String>, CliError> {
+    let listing = || session.accounts.iter().map(|a| format!("{} ({})", a.id, a.name)).collect::<Vec<_>>().join(", ");
+    match requested {
+        Some(id) if session.accounts.iter().any(|a| a.id == id) => Ok(Some(id.to_owned())),
+        Some(id) => Err(CliError::new(format!("account `{id}` is not available to this Cloudflare login"))
+            .hint(format!("use one of: {}", listing()))),
+        None if session.accounts.len() == 1 => Ok(None),
+        None if session.accounts.is_empty() => Err(CliError::new("this Cloudflare login has no accounts")
+            .hint("create an account at https://dash.cloudflare.com/sign-up, then run `ocre login` again")),
+        None => Err(CliError::new("this Cloudflare login has several accounts")
+            .hint(format!("pass --account-id with one of: {}", listing()))),
+    }
+}
+
+pub fn login(json: bool) -> CliResult {
+    let cwd = std::env::current_dir()?;
+    let session = Wrangler::new(&cwd, Echo::for_json(json)).ensure_login()?;
+    Ok(Report { email: session.email, ..Report::new("login") })
+}
+
 pub fn migrate(remote: bool, json: bool) -> CliResult {
     let project = Project::find()?;
-    apply_migrations(&project, remote, json)?;
+    Wrangler::new(&project.root, Echo::for_json(json)).migrate(&project.database_name, remote)?;
     Ok(Report::new("migrate"))
 }
 
@@ -24,84 +209,63 @@ pub fn migrate(remote: bool, json: bool) -> CliResult {
 pub fn dev(port: u16, json: bool) -> CliResult {
     let project = Project::find()?;
     check_wasm_target()?;
-    apply_migrations(&project, false, json)?;
-    let port_arg = port.to_string();
-    stream(&project, &["dev", "--port", &port_arg], json)?;
+    let wrangler = Wrangler::new(&project.root, Echo::for_json(json));
+    wrangler.migrate(&project.database_name, false)?;
+    wrangler.run(&["dev", "--port", &port.to_string()])?;
     Ok(Report { url: Some(format!("http://localhost:{port}")), ..Report::new("dev") })
 }
 
-/// Deploys, then migrates. An existing database is migrated before the new
-/// code goes live; a new one is created by the first deploy, then migrated.
 pub fn deploy(json: bool) -> CliResult {
     let project = Project::find()?;
     check_wasm_target()?;
-    let output = if database_exists(&project)? {
-        apply_migrations(&project, true, json)?;
-        stream(&project, &["deploy"], json)?
-    } else {
-        let output = stream(&project, &["deploy"], json)?;
-        apply_migrations(&project, true, json)?;
-        output
-    };
-    let url = output
-        .split_whitespace()
-        .find(|word| word.starts_with("https://") && word.contains(".workers.dev"))
-        .map(str::to_owned);
+    let url = Wrangler::new(&project.root, Echo::for_json(json)).deploy(&project.database_name)?;
     Ok(Report { url, ..Report::new("deploy") })
 }
 
-fn apply_migrations(project: &Project, remote: bool, json: bool) -> Result<(), CliError> {
-    let target = if remote { "--remote" } else { "--local" };
-    stream(project, &["d1", "migrations", "apply", &project.database_name, target], json).map(drop)
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn database_exists(project: &Project) -> Result<bool, CliError> {
-    let output = wrangler(project)
-        .args(["d1", "list", "--json"])
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(npx_missing)?;
-    if !output.status.success() {
-        return Err(CliError::new(format!(
-            "`wrangler d1 list` failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))
-        .hint("log in with `npx wrangler login`, or set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID"));
-    }
-    let databases: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)
-        .map_err(|err| CliError::new(format!("unexpected `wrangler d1 list --json` output: {err}")))?;
-    Ok(databases.iter().any(|db| db["name"] == project.database_name.as_str()))
-}
-
-/// Runs wrangler, echoing its stdout (to stderr in JSON mode) and returning it.
-fn stream(project: &Project, args: &[&str], json: bool) -> Result<String, CliError> {
-    let mut child = wrangler(project).args(args).stdout(Stdio::piped()).spawn().map_err(npx_missing)?;
-    let mut captured = String::new();
-    let reader = BufReader::new(child.stdout.take().expect("stdout is piped"));
-    for line in reader.lines() {
-        let line = line?;
-        if json {
-            writeln!(std::io::stderr(), "{line}")?;
-        } else {
-            writeln!(std::io::stdout(), "{line}")?;
+    fn session(ids: &[&str]) -> Session {
+        Session {
+            logged_in: true,
+            email: Some("a@b.c".into()),
+            accounts: ids.iter().map(|id| Account { id: (*id).into(), name: format!("{id} name") }).collect(),
         }
-        captured.push_str(&line);
-        captured.push('\n');
     }
-    let status = child.wait()?;
-    if !status.success() {
-        return Err(CliError::new(format!("`wrangler {}` failed ({status})", args.join(" ")))
-            .hint("read the wrangler output above; the first error line names the cause"));
+
+    #[test]
+    fn single_account_needs_no_account_id() {
+        assert_eq!(pick_account(&session(&["a1"]), None).unwrap(), None);
+        assert_eq!(pick_account(&session(&["a1"]), Some("a1")).unwrap(), Some("a1".into()));
     }
-    Ok(captured)
-}
 
-fn wrangler(project: &Project) -> Command {
-    let mut command = Command::new("npx");
-    command.args(["--yes", WRANGLER]).current_dir(&project.root);
-    command
-}
+    #[test]
+    fn several_accounts_require_a_listed_choice() {
+        let s = session(&["a1", "a2"]);
+        assert_eq!(pick_account(&s, Some("a2")).unwrap(), Some("a2".into()));
+        let err = pick_account(&s, None).unwrap_err();
+        assert_eq!(err.hint.unwrap(), "pass --account-id with one of: a1 (a1 name), a2 (a2 name)");
+        let err = pick_account(&s, Some("zz")).unwrap_err();
+        assert!(err.message.contains("`zz`"));
+    }
 
-fn npx_missing(err: std::io::Error) -> CliError {
-    CliError::new(format!("could not run npx: {err}")).hint("install Node.js 20 or newer (it provides npx)")
+    #[test]
+    fn no_accounts_is_an_error() {
+        assert!(pick_account(&session(&[]), None).is_err());
+    }
+
+    #[test]
+    fn parses_whoami_json() {
+        let json = r#"{"loggedIn":true,"authType":"OAuth Token","email":"x@y.z","accounts":[{"id":"1","name":"One","type":"standard"}]}"#;
+        let parsed: Session = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            parsed,
+            Session {
+                logged_in: true,
+                email: Some("x@y.z".into()),
+                accounts: vec![Account { id: "1".into(), name: "One".into() }]
+            }
+        );
+    }
 }

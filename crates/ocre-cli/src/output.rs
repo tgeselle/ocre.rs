@@ -12,9 +12,15 @@ pub struct Report {
     pub updated: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// Cloudflare login email, for commands that check the session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
     /// Commands to run next, in order.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub next: Vec<String>,
+    /// Already shown to the user (interactive wizard); skip the human summary.
+    #[serde(skip)]
+    pub rendered: bool,
 }
 
 impl Report {
@@ -39,6 +45,14 @@ impl CliError {
         self.hint = Some(hint.into());
         self
     }
+
+    /// One-line form for inline prompts: `message (hint)`.
+    pub fn to_string_with_hint(&self) -> String {
+        match &self.hint {
+            Some(hint) => format!("{} ({hint})", self.message),
+            None => self.message.clone(),
+        }
+    }
 }
 
 impl From<std::io::Error> for CliError {
@@ -54,7 +68,7 @@ pub fn finish(result: Result<Report, CliError>, json: bool) -> ExitCode {
                 let mut value = serde_json::to_value(&report).expect("report serializes");
                 value["ok"] = true.into();
                 println!("{value}");
-            } else {
+            } else if !report.rendered {
                 print_human(&report);
             }
             ExitCode::SUCCESS
@@ -81,6 +95,9 @@ fn print_human(report: &Report) {
     for path in &report.updated {
         println!("  update  {path}");
     }
+    if let Some(email) = &report.email {
+        println!("Logged in to Cloudflare as {email}");
+    }
     if let Some(url) = &report.url {
         println!("\n{url}");
     }
@@ -89,5 +106,16 @@ fn print_human(report: &Report) {
         for step in &report.next {
             println!("  {step}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_line_errors_append_the_hint_when_there_is_one() {
+        assert_eq!(CliError::new("bad").to_string_with_hint(), "bad");
+        assert_eq!(CliError::new("bad").hint("fix it").to_string_with_hint(), "bad (fix it)");
     }
 }

@@ -28,10 +28,6 @@ impl ModelNames {
         let (last, rest) = words.split_last().expect("identifier has at least one word");
         let plural_words: Vec<String> = rest.iter().cloned().chain([pluralize(last)]).collect();
         let plural = plural_words.join("_");
-        if plural == singular {
-            return Err(CliError::new(format!("model name `{input}` has the same singular and plural form"))
-                .hint("pick a countable singular noun, e.g. `Article` instead of `News`"));
-        }
         Ok(Self {
             model: words.iter().map(|w| capitalize(w)).collect(),
             human_singular: humanize(&singular),

@@ -13,3 +13,7 @@ askama.workspace = true
 serde.workspace = true
 wasm-bindgen.workspace = true
 tower-service = "0.3.3"
+
+[dev-dependencies]
+pollster = "1.0.1"
+serde_json = "1.0.151"

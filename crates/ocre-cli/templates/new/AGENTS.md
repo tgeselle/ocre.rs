@@ -14,10 +14,13 @@ on stdout (`"ok": true|false`, plus `error` and `hint` on failure).
 | Empty migration | `ocre g migration add_slug_to_posts` |
 | Apply migrations locally | `ocre migrate` |
 | Run locally (http://localhost:8787) | `ocre dev` |
+| Cloudflare login (browser; once) | `ocre login` |
 | Deploy + remote migrations | `ocre deploy` |
 | Type-check | `cargo check --target wasm32-unknown-unknown` |
 
 Scaffold field types: `string`, `text`, `integer`, `float`, `boolean`.
+Integers must stay within ±`ocre::MAX_SAFE_INTEGER` (2^53 - 1): D1 returns
+numbers as JavaScript numbers. Scaffolded forms already reject larger values.
 
 ## Layout
 

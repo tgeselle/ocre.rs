@@ -15,10 +15,7 @@ async fn fetch(req: HttpRequest, env: Env, _ctx: Context) -> worker::Result<axum
 }
 
 fn routes() -> Router<Ctx> {
-    Router::new()
-        .route("/", get(index))
-        .route("/posts", post(create))
-        .route("/posts/{id}", get(show))
+    Router::new().route("/", get(index)).route("/posts", post(create)).route("/posts/{id}", get(show))
 }
 
 #[derive(Deserialize)]

@@ -1,9 +1,10 @@
 use worker::{Env, send::SendWrapper};
 
-use crate::{Db, Error, Result};
+use super::Db;
+use crate::{Error, Result};
 
 /// Name of the D1 binding every Ocre app uses for its main database.
-pub(crate) const DB_BINDING: &str = "DB";
+const DB_BINDING: &str = "DB";
 
 /// Per-request application context, available in handlers as
 /// `State(ctx): State<Ctx>`.

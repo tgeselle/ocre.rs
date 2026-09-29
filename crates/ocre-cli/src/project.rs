@@ -28,6 +28,11 @@ impl Project {
                     .hint("run this command inside an Ocre app, or create one with `ocre new <name>`")
             })?
             .to_path_buf();
+        Self::at(root)
+    }
+
+    /// The app whose wrangler.toml is in `root`.
+    pub fn at(root: PathBuf) -> Result<Self, CliError> {
         let database_name = read_database_name(&root.join("wrangler.toml"))?;
         Ok(Self { root, database_name })
     }
@@ -40,9 +45,8 @@ impl Project {
 
 fn read_database_name(path: &Path) -> Result<String, CliError> {
     let text = std::fs::read_to_string(path)?;
-    let config: toml::Table = text
-        .parse()
-        .map_err(|err| CliError::new(format!("wrangler.toml is not valid TOML: {err}")))?;
+    let config: toml::Table =
+        text.parse().map_err(|err| CliError::new(format!("wrangler.toml is not valid TOML: {err}")))?;
     config
         .get("d1_databases")
         .and_then(|v| v.as_array())

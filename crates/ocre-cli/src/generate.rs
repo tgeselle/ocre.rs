@@ -17,12 +17,74 @@ const ROUTES_MARKER: &str = "// ocre:routes";
 
 /// Names that would clash with generated columns, Rust keywords or SQL keywords.
 const RESERVED_FIELDS: &[&str] = &[
-    "id", "created_at", "updated_at", // generated columns
-    "as", "async", "await", "box", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern", "false",
-    "fn", "for", "gen", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
-    "self", "static", "struct", "super", "trait", "true", "try", "type", "unsafe", "use", "where", "while", "yield",
-    "and", "asc", "by", "case", "check", "default", "desc", "from", "group", "index", "join", "key", "limit", "not",
-    "null", "offset", "or", "order", "primary", "references", "select", "table", "unique", "values",
+    "id",
+    "created_at",
+    "updated_at", // generated columns
+    "as",
+    "async",
+    "await",
+    "box",
+    "break",
+    "const",
+    "continue",
+    "crate",
+    "dyn",
+    "else",
+    "enum",
+    "extern",
+    "false",
+    "fn",
+    "for",
+    "gen",
+    "if",
+    "impl",
+    "in",
+    "let",
+    "loop",
+    "match",
+    "mod",
+    "move",
+    "mut",
+    "pub",
+    "ref",
+    "return",
+    "self",
+    "static",
+    "struct",
+    "super",
+    "trait",
+    "true",
+    "try",
+    "type",
+    "unsafe",
+    "use",
+    "where",
+    "while",
+    "yield",
+    "and",
+    "asc",
+    "by",
+    "case",
+    "check",
+    "default",
+    "desc",
+    "from",
+    "group",
+    "index",
+    "join",
+    "key",
+    "limit",
+    "not",
+    "null",
+    "offset",
+    "or",
+    "order",
+    "primary",
+    "references",
+    "select",
+    "table",
+    "unique",
+    "values",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -78,7 +140,8 @@ struct Field {
 impl Field {
     fn parse(spec: &str) -> Result<Self, CliError> {
         let (name, ty) = spec.split_once(':').ok_or_else(|| {
-            CliError::new(format!("field `{spec}` has no type")).hint("write fields as `name:type`, e.g. `title:string`")
+            CliError::new(format!("field `{spec}` has no type"))
+                .hint("write fields as `name:type`, e.g. `title:string`")
         })?;
         if !is_identifier(name) {
             return Err(CliError::new(format!("invalid field name `{name}`"))
@@ -110,8 +173,7 @@ fn parse_fields(specs: &[String]) -> Result<Vec<Field>, CliError> {
     Ok(fields)
 }
 
-pub fn scaffold(name: &str, field_specs: &[String]) -> CliResult {
-    let project = Project::find()?;
+pub fn scaffold(project: &Project, name: &str, field_specs: &[String]) -> CliResult {
     let names = ModelNames::parse(name)?;
     let fields = parse_fields(field_specs)?;
 
@@ -144,23 +206,22 @@ pub fn scaffold(name: &str, field_specs: &[String]) -> CliResult {
     }
     std::fs::write(&lib_path, lib)?;
     report.updated.push(project.relative(&lib_path));
-    report.next = vec![
-        "ocre migrate".to_owned(),
-        "ocre dev".to_owned(),
-        format!("open http://localhost:8787/{}", names.plural),
-    ];
+    report.next =
+        vec!["ocre migrate".to_owned(), "ocre dev".to_owned(), format!("open http://localhost:8787/{}", names.plural)];
     Ok(report)
 }
 
-pub fn migration(name: &str) -> CliResult {
-    let project = Project::find()?;
+pub fn migration(project: &Project, name: &str) -> CliResult {
     if !is_identifier(name) {
-        return Err(CliError::new(format!("invalid migration name `{name}`"))
-            .hint("use snake_case, e.g. `add_slug_to_posts`"));
+        return Err(
+            CliError::new(format!("invalid migration name `{name}`")).hint("use snake_case, e.g. `add_slug_to_posts`")
+        );
     }
     let path = next_migration_path(&project.root, name)?;
     std::fs::create_dir_all(path.parent().expect("migration has a parent"))?;
-    std::fs::write(&path, format!("-- Migration: {name}\n-- Applied once, in file-name order. Never edit after it has been applied.\n"))?;
+    let header =
+        format!("-- Migration: {name}\n-- Applied once, in file-name order. Never edit after it has been applied.\n");
+    std::fs::write(&path, header)?;
     let mut report = Report::new("generate migration");
     report.created.push(project.relative(&path));
     report.next = vec!["ocre migrate".to_owned()];
@@ -223,12 +284,8 @@ fn module_rs(names: &ModelNames, fields: &[Field], name: &str, field_specs: &[St
     let ModelNames { model, singular, plural, .. } = names;
     let columns = fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(", ");
     let placeholders = (1..=fields.len()).map(|i| format!("?{i}")).collect::<Vec<_>>().join(", ");
-    let assignments = fields
-        .iter()
-        .enumerate()
-        .map(|(i, f)| format!("{} = ?{}", f.name, i + 1))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let assignments =
+        fields.iter().enumerate().map(|(i, f)| format!("{} = ?{}", f.name, i + 1)).collect::<Vec<_>>().join(", ");
     let id_placeholder = fields.len() + 1;
     let form_params = fields.iter().map(|f| format!("form.{}", f.name)).collect::<Vec<_>>().join(", ");
 
@@ -247,6 +304,14 @@ fn module_rs(names: &ModelNames, fields: &[Field], name: &str, field_specs: &[St
             writeln!(
                 checks,
                 "        if self.{name}.trim().is_empty() {{\n            return Err(Error::bad_request(\"{} is required.\"));\n        }}",
+                field.label()
+            )
+            .expect("writing to a String");
+        }
+        if field.ty == FieldType::Integer {
+            writeln!(
+                checks,
+                "        if self.{name}.unsigned_abs() > ocre::MAX_SAFE_INTEGER as u64 {{\n            return Err(Error::bad_request(\"{} is out of range.\"));\n        }}",
                 field.label()
             )
             .expect("writing to a String");
@@ -412,7 +477,8 @@ fn show_html(names: &ModelNames, fields: &[Field]) -> String {
     let lower = human_singular.to_lowercase();
     let mut rows = String::new();
     for field in fields {
-        writeln!(rows, "  <dt>{}</dt><dd>{{{{ {singular}.{} }}}}</dd>", field.label(), field.name).expect("writing to a String");
+        writeln!(rows, "  <dt>{}</dt><dd>{{{{ {singular}.{} }}}}</dd>", field.label(), field.name)
+            .expect("writing to a String");
     }
     format!(
         r#"{{% extends "layout.html" %}}
@@ -453,7 +519,8 @@ fn form_html(names: &ModelNames, fields: &[Field], edit: bool) -> String {
             FieldType::Integer => format!(r#"<input type="number" step="1" name="{name}"{value_attr} required>"#),
             FieldType::Float => format!(r#"<input type="number" step="any" name="{name}"{value_attr} required>"#),
             FieldType::Boolean => {
-                let checked = if edit { format!("{{% if {singular}.{name} %}} checked{{% endif %}}") } else { String::new() };
+                let checked =
+                    if edit { format!("{{% if {singular}.{name} %}} checked{{% endif %}}") } else { String::new() };
                 format!(r#"<input type="checkbox" name="{name}" value="true"{checked}>"#)
             }
         };
