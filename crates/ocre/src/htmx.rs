@@ -16,4 +16,5 @@ impl<S: Send + Sync> FromRequestParts<S> for Htmx {
 }
 
 #[cfg(test)]
+#[path = "../tests/htmx.rs"]
 mod tests;

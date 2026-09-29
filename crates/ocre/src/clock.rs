@@ -24,4 +24,5 @@ pub fn now() -> i64 {
 }
 
 #[cfg(test)]
+#[path = "../tests/clock.rs"]
 mod tests;

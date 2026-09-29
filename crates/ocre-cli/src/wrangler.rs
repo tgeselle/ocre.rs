@@ -306,4 +306,5 @@ impl Drop for SecretsFile {
 }
 
 #[cfg(test)]
+#[path = "../tests/wrangler.rs"]
 mod tests;

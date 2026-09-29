@@ -108,4 +108,5 @@ fn capitalize(word: &str) -> String {
 }
 
 #[cfg(test)]
+#[path = "../tests/names.rs"]
 mod tests;

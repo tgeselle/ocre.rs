@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/ocre", "crates/ocre-cli", "examples/blog"]
+members = ["crates/ocre", "crates/ocre-cli"]
 
 [workspace.package]
 edition = "2024"

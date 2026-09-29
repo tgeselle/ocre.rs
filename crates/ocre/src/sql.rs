@@ -136,4 +136,5 @@ pub fn bool_from_sql<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Resul
 }
 
 #[cfg(test)]
+#[path = "../tests/sql.rs"]
 mod tests;

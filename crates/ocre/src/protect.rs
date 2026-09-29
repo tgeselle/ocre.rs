@@ -146,4 +146,5 @@ async fn security_headers(req: Request<Body>, next: Next) -> Response {
 }
 
 #[cfg(test)]
+#[path = "../tests/protect.rs"]
 mod tests;

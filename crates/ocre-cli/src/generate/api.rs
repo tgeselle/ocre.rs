@@ -333,4 +333,5 @@ impl {model}Mutation {{
 }
 
 #[cfg(test)]
+#[path = "../../tests/generate/api.rs"]
 mod tests;

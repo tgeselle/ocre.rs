@@ -193,4 +193,5 @@ fn cell(value: &Value) -> String {
 }
 
 #[cfg(test)]
+#[path = "../tests/db.rs"]
 mod tests;

@@ -276,4 +276,5 @@ fn hex_byte(pair: &[u8]) -> Option<u8> {
 }
 
 #[cfg(test)]
+#[path = "../../tests/mail/parse.rs"]
 mod tests;

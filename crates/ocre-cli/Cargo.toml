@@ -5,10 +5,45 @@ description = "Command-line tool for Ocre: create, generate, migrate, run and de
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+# tests/ mirrors src/ for unit tests (compiled into the binary with `#[path]`);
+# only the targets below are test binaries.
+autotests = false
 
 [[bin]]
 name = "ocre"
 path = "src/main.rs"
+
+# Commands against a fake wrangler (tests/support/fake_npx.sh).
+[[test]]
+name = "cli"
+path = "tests/integration/cli.rs"
+
+[[test]]
+name = "auth"
+path = "tests/integration/auth.rs"
+
+[[test]]
+name = "db"
+path = "tests/integration/db.rs"
+
+[[test]]
+name = "mail"
+path = "tests/integration/mail.rs"
+
+[[test]]
+name = "routes"
+path = "tests/integration/routes.rs"
+
+# `ocre new` in a pseudo-terminal.
+[[test]]
+name = "wizard"
+path = "tests/integration/wizard.rs"
+
+# Generated apps on workerd (`wrangler dev`); ignored by default, run locally with
+# `cargo test -p ocre-cli --test e2e -- --ignored`.
+[[test]]
+name = "e2e"
+path = "tests/system/e2e.rs"
 
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }

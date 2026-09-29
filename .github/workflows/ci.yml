@@ -21,7 +21,7 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       # Full-stack (default), API-only (no `html`) and GraphQL builds of the framework.
-      - run: cargo check --target wasm32-unknown-unknown -p ocre -p blog
+      - run: cargo check --target wasm32-unknown-unknown -p ocre
       - run: cargo check --target wasm32-unknown-unknown -p ocre --no-default-features
       - run: cargo check --target wasm32-unknown-unknown -p ocre --all-features
 
@@ -35,6 +35,30 @@ jobs:
       # Unit, CLI (fake wrangler) and pseudo-terminal tests; 100% line coverage.
       # crates/ocre/src/runtime only runs inside workerd: the e2e test covers it.
       - run: >
-          cargo llvm-cov --workspace --exclude blog --all-features
+          cargo llvm-cov --workspace --all-features
           --ignore-filename-regex 'crates/ocre/src/runtime/'
           --fail-under-lines 100 --show-missing-lines
+
+  # What users get: an app from `ocre new` with every generator applied must
+  # compile to WebAssembly. Catches generator output the unit tests only read as text.
+  generated-app:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            ci-app
+      - run: cargo install --path crates/ocre-cli --locked --debug
+      - run: ocre new ci-app --starter blog --ocre-path "$PWD/crates/ocre" --yes --json
+      - working-directory: ci-app
+        run: |
+          ocre g auth --json
+          ocre g model Author name:string^ bio:text?
+          ocre g scaffold Book title:string^ summary:text? pages:integer rating:float? published:boolean released_on:date? author:references --json
+          ocre g api Review body:text stars:integer book:references --graphql --json
+          ocre g migration add_isbn_to_books isbn:string? --json
+          ocre g mailer Welcome greeting --json
+          ocre g mailbox --json
+          cargo check --target wasm32-unknown-unknown

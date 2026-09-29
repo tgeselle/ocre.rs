@@ -209,4 +209,5 @@ fn is_time(value: &str) -> bool {
 }
 
 #[cfg(test)]
+#[path = "../tests/validate.rs"]
 mod tests;

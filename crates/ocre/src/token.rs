@@ -72,4 +72,5 @@ pub(crate) fn random_bytes<const N: usize>() -> [u8; N] {
 }
 
 #[cfg(test)]
+#[path = "../tests/token.rs"]
 mod tests;

@@ -1,6 +1,6 @@
 //! Code that calls the Workers JavaScript runtime. It only runs inside
 //! workerd, so it is exercised by the end-to-end tests
-//! (`crates/ocre-cli/tests/e2e.rs`) rather than by native unit tests.
+//! (`crates/ocre-cli/tests/system/e2e.rs`) rather than by native unit tests.
 
 #[cfg(target_arch = "wasm32")]
 mod crypto;

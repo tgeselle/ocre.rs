@@ -146,4 +146,5 @@ fn print_human(report: &Report) {
 }
 
 #[cfg(test)]
+#[path = "../tests/output.rs"]
 mod tests;

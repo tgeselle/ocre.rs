@@ -165,4 +165,5 @@ pub(crate) fn register_routes(edits: &mut Edits, module: &str) -> Result<(), Cli
 }
 
 #[cfg(test)]
+#[path = "../../tests/generate/mod.rs"]
 mod tests;

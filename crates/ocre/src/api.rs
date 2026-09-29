@@ -119,4 +119,5 @@ impl<S: Send + Sync> FromRequestParts<S> for Page {
 }
 
 #[cfg(test)]
+#[path = "../tests/api.rs"]
 mod tests;

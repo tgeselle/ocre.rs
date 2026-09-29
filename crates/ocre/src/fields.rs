@@ -53,4 +53,5 @@ where
 }
 
 #[cfg(test)]
+#[path = "../tests/fields.rs"]
 mod tests;

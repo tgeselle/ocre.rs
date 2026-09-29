@@ -28,7 +28,8 @@ mod runtime;
 mod session;
 mod sql;
 #[cfg(test)]
-mod test_util;
+#[path = "../tests/support.rs"]
+mod support;
 /// Random tokens for emailed links and API keys, stored as digests.
 pub mod token;
 mod validate;

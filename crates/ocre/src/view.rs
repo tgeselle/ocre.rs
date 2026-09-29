@@ -48,4 +48,5 @@ fn escape(text: &str) -> String {
 }
 
 #[cfg(test)]
+#[path = "../tests/view.rs"]
 mod tests;

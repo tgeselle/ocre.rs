@@ -105,4 +105,5 @@ async fn derive(password: &str, salt: &[u8], iterations: u32) -> Result<Vec<u8>>
 }
 
 #[cfg(test)]
+#[path = "../tests/password.rs"]
 mod tests;

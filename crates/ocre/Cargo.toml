@@ -5,6 +5,9 @@ description = "Rails-like Rust web framework for Cloudflare Workers, deployable 
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+# Unit tests mirror src/ in tests/ (src/session.rs -> tests/session.rs) and are
+# compiled into the library with `#[path]`, so they are not test targets.
+autotests = false
 
 [dependencies]
 worker.workspace = true

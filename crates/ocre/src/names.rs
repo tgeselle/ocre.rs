@@ -9,4 +9,5 @@ pub(crate) fn humanize(snake: &str) -> String {
 }
 
 #[cfg(test)]
+#[path = "../tests/names.rs"]
 mod tests;

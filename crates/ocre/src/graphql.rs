@@ -61,4 +61,5 @@ where
 }
 
 #[cfg(test)]
+#[path = "../tests/graphql.rs"]
 mod tests;

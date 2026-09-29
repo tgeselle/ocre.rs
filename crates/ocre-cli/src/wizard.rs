@@ -137,4 +137,5 @@ fn prompt_error(err: std::io::Error) -> CliError {
 }
 
 #[cfg(test)]
+#[path = "../tests/wizard.rs"]
 mod tests;

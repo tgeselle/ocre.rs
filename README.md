@@ -296,14 +296,24 @@ last until logout or until `SECRET_KEY_BASE` changes) and roles
 ## Layout
 
 ```
-crates/ocre/        framework crate (features: html [default], graphql)
-crates/ocre-cli/    `ocre` command-line tool and app templates
-examples/blog/      example app (D1 + askama + htmx)
+crates/ocre/                 framework crate (features: html [default], graphql)
+  src/                       code; src/runtime/ calls the Workers JavaScript runtime
+  tests/                     unit tests, mirroring src/: tests/session.rs tests src/session.rs
+crates/ocre-cli/             `ocre` command-line tool
+  src/                       commands and generators
+  templates/                 files `ocre new` and the generators write
+  tests/                     unit tests mirroring src/ (tests/generate/model.rs, ...)
+  tests/integration/         the `ocre` binary against a fake wrangler, and the terminal wizard
+  tests/system/              generated apps running on workerd (`wrangler dev`)
+  tests/support/             shared test helpers and the fake wrangler script
 ```
 
-Unit tests live next to each module in a separate file (`src/sql.rs` →
-`src/sql/tests.rs`, declared with `#[cfg(test)] mod tests;`), so they can test
-private items without mixing with production code.
+Unit tests sit in `tests/` at the same path as the code they test, like
+RSpec's `spec/` or minitest's `test/`. Each source file includes its test file
+with `#[cfg(test)] #[path = "../tests/session.rs"] mod tests;`, so the tests
+can reach private items while living apart from the code. Both crates set
+`autotests = false`; the integration and system suites are declared as
+`[[test]]` targets in `crates/ocre-cli/Cargo.toml`.
 
 ## API
 
@@ -342,40 +352,32 @@ private items without mixing with production code.
   wasm target and the build fails.
 - Node.js (for `npx wrangler`).
 
-## Run the example
+## Try it
 
 ```sh
-cd examples/blog
-npx wrangler d1 migrations apply ocre-blog --local
-npx wrangler dev
-```
-
-Deploy (free Cloudflare account; `npx wrangler login` once). The first deploy
-creates the D1 database from `database_name`, so no `database_id` is needed;
-migrations run after it:
-
-```sh
-npx wrangler deploy
-npx wrangler d1 migrations apply ocre-blog --remote
+cargo install --path crates/ocre-cli
+ocre new blog --starter blog --ocre-path "$PWD/crates/ocre" --yes
+cd blog && ocre dev
 ```
 
 ## Tests
 
 ```sh
-cargo test --workspace                           # unit, CLI and terminal tests: ~2 s
-cargo test -p ocre-cli --test e2e -- --ignored   # real `wrangler dev`: ~16 s cold, ~6 s warm
-cargo llvm-cov --workspace --exclude blog \
+cargo test --workspace --all-features             # unit, CLI and terminal tests: ~5 s
+cargo test -p ocre-cli --test e2e -- --ignored   # real `wrangler dev`: ~20 s warm
+cargo llvm-cov --workspace --all-features \
   --ignore-filename-regex 'crates/ocre/src/runtime/' --fail-under-lines 100
 ```
 
 | Suite | What it runs |
 |---|---|
-| Unit (`src/**`) | Pure logic: params, errors, extractors, names, generators |
-| `crates/ocre-cli/tests/cli.rs` | The `ocre` binary with a fake wrangler (`tests/common/fake_npx.sh`): every command, `--json` contract, every error hint |
-| `crates/ocre-cli/tests/wizard.rs` | `ocre new` in a pseudo-terminal: questions, keys, cancel |
-| `crates/ocre-cli/tests/e2e.rs` | Generated app built to WebAssembly (dev build, shared `target/e2e-app`), served by `wrangler dev`, full CRUD over HTTP |
+| Unit (`crates/*/tests/**`, mirroring `src/`) | Pure logic: params, errors, sessions, crypto formats, MIME, extractors, generators |
+| `crates/ocre-cli/tests/integration/` | The `ocre` binary with a fake wrangler (`tests/support/fake_npx.sh`): every command, `--json` contract, every error hint; `ocre new` in a pseudo-terminal |
+| `crates/ocre-cli/tests/system/e2e.rs` | Generated apps built to WebAssembly (dev build, shared `target/e2e-app`), served by `wrangler dev`: CRUD, sessions, CSRF, auth, email over HTTP |
 
-CI runs lint and coverage as parallel jobs and requires 100% line coverage.
+CI runs lint, coverage and a generated-app build as parallel jobs, and requires
+100% line coverage. The generated-app job runs `ocre new` and every generator,
+then compiles the result to WebAssembly.
 The e2e test is not part of CI (it needs Node.js and a full WebAssembly
 build); run it locally before merging changes to the runtime or generators.
 `crates/ocre/src/runtime/` calls the Workers JavaScript runtime and only runs
@@ -384,8 +386,9 @@ measurement and exercised by the e2e test.
 
 ## Measured
 
-Example app, release build: `index_bg.wasm` 420 KB (130 KB gzipped),
-`index.js` 24 KB (Workers limit: 64 MiB). Worker startup time: 4 ms.
+Blog starter app, release build: `index_bg.wasm` 420 KB (130 KB gzipped),
+`index.js` 24 KB (Workers limit: 64 MiB). Worker startup time: 4 ms. Measured
+before sessions, auth and email were added.
 
 Production, free plan (`wrangler tail`, 55 requests):
 

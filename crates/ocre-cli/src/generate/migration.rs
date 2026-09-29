@@ -85,4 +85,5 @@ fn add_columns(table: &str, fields: &[Field]) -> Result<String, CliError> {
 }
 
 #[cfg(test)]
+#[path = "../../tests/generate/migration.rs"]
 mod tests;

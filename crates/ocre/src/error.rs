@@ -114,4 +114,5 @@ impl<T> OptionExt<T> for Option<T> {
 }
 
 #[cfg(test)]
+#[path = "../tests/error.rs"]
 mod tests;

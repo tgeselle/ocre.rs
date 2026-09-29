@@ -225,4 +225,5 @@ pub(super) fn parse_fields(specs: &[String]) -> Result<Vec<Field>, CliError> {
 }
 
 #[cfg(test)]
+#[path = "../../tests/generate/fields.rs"]
 mod tests;

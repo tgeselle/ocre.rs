@@ -234,4 +234,5 @@ fn git_available() -> bool {
 }
 
 #[cfg(test)]
+#[path = "../tests/new.rs"]
 mod tests;

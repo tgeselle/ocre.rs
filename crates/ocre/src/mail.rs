@@ -262,4 +262,5 @@ pub(crate) fn cloudflare_error(detail: &str) -> Error {
 }
 
 #[cfg(test)]
+#[path = "../tests/mail.rs"]
 mod tests;

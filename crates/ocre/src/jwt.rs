@@ -122,4 +122,5 @@ fn verify(key: &Key, token: &str, now: i64) -> Option<Claims> {
 }
 
 #[cfg(test)]
+#[path = "../tests/jwt.rs"]
 mod tests;

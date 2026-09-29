@@ -285,4 +285,5 @@ impl<S: Sync> FromRequestParts<S> for Flash {
 }
 
 #[cfg(test)]
+#[path = "../tests/session.rs"]
 mod tests;
