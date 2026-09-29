@@ -37,7 +37,7 @@ fn new_creates_an_app_without_touching_cloudflare_by_default() {
     let gitignore = fs::read_to_string(root.join(".gitignore")).unwrap();
     assert!(gitignore.contains("\n.dev.vars\n.dev.vars.*\n"), "{gitignore}");
     let agents = fs::read_to_string(root.join("AGENTS.md")).unwrap();
-    assert!(agents.starts_with("# shop\n") && agents.contains("`https://ocre.rs/llms.txt`"), "{agents}");
+    assert!(agents.starts_with("# shop\n") && agents.contains("`https://ocre-docs.raitomm.workers.dev/llms.txt`"), "{agents}");
     assert!(!agents.contains("__"), "no template placeholder left: {agents}");
     assert!(sandbox.calls().is_empty(), "no wrangler call without --login/--deploy");
 }

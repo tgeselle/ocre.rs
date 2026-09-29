@@ -20,7 +20,7 @@ use std::process::{Command, ExitCode};
 
 /// Where the site is published. Also written in the generated apps' AGENTS.md
 /// (`crates/ocre-cli/templates/new/AGENTS.md`): change both together.
-const DEFAULT_BASE_URL: &str = "https://ocre.rs";
+const DEFAULT_BASE_URL: &str = "https://ocre-docs.raitomm.workers.dev";
 /// The mdBook release the site is built and tested with.
 const MDBOOK_VERSION: &str = "0.5.4";
 

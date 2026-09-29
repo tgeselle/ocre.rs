@@ -27,10 +27,10 @@ ocre deploy    # deploys, creates the D1 database if needed, applies remote migr
 
 Each generated app has an `AGENTS.md` with the conventions, commands and
 free-plan limits an agent needs, and a link to the documentation site
-(<https://ocre.rs>; sources in [`docs/`](docs/), see
+(<https://ocre-docs.raitomm.workers.dev>, moving to ocre.rs once the domain is bought; sources in [`docs/`](docs/), see
 [Documentation](#documentation)): tutorial, guides, reference and
 explanations, each page also as Markdown (`<page>.md`), with
-[`llms.txt`](https://ocre.rs/llms.txt) and `llms-full.txt` for agents.
+[`llms.txt`](https://ocre-docs.raitomm.workers.dev/llms.txt) and `llms-full.txt` for agents.
 
 ## CLI
 
@@ -775,7 +775,7 @@ one-line descriptions from `docs/src/SUMMARY.md` and each page's first
 paragraph) and `llms-full.txt` (every page in reading order, links made
 absolute), serves `docs/api-index.md` as `/api-index.md`, and puts
 `cargo doc -p ocre --all-features --no-deps` under `/api/`. The base URL in
-those files is `https://ocre.rs` (`OCRE_DOCS_URL` overrides it; the generated
+those files is `https://ocre-docs.raitomm.workers.dev` (`OCRE_DOCS_URL` overrides it; the generated
 AGENTS.md uses `DOCS_URL` in `crates/ocre-cli/src/new.rs`).
 
 Writing pages: start with `# Title` and a one-paragraph summary, keep each

@@ -21,7 +21,7 @@ use crate::{
 const OCRE_GIT: &str = "https://github.com/tgeselle/ocre.rs";
 /// Documentation site, linked from the app's AGENTS.md (`__DOCS_URL__`). Also
 /// `DEFAULT_BASE_URL` in docs/tool/src/main.rs: change both together.
-const DOCS_URL: &str = "https://ocre.rs";
+const DOCS_URL: &str = "https://ocre-docs.raitomm.workers.dev";
 
 /// (path in the app, template contents), shared by both app kinds.
 const FILES: &[(&str, &str)] = &[
