@@ -135,10 +135,12 @@ cargo llvm-cov --workspace --exclude blog \
 | `crates/ocre-cli/tests/wizard.rs` | `ocre new` in a pseudo-terminal: questions, keys, cancel |
 | `crates/ocre-cli/tests/e2e.rs` | Generated app built to WebAssembly (dev build, shared `target/e2e-app`), served by `wrangler dev`, full CRUD over HTTP |
 
-CI runs lint, coverage and e2e as three parallel jobs and requires 100% line
-coverage. `crates/ocre/src/runtime/` calls the Workers JavaScript runtime and
-only runs inside workerd, where it cannot be instrumented; it is excluded from
-the measurement and exercised by the e2e test.
+CI runs lint and coverage as parallel jobs and requires 100% line coverage.
+The e2e test is not part of CI (it needs Node.js and a full WebAssembly
+build); run it locally before merging changes to the runtime or generators.
+`crates/ocre/src/runtime/` calls the Workers JavaScript runtime and only runs
+inside workerd, where it cannot be instrumented; it is excluded from the
+measurement and exercised by the e2e test.
 
 ## Measured
 

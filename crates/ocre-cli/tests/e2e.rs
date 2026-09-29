@@ -54,8 +54,9 @@ fn start(sandbox: &Sandbox, root: &Path) -> Server {
     let log = sandbox.work.join("dev.log");
     let output = std::fs::File::create(&log).unwrap();
     let child = command.process_group(0).stdout(output.try_clone().unwrap()).stderr(output).spawn().unwrap();
-    let mut server = Server { child, base: format!("http://127.0.0.1:{port}") };
-    let deadline = Instant::now() + Duration::from_secs(900); // first build compiles every dependency
+    // wrangler dev listens on `localhost`, which is IPv6-only on some Linux hosts.
+    let mut server = Server { child, base: format!("http://localhost:{port}") };
+    let deadline = Instant::now() + Duration::from_secs(240);
     while agent().get(&server.base).call().is_err() {
         if let Some(status) = server.child.try_wait().unwrap() {
             panic!("`ocre dev` exited ({status}):\n{}", std::fs::read_to_string(&log).unwrap());
