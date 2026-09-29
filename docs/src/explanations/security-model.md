@@ -36,7 +36,7 @@ Both the session key and the JWT key are derived from the `SECRET_KEY_BASE` Work
 
 `ocre secret` generates 128 hexadecimal characters (512 bits). A value shorter than 64 characters is refused: handlers that use the session or a JWT answer 500, and the log names the fix; other routes keep working.
 
-`ocre deploy` uploads a new secret only when the Worker has none, and never replaces an existing one. Rotating it yourself (`ocre secret | npx wrangler secret put SECRET_KEY_BASE`) signs every user out and invalidates every JWT at once, which is what you want after a leak; API keys and emailed links, stored as digests in D1, keep working. For a planned rotation, put the old value in the `SECRET_KEY_BASE_PREVIOUS` secret first: keys derived from it still decrypt cookies (which are re-encrypted with the new key on the same response) and verify JWTs, but never encrypt or sign anything new. Anyone who learns the secret can forge a session for any user id and mint JWTs: rotate it, without `SECRET_KEY_BASE_PREVIOUS`, if it leaks.
+`ocre deploy` uploads a new secret only when the Worker has none, and never replaces an existing one. Rotating it yourself (a new `ocre secret` value uploaded with `ocre secrets push SECRET_KEY_BASE --file .prod.vars`) signs every user out and invalidates every JWT at once, which is what you want after a leak; API keys and emailed links, stored as digests in D1, keep working. For a planned rotation, put the old value in the `SECRET_KEY_BASE_PREVIOUS` secret first: keys derived from it still decrypt cookies (which are re-encrypted with the new key on the same response) and verify JWTs, but never encrypt or sign anything new. Anyone who learns the secret can forge a session for any user id and mint JWTs: rotate it, without `SECRET_KEY_BASE_PREVIOUS`, if it leaks.
 
 ## Sessions
 
@@ -70,7 +70,7 @@ Consequences:
 
 ## CORS
 
-Without `ALLOWED_ORIGINS`, `ocre::serve` adds no CORS layer: browsers let other sites send requests but not read the answers, and the CSRF check refuses their unsafe ones. With it (a comma-separated `[vars]` value such as `"https://app.example.com, https://admin.example.com"`), the listed origins get CORS headers for `GET`, `POST`, `PUT`, `PATCH` and `DELETE`, with the `Content-Type`, `Authorization` and `Accept` request headers, and credentials allowed. Credentials mean cookies: a listed origin can act as the signed-in user, and it also passes the CSRF check. List only frontends you control.
+Without `ALLOWED_ORIGINS`, `ocre::serve` adds no CORS layer: browsers let other sites send requests but not read the answers, and the CSRF check refuses their unsafe ones. With it (a comma-separated `bindings.text` variable such as `"https://app.example.com, https://admin.example.com"`), the listed origins get CORS headers for `GET`, `POST`, `PUT`, `PATCH` and `DELETE`, with the `Content-Type`, `Authorization` and `Accept` request headers, and credentials allowed. Credentials mean cookies: a listed origin can act as the signed-in user, and it also passes the CSRF check. List only frontends you control.
 
 ## Security headers
 

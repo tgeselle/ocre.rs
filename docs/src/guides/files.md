@@ -6,7 +6,7 @@ Ocre stores uploaded files in Cloudflare R2 and describes each one with four col
 
 - An Ocre app created with `ocre new` (see [Installation](../getting-started/installation.md)).
 - R2 enabled once on the Cloudflare account before the first deploy (see [Deploying: enable R2 once](#deploying-enable-r2-once)). Local development needs nothing: `ocre dev` simulates R2.
-- The generator that adds the first `attachment` field also adds the `STORAGE` R2 binding to `wrangler.toml`; nothing else to configure.
+- The generator that adds the first `attachment` field also adds the `STORAGE` R2 binding to `cloudflare.config.ts`; nothing else to configure.
 - The protected download example uses `crate::auth::CurrentUser`, created by `ocre g auth` (see [Authentication](authentication.md)).
 
 ## How a file is stored
@@ -42,7 +42,7 @@ ocre g scaffold Photo title:string image:attachment notes:attachment?
   create  templates/photos/edit.html
   create  templates/photos/_form.html
   update  src/models/mod.rs
-  update  wrangler.toml
+  update  cloudflare.config.ts
   update  src/lib.rs
 
 Next:
@@ -64,17 +64,15 @@ What it generates, piece by piece:
 | HTML forms | `enctype="multipart/form-data"`, a file input per attachment with an `accept` list, and a "Remove notes" checkbox on the edit page for the optional file |
 | `FORM_LIMIT` in `src/photos.rs` | Largest request the forms accept: the sum of the files' limits plus 1 MB for the text fields. A larger request gets a 413 page |
 | `GET /photos/{id}/image`, `GET /photos/{id}/notes` | Streams the file with `storage::serve` (404 when the optional file is absent) |
-| `wrangler.toml` | `[[r2_buckets]] binding = "STORAGE"`, `bucket_name = "<app>-storage"`, added by the first generator that needs it |
+| `cloudflare.config.ts` | `STORAGE: bindings.r2({ name: "<app>-storage" })`, added by the first generator that needs it |
 
-The `wrangler.toml` entry:
+The `cloudflare.config.ts` entry, after the `// ocre:env` marker:
 
-```toml
-# Files (`ocre::storage`, `attachment` fields): an R2 bucket. `ocre dev` keeps a
-# local copy under .wrangler/state; `ocre deploy` creates the bucket if needed.
-# Free plan: 10 GB stored, 1M writes and 10M reads a month; deletes are free.
-[[r2_buckets]]
-binding = "STORAGE"
-bucket_name = "platapp-storage"
+```ts
+// Files (`ocre::storage`, `attachment` fields): an R2 bucket. `ocre dev` keeps a
+// local copy under .wrangler/state; `ocre deploy` creates the bucket if needed.
+// Free plan: 10 GB stored, 1M writes and 10M reads a month; deletes are free.
+STORAGE: bindings.r2({ name: "platapp-storage" }),
 ```
 
 The rules are plain constants in `src/models/photo.rs`; change them there:
@@ -295,7 +293,7 @@ Everything the generated code uses is public, for handlers the generators do not
 
 The `Multipart` extractor rejects bad requests before the handler runs: 400 when the body is not `multipart/form-data` with a boundary or is malformed, 413 "The request is too large (maximum is ...)" when `Content-Length` announces more than `LIMIT` (before anything is read) or as soon as the body passes it. Browsers (`Accept: text/html`) get an HTML error page, other clients JSON.
 
-Every storage function fails with a 500 whose log names the missing `[[r2_buckets]]` entry when the `STORAGE` binding is absent.
+Every storage function fails with a 500 whose log names the missing `STORAGE: bindings.r2(...)` entry when the `STORAGE` binding is absent.
 
 ### A custom upload handler
 
@@ -463,7 +461,7 @@ Worker limits that shape uploads ([Workers limits](https://developers.cloudflare
 
 ## Local development
 
-`ocre dev` runs wrangler's R2 simulation: objects are kept under `.wrangler/state` (git-ignored) and survive restarts. `ocre db reset` only deletes the local database, not the stored objects. The bindings table printed at startup shows the bucket:
+`ocre dev` runs the local R2 simulation of `cf dev`: objects are kept under `.wrangler/state` (git-ignored) and survive restarts. `ocre db reset` only deletes the local database, not the stored objects. The bindings table printed at startup shows the bucket:
 
 ```text
 env.STORAGE (platapp-storage)                              R2 Bucket                 local
@@ -471,7 +469,7 @@ env.STORAGE (platapp-storage)                              R2 Bucket            
 
 ## Deploying: enable R2 once
 
-`ocre deploy` runs `wrangler r2 bucket info <bucket>` for every `[[r2_buckets]]` entry and `wrangler r2 bucket create <bucket>` for the missing ones, before deploying. R2 has to be enabled once per account in the Cloudflare dashboard (Storage & databases > R2), which asks for a payment method even for the free tier. When it is not, the check fails with Cloudflare API code 10042 and the CLI prints this hint (from `crates/ocre-cli/src/wrangler.rs`):
+`ocre deploy` runs `cf r2 buckets get <bucket>` for every `bindings.r2(...)` entry and `cf r2 buckets create` for the missing ones, before deploying. R2 has to be enabled once per account in the Cloudflare dashboard (Storage & databases > R2), which asks for a payment method even for the free tier. When it is not, the check fails with Cloudflare API code 10042 and the CLI prints this hint (from `crates/ocre-cli/src/cloudflare.rs`):
 
 ```text
 hint: enable R2 once in the Cloudflare dashboard (Storage & databases > R2; the free plan asks for a payment method but charges nothing within 10 GB, 1M writes and 10M reads a month), then run `ocre deploy` again
@@ -488,7 +486,7 @@ hint: enable R2 once in the Cloudflare dashboard (Storage & databases > R2; the 
 
 - [Field types](../reference/field-types.md): `attachment` and the other types.
 - [Generators](../reference/generators.md#ocre-g-scaffold): `ocre g scaffold` and [`ocre g api`](../reference/generators.md#ocre-g-api).
-- [Configuration](../reference/configuration.md#r2_buckets): the `[[r2_buckets]]` entry.
+- [Configuration](../reference/configuration.md#env-storage-r2): the `STORAGE` entry.
 - [Validations](validations.md): `Validator` and 422 responses.
 - [Authentication](authentication.md): `CurrentUser` and ownership checks.
 - [Free-plan limits](../reference/limits.md) and [Cost model](../explanations/cost-model.md).

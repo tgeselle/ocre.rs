@@ -56,8 +56,8 @@
 //! reconnection) and each broadcast is one Durable Object request (100,000 a
 //! day); messages sent to browsers are free; a connection is also one Worker
 //! request, while a broadcast is a subrequest of the request that sends it.
-//! Needs Ocre's `realtime` feature and, in wrangler.toml, the binding and a
-//! `new_sqlite_classes` migration for `OcreChannel` (see [`OcreChannel`]).
+//! Needs Ocre's `realtime` feature and, in cloudflare.config.ts, the binding and
+//! the SQLite-backed `OcreChannel` export (see [`OcreChannel`]).
 //! API-only apps can use the same pieces and broadcast JSON.
 
 use axum::{extract::FromRequestParts, http::request::Parts};
@@ -70,14 +70,15 @@ use crate::{
     session::{Rejection, reject},
 };
 
-/// Name of the Durable Object binding holding the channels, declared in wrangler.toml.
+/// Name of the Durable Object binding holding the channels, declared in cloudflare.config.ts.
 ///
 /// A missing binding makes [`broadcast`] and [`WebSocketUpgrade::connect`]
-/// fail with [`Error::Internal`] naming the wrangler.toml entries to add.
+/// fail with [`Error::Internal`] naming the cloudflare.config.ts entries to add.
 pub const CHANNELS_BINDING: &str = "CHANNELS";
 /// Name of the Durable Object class Ocre exports for channels ([`OcreChannel`]).
 ///
-/// wrangler.toml's `class_name` and `new_sqlite_classes` must use it.
+/// The `exportName` of the `CHANNELS` binding and the `exports` key in
+/// cloudflare.config.ts must use it.
 pub const CHANNEL_CLASS: &str = "OcreChannel";
 /// Prefix of every line Ocre logs about realtime, e.g. in `ocre dev` output.
 ///
@@ -105,9 +106,9 @@ pub(crate) fn channel_error(name: &str) -> Option<String> {
 /// Error for a missing `CHANNELS` Durable Object binding.
 pub(crate) fn missing_binding(detail: &str) -> Error {
     Error::internal(format!(
-        "Durable Object binding `{CHANNELS_BINDING}` is missing ({detail}). Fix: add to wrangler.toml \
-         [[durable_objects.bindings]] name = \"{CHANNELS_BINDING}\", class_name = \"{CHANNEL_CLASS}\" and \
-         [[migrations]] tag = \"ocre-realtime-v1\", new_sqlite_classes = [\"{CHANNEL_CLASS}\"] \
+        "Durable Object binding `{CHANNELS_BINDING}` is missing ({detail}). Fix: add to cloudflare.config.ts \
+         `{CHANNELS_BINDING}: bindings.durableObject({{ worker: \"<app>\", exportName: \"{CHANNEL_CLASS}\" }}),` in worker.env and \
+         `{CHANNEL_CLASS}: exports.durableObject({{ storage: \"sqlite\" }}),` in worker.exports \
          (`ocre g scaffold <Model> ... --realtime` adds them)"
     ))
 }

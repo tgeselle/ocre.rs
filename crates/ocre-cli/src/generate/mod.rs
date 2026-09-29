@@ -42,6 +42,7 @@ pub use schedule::schedule;
 pub use templates::{TemplateInfo, override_templates};
 
 use crate::{
+    config::{self, Config},
     output::{CliError, Report},
     project::Project,
 };
@@ -196,6 +197,11 @@ pub(crate) fn next_migration_path(edits: &Edits, name: &str) -> Result<String, C
         .max()
         .unwrap_or(0);
     Ok(format!("migrations/{:04}_{name}.sql", highest + 1))
+}
+
+/// cloudflare.config.ts as it will be: pending edits first, then the disk.
+pub(crate) fn read_config(edits: &Edits) -> Result<Config, CliError> {
+    Config::parse(edits.read(config::FILE)?.unwrap_or_default())
 }
 
 /// Inserts `line` after the line holding `marker`, with the marker's

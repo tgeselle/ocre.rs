@@ -1,6 +1,6 @@
 # Installation
 
-This page installs the tools an Ocre app needs (Rust through rustup with the WebAssembly target, Node.js for wrangler, and the `ocre` CLI), checks the installation, and creates a first app with `ocre new`, either through the guided setup or with flags.
+This page installs the tools an Ocre app needs (Rust through rustup with the WebAssembly target, Node.js 22 for Cloudflare's `cf` CLI, and the `ocre` CLI), checks the installation, and creates a first app with `ocre new`, either through the guided setup or with flags.
 
 ## Before you start
 
@@ -31,7 +31,11 @@ Do not use Homebrew's `rust` formula (`brew install rust`). It installs `rustc` 
 
 ## Install Node.js
 
-The CLI runs Cloudflare's [wrangler](https://developers.cloudflare.com/workers/wrangler/) for local development, migrations and deploys, always as `npx --yes wrangler@4`. Install [Node.js](https://nodejs.org) 20 or newer, which provides `npx`. You do not install wrangler yourself: `npx` downloads wrangler 4 the first time a command needs it and caches it.
+The CLI runs Cloudflare's [`cf` CLI](https://www.npmjs.com/package/cf) for local development, deploys and every Cloudflare API call. Install [Node.js](https://nodejs.org) 22 or newer (cf's minimum), which provides `npm` and `npx`. You do not install cf yourself: each app pins it in its own `package.json`, with `wrangler` (which cf delegates the build to, and which Ocre uses for local database commands) and `typescript`, and `ocre new` runs `npm install` in the new app. Outside an app (`ocre login` before your first app), the CLI runs `npx --yes cf@1.0.0-beta.5`.
+
+cf sends anonymous usage telemetry by default; it prints a notice about it on stderr. To opt out, run `npx cf cli telemetry disable` once, or set `CF_SEND_TELEMETRY=false` in your environment. Ocre does not change that choice for you.
+
+If you used an earlier Ocre, whose apps ran wrangler with a `wrangler.toml`: cf keeps its own login, separate from wrangler's, so run `ocre login` once again, and convert each app with [Upgrading from wrangler.toml](../guides/upgrading.md).
 
 ## Install the ocre CLI
 
@@ -77,7 +81,7 @@ Commands:
   migrate   Apply D1 migrations (local database unless --remote)
   db        Database tasks: seed, reset
   sql       Run SQL on the D1 database (local unless --remote) and print the rows
-  dev       Apply local migrations, then run the app with `wrangler dev`
+  dev       Apply local migrations, then run the app with `cf dev`
   deploy    Deploy to Cloudflare and apply remote migrations
   secret    Print a new random secret, like `rails secret`: a value for SECRET_KEY_BASE
   routes    List the app's HTTP routes, read from its source (no build)
@@ -107,16 +111,16 @@ The questions, in order (each one is skipped when the matching flag was given):
 | What is your app called? | A name, checked as you type: lowercase letters, digits and dashes, starting with a letter, at most 63 characters, and no existing directory of that name | `ocre new <name>` |
 | What are you building? | Full-stack app (HTML pages with askama and htmx) or API only (JSON endpoints, no HTML) | `--full-stack`, `--api` |
 | Pick a starter | Empty (a home page, or a status endpoint in API mode) or Blog (posts with title, body and published, full CRUD) | `--starter empty`, `--starter blog` |
-| Connect your Cloudflare account? | Log in now (opens your browser) or Later (run `ocre login` when you are ready). Asked only when `wrangler whoami` finds no login; otherwise the setup prints `Logged in to Cloudflare as <email>` | `--login`, `--no-login` |
+| Connect your Cloudflare account? | Log in now (`cf auth login`, opens your browser) or Later (run `ocre login` when you are ready). Asked only when `cf auth whoami` finds no login; otherwise the setup prints `Logged in to Cloudflare as <email>` | `--login`, `--no-login` |
 | Which Cloudflare account should host it? | One of the accounts of your login, when it has several | `--account-id <id>` |
 | Initialize a git repository? | Yes (default) or no | `--git`, `--no-git` |
-| Deploy it now? The first build takes about a minute. | Yes (default) or no. Asked only when you are logged in | `--deploy`, `--no-deploy` |
+| Deploy it now? The first build takes about a minute. | Yes (default) or no. Asked only when you are logged in and the npm install is on | `--deploy`, `--no-deploy` |
 
-The setup then creates the app, deploys it if you said yes, and ends with a "Next steps" note (`cd <name>`, `ocre dev`, `ocre deploy`, plus `ocre login` when you skipped the login) and either `Your app is live at <url>` or `Happy building!`. Esc or Ctrl-C cancels with `error: cancelled`.
+The setup then creates the app, runs `npm install` in it, deploys it if you said yes, and ends with a "Next steps" note (`cd <name>`, `ocre dev`, `ocre deploy`, plus `ocre login` when you skipped the login) and either `Your app is live at <url>` or `Happy building!`. Esc or Ctrl-C cancels with `error: cancelled`.
 
 ## Create an app with flags (agents and scripts)
 
-The guided setup only runs when stdin and stdout are a terminal and neither `--yes` nor `--json` was given. Otherwise `ocre new` never prompts: flags decide, and anything not given takes an opt-in default (full-stack, empty starter, no Cloudflare login, no git, no deploy).
+The guided setup only runs when stdin and stdout are a terminal and neither `--yes` nor `--json` was given. Otherwise `ocre new` never prompts: flags decide, and anything not given takes an opt-in default (full-stack, empty starter, no Cloudflare login, no git, no deploy; the npm install still runs).
 
 | Flag | Effect | Default without prompts |
 |---|---|---|
@@ -129,6 +133,7 @@ The guided setup only runs when stdin and stdout are a terminal and neither `--y
 | `--deploy` / `--no-deploy` | Deploy right away (implies `--login`) | no deploy |
 | `--yes`, `-y` | Never prompt, even in a terminal | |
 | `--ocre-path <dir>` | Depend on a local `crates/ocre` checkout instead of the Git repository | Git dependency |
+| `--no-install` | Skip `npm install` in the new app (offline); run it yourself before `ocre dev`. `ocre doctor` reports it until you do | install |
 | `--json` | Print one JSON object on stdout; tool output goes to stderr | |
 
 ```sh
@@ -137,7 +142,10 @@ ocre new blog --yes
 
 ```text
   create  blog/Cargo.toml
-  create  blog/wrangler.toml
+  create  blog/cloudflare.config.ts
+  create  blog/wrangler.config.ts
+  create  blog/package.json
+  create  blog/tsconfig.json
   create  blog/rust-toolchain.toml
   create  blog/.gitignore
   create  blog/AGENTS.md
@@ -147,6 +155,7 @@ ocre new blog --yes
   create  blog/templates/layout.html
   create  blog/templates/home.html
   create  blog/.dev.vars
+  npm install (cf 1.0.0-beta.5, wrangler 4.144.0)
 
 Next:
   cd blog
@@ -161,7 +170,7 @@ ocre new other --json --yes
 ```
 
 ```json
-{"command":"new","created":["other/Cargo.toml","other/wrangler.toml","other/rust-toolchain.toml","other/.gitignore","other/AGENTS.md","other/migrations/.gitkeep","other/public/robots.txt","other/src/lib.rs","other/templates/layout.html","other/templates/home.html","other/.dev.vars"],"next":["cd other","ocre dev","ocre deploy"],"ok":true}
+{"command":"new","created":["other/Cargo.toml","other/cloudflare.config.ts","other/wrangler.config.ts","other/package.json","other/tsconfig.json","other/rust-toolchain.toml","other/.gitignore","other/AGENTS.md","other/migrations/.gitkeep","other/public/robots.txt","other/src/lib.rs","other/templates/layout.html","other/templates/home.html","other/.dev.vars"],"next":["cd other","ocre dev","ocre deploy"],"ok":true,"ran":["npm install (cf 1.0.0-beta.5, wrangler 4.144.0)"]}
 ```
 
 `--starter blog` also runs the scaffold generator for `Post title:string body:text published:boolean` and lists its files (`src/models/post.rs`, `migrations/0001_create_posts.sql`, `src/posts.rs`, `templates/posts/*.html`...). `--api` writes an API-only `src/lib.rs`, no `templates/`, and adds `[package.metadata.ocre] mode = "api"` to `Cargo.toml`.
@@ -171,9 +180,12 @@ ocre new other --json --yes
 | File | Contents |
 |---|---|
 | `Cargo.toml` | The app crate (`cdylib`), depending on `ocre`, `worker`, `axum`, `askama` (full-stack only) and `serde`; a standalone `[workspace]`; release profile tuned for size |
-| `wrangler.toml` | The Worker: `name`, the `[build]` command (installs `worker-build` and compiles to WebAssembly), `public/` as static assets, the `DB` D1 database, and `MAIL_FROM` under `[vars]` |
+| `cloudflare.config.ts` | The Worker's Cloudflare configuration: `name`, logs, the `DB` D1 database and `MAIL_FROM` in `env`, and the `// ocre:env`, `// ocre:triggers`, `// ocre:exports` markers where generators add entries (see [Configuration](../reference/configuration.md#cloudflareconfigts)) |
+| `wrangler.config.ts` | The build command (installs `worker-build` and compiles to WebAssembly) and `public/` as static assets |
+| `package.json`, `package-lock.json` | The pinned `cf`, `wrangler` and `typescript`, installed in `node_modules/` by `npm install`; commit both files |
+| `tsconfig.json` | Type checking of the two `.ts` files, for your editor and `npx tsc -p .` |
 | `rust-toolchain.toml` | Stable Rust with the `wasm32-unknown-unknown` target |
-| `.gitignore` | Build output, `.wrangler/` (local database) and `.dev.vars` |
+| `.gitignore` | Build output, `node_modules/`, `.wrangler/` (local database), `.cloudflare/`, `.dev.vars`, `.prod.vars` and `.env*` |
 | `AGENTS.md` | Conventions, commands and free-plan limits for AI agents working on the app |
 | `migrations/` | D1 SQL migrations, applied in order (empty for now) |
 | `public/robots.txt` | Static files, served by Cloudflare before the Worker runs |
@@ -203,17 +215,24 @@ error: rustc not found
 hint: install Rust with rustup: https://rustup.rs
 ```
 
-No Node.js (any command that runs wrangler: `ocre dev`, `ocre migrate`, `ocre deploy`, `ocre login`...):
+No Node.js (`ocre new` without `--no-install`):
 
 ```text
-error: could not run npx: No such file or directory (os error 2)
-hint: install Node.js 20 or newer (it provides npx)
+error: npm not found
+hint: install Node.js 22 or newer (it provides npm), or pass --no-install and run `npm install` in the app later
+```
+
+The app's npm packages not installed (after `ocre new --no-install`, or in a fresh clone), for `ocre dev` and `ocre deploy` (local database commands such as `ocre migrate` say `the app's wrangler is not installed (node_modules/.bin/wrangler)` with the same fix):
+
+```text
+error: the app's npm packages are not installed (node_modules/.bin/cf, node_modules/.bin/wrangler)
+hint: run `npm install` in /path/to/blog (needs Node.js 22 or newer)
 ```
 
 An app command run outside an app:
 
 ```text
-error: no wrangler.toml found in this directory or its parents
+error: no cloudflare.config.ts found in this directory or its parents
 hint: run this command inside an Ocre app, or create one with `ocre new <name>`
 ```
 
@@ -239,4 +258,5 @@ hint: choose another name or remove the directory
 - [Tutorial: a blog](tutorial.md): build, run and deploy a first app.
 - [CLI commands](../reference/cli.md#ocre-new): every command and flag, including `ocre new`.
 - [Deployment](../guides/deployment.md): what `ocre deploy` creates on Cloudflare.
-- [Configuration](../reference/configuration.md): `wrangler.toml`, `.dev.vars`, variables and secrets.
+- [Configuration](../reference/configuration.md): `cloudflare.config.ts`, `.dev.vars`, variables and secrets.
+- [Upgrading from wrangler.toml](../guides/upgrading.md): converting an app made by an earlier Ocre.

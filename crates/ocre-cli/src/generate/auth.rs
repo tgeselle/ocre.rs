@@ -7,8 +7,16 @@
 //! The files are static: they live in `templates/auth/` and are compiled by
 //! the e2e test. API-only apps get the JSON part only.
 
-use super::{Edits, MODULES_MARKER, insert_after_marker, model::register_model, next_migration_path, register_routes};
-use crate::{CliResult, output::CliError, project::Project};
+use super::{
+    Edits, MODULES_MARKER, insert_after_marker, model::register_model, next_migration_path, read_config,
+    register_routes,
+};
+use crate::{
+    CliResult,
+    config::{self, ENV_MARKER},
+    output::CliError,
+    project::Project,
+};
 
 /// What `ocre g auth` generates beyond the default.
 #[derive(Debug, Clone, Default)]
@@ -165,7 +173,7 @@ pub fn auth(project: &Project, options: &AuthOptions) -> CliResult {
     });
     for (name, id, secret) in &providers {
         report.next.push(format!(
-            "register an OAuth app with {name} (callback https://<your host>/auth/{name}/callback), put {id} and {secret} in .dev.vars, then `npx wrangler secret put {id}` and `npx wrangler secret put {secret}`"
+            "register an OAuth app with {name} (callback https://<your host>/auth/{name}/callback), put {id} and {secret} in .dev.vars and their production values in .prod.vars, then `ocre secrets push {id} {secret} --file .prod.vars`"
         ));
     }
     Ok(report)
@@ -188,26 +196,22 @@ fn oauth_providers(requested: &[String]) -> Result<Vec<(&'static str, &'static s
     Ok(providers)
 }
 
-/// Adds the `AUTH_RATE_LIMITER` binding to wrangler.toml unless it is there.
+/// Adds the `AUTH_RATE_LIMITER` binding to cloudflare.config.ts unless it is there.
 fn add_rate_limiter(edits: &mut Edits, app: &str) -> Result<(), CliError> {
-    let wrangler = edits.read("wrangler.toml")?.unwrap_or_default();
-    if wrangler.contains(&format!("\"{RATE_LIMITER}\"")) {
+    let config = read_config(edits)?;
+    if config.binding(RATE_LIMITER).is_some() {
         return Ok(());
     }
-    // Bindings with the same namespace_id share counters across the account's
+    // Bindings with the same namespace share counters across the account's
     // Workers: derive one from the app name so apps do not collide.
     let namespace =
         1000 + app.bytes().fold(0u32, |hash, byte| hash.wrapping_mul(31).wrapping_add(u32::from(byte))) % 9_000_000;
-    let block = format!(
-        "\n# `ocre g auth`: login, sign-up, token and emailed-link routes allow 10 attempts
-# a minute per IP address and Cloudflare location (Workers Rate Limiting,
-# free plan, no storage used). `period` is 10 or 60 seconds.
-[[ratelimits]]
-name = \"{RATE_LIMITER}\"
-namespace_id = \"{namespace}\"
-simple = {{ limit = 10, period = 60 }}
-"
+    let entry = format!(
+        "// `ocre g auth`: login, sign-up, token and emailed-link routes allow 10 attempts
+// a minute per IP address and Cloudflare location (Workers Rate Limiting,
+// free plan, no storage used). `period` is 10 or 60 seconds.
+{RATE_LIMITER}: bindings.rateLimit({{ namespace: \"{namespace}\", simple: {{ limit: 10, period: 60 }} }}),"
     );
-    edits.update("wrangler.toml", format!("{}\n{block}", wrangler.trim_end()));
+    edits.update(config::FILE, config.insert(ENV_MARKER, &entry)?);
     Ok(())
 }

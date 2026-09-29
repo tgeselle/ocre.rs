@@ -1,0 +1,13 @@
+{
+  "uuid": "71338291-825e-49d2-bea8-99b13f9db18a",
+  "name": "ocre-cfcheck-demo",
+  "created_at": "2026-09-29T22:55:48.564Z",
+  "version": "production",
+  "file_size": 8192,
+  "num_tables": 0,
+  "created_in_region": "ENAM",
+  "jurisdiction": null,
+  "read_replication": {
+    "mode": "disabled"
+  }
+}

@@ -298,7 +298,7 @@ Adding a value later means changing the `CHECK`, which SQLite cannot alter: add 
 
 ## Migrations
 
-Migrations live in `migrations/`, named `NNNN_<name>.sql` (four digits, one more than the highest existing number). Wrangler applies them in file-name order and records each applied name in the `d1_migrations` table:
+Migrations live in `migrations/`, named `NNNN_<name>.sql` (four digits, one more than the highest existing number). `ocre migrate` applies them in file-name order and records each applied name in the `d1_migrations` table:
 
 ```sh
 ocre sql "SELECT id, name FROM d1_migrations"
@@ -440,7 +440,7 @@ ocre migrate --status --json
 {"command":"migrate","next":["ocre migrate"],"ok":true,"pending":["0006_add_views_to_posts.sql"]}
 ```
 
-`ocre migrate` runs `wrangler d1 migrations apply <database> --local` and shows wrangler's output:
+`ocre migrate` runs the app's wrangler on the local database (`wrangler d1 migrations apply DB --local`, see [Why wrangler still appears](deployment.md#why-wrangler-still-appears)) and shows its output:
 
 ```sh
 ocre migrate
@@ -466,7 +466,7 @@ Each migration file runs as one unit: when a statement fails, none of the file's
 ```text
 ✘ [ERROR] no such table: nope_table: SQLITE_ERROR
 ...
-error: `wrangler d1 migrations apply blog --local` failed (exit status: 1)
+error: `wrangler d1 migrations apply DB --local` failed (exit status: 1)
 hint: read the wrangler output above; the first error line names the cause
 ```
 
@@ -474,7 +474,7 @@ Fix the file (it was never applied) and run `ocre migrate` again. Add `--remote`
 
 ### The schema file
 
-`ocre db schema` writes the database's current `CREATE` statements to `db/schema.sql` (Rails' `structure.sql`), read from `sqlite_master` through wrangler; `--remote` dumps the production database instead:
+`ocre db schema` writes the database's current `CREATE` statements to `db/schema.sql` (Rails' `structure.sql`), read from `sqlite_master`; `--remote` dumps the production database instead:
 
 ```sh
 ocre migrate && ocre db schema
@@ -531,7 +531,7 @@ CREATE UNIQUE INDEX index_authors_on_name ON authors (name);
 PRAGMA defer_foreign_keys = false;
 ```
 
-Edit the `CREATE TABLE authors_new` (for example `bio TEXT NOT NULL DEFAULT ''`, or a new value in an enum's `CHECK`), keep the two column lists of the `INSERT` in step, then `ocre migrate`. Wrangler applies the file as one unit, so a failed copy (a row that breaks the new `NOT NULL`) leaves the old table untouched. Test it on the local database with real-looking data before `--remote`.
+Edit the `CREATE TABLE authors_new` (for example `bio TEXT NOT NULL DEFAULT ''`, or a new value in an enum's `CHECK`), keep the two column lists of the `INSERT` in step, then `ocre migrate`. D1 applies the file as one unit, so a failed copy (a row that breaks the new `NOT NULL`) leaves the old table untouched. Test it on the local database with real-looking data before `--remote`.
 
 A table that other tables reference cannot be rebuilt this way: dropping it would run their `ON DELETE CASCADE` or `SET NULL`, because D1 enforces foreign keys. The generator refuses:
 
@@ -544,7 +544,7 @@ Without `db/schema.sql` it answers ``hint: run `ocre migrate` then `ocre db sche
 
 ### Undo a migration
 
-D1 migrations only go forward: wrangler has `d1 migrations apply` and `list`, and no command that runs a migration backwards, so Ocre has no `down` migrations, no `rollback` and no `redo`. Undo a change the way it was made, with a new migration:
+D1 migrations only go forward: D1 (and cf) have `d1 migrations apply` and `list`, and no command that runs a migration backwards, so Ocre has no `down` migrations, no `rollback` and no `redo`. Undo a change the way it was made, with a new migration:
 
 | Mistake | Fix |
 |---|---|
@@ -560,11 +560,12 @@ Locally, when the migration was never deployed, the shortcut is to fix the file 
 In production, when a migration or a bad `UPDATE`/`DELETE` destroyed data, [D1 Time Travel](https://developers.cloudflare.com/d1/reference/time-travel/) restores the whole database to any minute of the last 7 days on the Workers Free plan (30 days on Workers Paid), at no cost and without any setup:
 
 ```sh
-npx wrangler d1 time-travel info <database_name> --timestamp="2026-09-29T10:00:00+00:00"
-npx wrangler d1 time-travel restore <database_name> --timestamp=1790676000
+npx cf d1 list --name <database_name>                                   # its uuid
+npx cf d1 time-travel get-bookmark <uuid> --timestamp 2026-09-29T10:00:00+00:00
+npx cf d1 time-travel restore <uuid> --timestamp 2026-09-29T10:00:00+00:00
 ```
 
-A restore overwrites everything written since that minute, including the `d1_migrations` rows: the migrations applied after it become pending again. Delete or fix those files before the next `ocre deploy`, which would apply them again. The restore prints the bookmark to go back to if the restore itself was a mistake. `<database_name>` is `database_name` in `wrangler.toml`; these commands act on the remote database only.
+A restore overwrites everything written since that minute, including the `d1_migrations` rows: the migrations applied after it become pending again. Delete or fix those files before the next `ocre deploy`, which would apply them again. Note the current bookmark (`get-bookmark` without `--timestamp`) first, to go back to if the restore itself was a mistake (`restore <uuid> --bookmark <it>`). `<database_name>` is the `name` of the `DB` binding in `cloudflare.config.ts`; these commands act on the remote database only.
 
 ### Seeds, reset and ad-hoc SQL
 
@@ -591,7 +592,7 @@ id | title | published | slug
 (2 rows)
 ```
 
-`ocre sql` accepts several statements separated by `;`, runs on the local database unless `--remote`, and with `--json` returns wrangler's results in `rows`:
+`ocre sql` accepts several statements separated by `;`, runs on the local database unless `--remote`, and with `--json` returns D1's results in `rows`:
 
 ```json
 {"command":"sql","ok":true,"rows":[{"meta":{"duration":1},"results":[{"id":1,"title":"Hello"}],"success":true}]}
@@ -903,7 +904,7 @@ id | parent | notused | detail
 
 ## Custom queries
 
-When the builder does not fit (a subquery, `UNION`, `INSERT ... ON CONFLICT`, a window function, a report across tables), write the SQL. Every query goes through `ctx.db()?`, the `DB` binding of `wrangler.toml`, with `?1, ?2...` placeholders and `params![...]`. Never build SQL with `format!` from user input: values bound as parameters cannot change the statement.
+When the builder does not fit (a subquery, `UNION`, `INSERT ... ON CONFLICT`, a window function, a report across tables), write the SQL. Every query goes through `ctx.db()?`, the `DB` binding of `cloudflare.config.ts`, with `?1, ?2...` placeholders and `params![...]`. Never build SQL with `format!` from user input: values bound as parameters cannot change the statement.
 
 | Method | Use for | Returns |
 |---|---|---|
@@ -1179,18 +1180,11 @@ pub async fn reencrypt(ctx: &Ctx, after_id: i64) -> Result<usize> {
 
 ## Several databases
 
-An app can use several D1 databases, for example to keep analytics or audit logs out of the main one (each database has its own 500 MB limit on the free plan; the account's 5 GB of storage and daily row quotas are shared). Each is a `[[d1_databases]]` entry in `wrangler.toml` with its own binding and migrations folder:
+An app can use several D1 databases, for example to keep analytics or audit logs out of the main one (each database has its own 500 MB limit on the free plan; the account's 5 GB of storage and daily row quotas are shared). Each is a `bindings.d1(...)` entry in `worker.env` of `cloudflare.config.ts`, with its own binding name, and its own migrations folder:
 
-```toml
-[[d1_databases]]
-binding = "DB"
-database_name = "blog"
-migrations_dir = "migrations"
-
-[[d1_databases]]
-binding = "ANALYTICS"
-database_name = "blog-analytics"
-migrations_dir = "migrations/analytics"
+```ts
+DB: bindings.d1({ name: "blog" }),
+ANALYTICS: bindings.d1({ name: "blog-analytics" }), // migrations in migrations/analytics/
 ```
 
 `ctx.db()?` is the `DB` binding; `ctx.db_named("ANALYTICS")?` returns the other one as the same `ocre::Db`, so every query method and the builder's terminal methods work on it:
@@ -1221,14 +1215,27 @@ pub async fn views_of(ctx: &Ctx, path: &str) -> Result<i64> {
 }
 ```
 
-A missing binding is a 500 whose log says which `[[d1_databases]]` entry to add. The Ocre CLI manages only the `DB` database (`ocre migrate`, `ocre sql`, `ocre db ...`, and `ocre deploy`, which creates and migrates it); run wrangler for the others:
+A missing binding is a 500 whose log says which `bindings.d1(...)` entry to add. The Ocre CLI manages only the `DB` database (`ocre migrate`, `ocre sql`, `ocre db ...`, and `ocre deploy`, which creates and migrates it); manage the others with cf in production:
 
 ```sh
 mkdir -p migrations/analytics
-npx wrangler d1 migrations create blog-analytics create_page_views   # an empty numbered file to fill in
-npx wrangler d1 migrations apply blog-analytics --local               # --remote for production
-npx wrangler d1 create blog-analytics                                 # once, before the first deploy; add the database_id it prints
+npx cf d1 migrations create create_page_views --dir migrations/analytics   # an empty numbered file to fill in
+npx cf d1 create --name blog-analytics                                   # once, before the first deploy
+npx cf d1 list --name blog-analytics                                     # its uuid
+npx cf d1 migrations apply <uuid> --dir migrations/analytics             # production
 ```
+
+Locally, cf 1.0.0-beta.5 cannot migrate a local database yet (see [Why wrangler still appears](deployment.md#why-wrangler-still-appears)); do what Ocre does for `DB` and run the app's wrangler with a small config of its own, `db/analytics-d1.json`:
+
+```json
+{"name": "blog", "compatibility_date": "2026-09-01", "d1_databases": [{"binding": "ANALYTICS", "database_name": "blog-analytics", "migrations_dir": "../migrations/analytics"}]}
+```
+
+```sh
+node_modules/.bin/wrangler d1 migrations apply ANALYTICS --local -c db/analytics-d1.json --persist-to .wrangler/state
+```
+
+`--persist-to .wrangler/state` is the state `ocre dev` uses, so the local Worker sees the tables.
 
 Queries cannot join tables of two databases and a `batch` runs on one database: load ids from one, then `find_many`-style `is_in` queries on the other.
 

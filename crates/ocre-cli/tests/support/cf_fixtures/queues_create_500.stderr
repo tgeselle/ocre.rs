@@ -1,0 +1,5 @@
+
+┌ APIError
+│ [10013] An unknown error has occurred. If this error persists, please file a report in workers-sdk (https://github.com/cloudflare/workers-sdk/issues) or reach out to your account team.
+│ 500 Internal Server Error · HTTP /accounts/0123456789abcdef0123456789abcdef/queues
+└

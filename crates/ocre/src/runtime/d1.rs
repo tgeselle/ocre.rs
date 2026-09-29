@@ -17,7 +17,7 @@ use crate::{Error, Param, Result, Statement, sql::Value};
 /// [`json_from_sql`](crate::json_from_sql).
 ///
 /// A failed query is [`Error::Internal`] (500) with the D1 message and the SQL;
-/// the details go to the Worker logs (`wrangler tail`), never to the client.
+/// the details go to the Worker logs (Workers Logs), never to the client.
 ///
 /// # Free plan
 ///

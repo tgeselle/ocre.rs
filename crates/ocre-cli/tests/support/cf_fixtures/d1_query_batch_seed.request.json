@@ -1,0 +1,1 @@
+[{"sql": "-- seed\nINSERT INTO posts (title, body, published) VALUES ('Hello', 'First', 1);\nINSERT INTO posts (title, body) VALUES ('Draft', 'Second');\nSELECT count(*) AS n FROM posts;"}]

@@ -33,14 +33,14 @@
 //!   Worker console between [`LOG_PREFIX`] lines, like Rails'
 //!   letter_opener, and in debug builds keeps the last 20 for
 //!   `/ocre/dev/mailers` (see [`dev_routes`]). `ocre new` writes
-//!   `MAIL_ADAPTER=log` to `.dev.vars`, which overrides `[vars]` in
-//!   `ocre dev`. No configuration, no limits.
+//!   `MAIL_ADAPTER=log` to `.dev.vars`, which overrides the
+//!   `bindings.text` variables in `ocre dev`. No configuration, no limits.
 //! - `resend`: `POST https://api.resend.com/emails` with the
 //!   [`RESEND_API_KEY`] secret, `MAIL_FROM` on a
 //!   domain verified in Resend. Free plan (September 2026): 100 emails a day,
 //!   3,000 a month, one domain; any recipient.
 //! - `cloudflare`: Cloudflare Email Service through the
-//!   [`EMAIL_BINDING`] `[[send_email]]` binding,
+//!   [`EMAIL_BINDING`] `bindings.sendEmail()` binding,
 //!   `MAIL_FROM` on a domain onboarded to Email Service. Workers Free
 //!   (September 2026) only delivers to verified destination addresses of the
 //!   account; any recipient needs Workers Paid (3,000 a month included).
@@ -71,8 +71,9 @@ use crate::{Error, Result, validate::is_email};
 /// Name of the Worker variable that chooses the adapter: `log`, `resend` or `cloudflare`.
 ///
 /// Read on every [`send`] and [`deliver_later`]; unset or any other value is
-/// an [`Error::Internal`] that names the fix. Set it under
-/// `[vars]` in wrangler.toml, or in `.dev.vars` for `ocre dev` (which overrides `[vars]`).
+/// an [`Error::Internal`] that names the fix. Set it as
+/// `MAIL_ADAPTER: bindings.text("resend")` in cloudflare.config.ts, or in `.dev.vars` for
+/// `ocre dev` (which overrides it).
 ///
 /// # Examples
 ///
@@ -95,7 +96,7 @@ pub const MAIL_ADAPTER: &str = "MAIL_ADAPTER";
 pub const MAIL_FROM: &str = "MAIL_FROM";
 /// Name of the Worker secret holding the Resend API key, used when `MAIL_ADAPTER = "resend"`.
 ///
-/// Set it with `npx wrangler secret put RESEND_API_KEY` (and in `.dev.vars`
+/// Set it with `ocre secrets push RESEND_API_KEY --file .prod.vars` (and in `.dev.vars`
 /// to send for real from `ocre dev`). Missing or blank is an
 /// [`Error::Internal`] when sending.
 ///
@@ -105,9 +106,9 @@ pub const MAIL_FROM: &str = "MAIL_FROM";
 /// assert_eq!(ocre::mail::RESEND_API_KEY, "RESEND_API_KEY");
 /// ```
 pub const RESEND_API_KEY: &str = "RESEND_API_KEY";
-/// Name of the `[[send_email]]` binding used when `MAIL_ADAPTER = "cloudflare"`.
+/// Name of the `bindings.sendEmail()` binding used when `MAIL_ADAPTER = "cloudflare"`.
 ///
-/// `ocre new` leaves the entry commented out in wrangler.toml; a missing
+/// `ocre new` leaves the entry commented out in cloudflare.config.ts; a missing
 /// binding is an [`Error::Internal`] naming the entry to add.
 ///
 /// # Examples
@@ -468,7 +469,8 @@ pub(crate) enum Adapter {
 }
 
 const ADAPTER_FIX: &str = "Fix: set MAIL_ADAPTER to \"resend\" (with the RESEND_API_KEY secret) or \"cloudflare\" \
-                           (with a [[send_email]] binding named EMAIL) under [vars] in wrangler.toml; \
+                           (with the EMAIL: bindings.sendEmail() binding) in worker.env of cloudflare.config.ts, \
+                           as MAIL_ADAPTER: bindings.text(\"resend\"); \
                            `ocre new` puts MAIL_ADAPTER=log in .dev.vars so `ocre dev` only logs mail";
 
 /// Reads `MAIL_ADAPTER`. Unset is an error: production must choose, and
@@ -490,7 +492,7 @@ pub(crate) fn resend_key(secret: Option<String>) -> Result<String> {
     secret.filter(|key| !key.trim().is_empty()).ok_or_else(|| {
         Error::internal(format!(
             "cannot send email: the {RESEND_API_KEY} secret is not set. Fix: create a key at \
-             https://resend.com/api-keys and run `npx wrangler secret put {RESEND_API_KEY}` \
+             https://resend.com/api-keys and run `ocre secrets push {RESEND_API_KEY} --file .prod.vars` \
              (and put it in .dev.vars to send from `ocre dev`)"
         ))
     })
@@ -566,8 +568,8 @@ impl Outgoing {
             None => (
                 mail_from.ok_or_else(|| {
                     Error::internal(format!(
-                        "cannot send email: {MAIL_FROM} is not set. Fix: add {MAIL_FROM} = \"App \
-                         <noreply@yourdomain.com>\" under [vars] in wrangler.toml"
+                        "cannot send email: {MAIL_FROM} is not set. Fix: add {MAIL_FROM}: bindings.text(\"App \
+                         <noreply@yourdomain.com>\") to worker.env in cloudflare.config.ts"
                     ))
                 })?,
                 MAIL_FROM,

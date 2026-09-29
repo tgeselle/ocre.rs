@@ -1,0 +1,5 @@
+
+┌ APIError
+│ [11005] Cannot delete queue 'ocre-cfcheck-demo-jobs' that is still referenced by a binding in a Worker. Unbind queue 'ocre-cfcheck-demo-jobs' from the Workers 'ocre-cfcheck-demo'; then try again.
+│ 400 Bad Request · HTTP /accounts/0123456789abcdef0123456789abcdef/queues/f5e8b72398e342838aa4d707c39cb476
+└

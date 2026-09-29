@@ -18,18 +18,15 @@ use crate::realtime::close_code;
 /// call it directly: they use [`broadcast`](crate::realtime::broadcast) and
 /// [`WebSocketUpgrade::connect`](crate::realtime::WebSocketUpgrade::connect).
 ///
-/// Free plan: Durable Objects must be SQLite-backed (`new_sqlite_classes`);
-/// one object accepts up to 32,768 WebSockets. wrangler.toml declares it
-/// (`ocre g scaffold ... --realtime` adds this):
+/// Free plan: Durable Objects must be SQLite-backed (`storage: "sqlite"`);
+/// one object accepts up to 32,768 WebSockets. cloudflare.config.ts declares it
+/// (`ocre g scaffold ... --realtime` adds this, with `demo` as the app name):
 ///
-/// ```toml
-/// [[durable_objects.bindings]]
-/// name = "CHANNELS"
-/// class_name = "OcreChannel"
-///
-/// [[migrations]]
-/// tag = "ocre-realtime-v1"
-/// new_sqlite_classes = ["OcreChannel"]
+/// ```ts
+/// // worker.env
+/// CHANNELS: bindings.durableObject({ worker: "demo", exportName: "OcreChannel" }),
+/// // worker.exports
+/// OcreChannel: exports.durableObject({ storage: "sqlite" }),
 /// ```
 #[durable_object(websocket)]
 pub struct OcreChannel {

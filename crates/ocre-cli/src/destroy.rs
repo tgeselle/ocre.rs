@@ -2,8 +2,9 @@
 //! generator run, from its record in `.ocre/generated/`.
 //!
 //! Files the run created are deleted; lines it added to existing files are
-//! taken out and the lines it replaced put back. Changes to Cargo.toml and
-//! wrangler.toml stay (features and bindings that later code may use).
+//! taken out and the lines it replaced put back. Changes to Cargo.toml,
+//! cloudflare.config.ts and package.json stay (features and bindings that
+//! later code may use).
 //! Nothing is touched when a created file changed since, or lines the run
 //! added are no longer there, unless `--force`: then the files are deleted
 //! anyway and the lines that cannot be found are left alone.

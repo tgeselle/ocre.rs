@@ -1,17 +1,17 @@
 //! Non-interactive CLI behaviour, run through the real binary with a fake
-//! wrangler. Covers the `--json` contract, human output and every failure hint.
+//! cf, wrangler and npm. Covers the `--json` contract, human output and every failure hint.
 
 #[path = "../support/mod.rs"]
 mod support;
 
 use std::fs;
 
-use support::{Sandbox, ocre_crate, text};
+use support::{Sandbox, local_d1, ocre_crate, text};
 
 // ---------- ocre new ----------
 
 #[test]
-fn new_creates_an_app_without_touching_cloudflare_by_default() {
+fn new_creates_an_app_and_installs_its_npm_packages() {
     let sandbox = Sandbox::new();
     let ocre = ocre_crate();
     let (report, ok) = sandbox.json(&["new", "shop", "--ocre-path", ocre.to_str().unwrap()], &sandbox.work);
@@ -19,40 +19,66 @@ fn new_creates_an_app_without_touching_cloudflare_by_default() {
     assert_eq!(report["command"], "new");
     assert_eq!(report["next"], serde_json::json!(["cd shop", "ocre dev", "ocre deploy"]));
     let created = report["created"].as_array().unwrap();
-    for file in ["shop/AGENTS.md", "shop/public/robots.txt", "shop/.dev.vars"] {
+    for file in [
+        "shop/cloudflare.config.ts",
+        "shop/wrangler.config.ts",
+        "shop/package.json",
+        "shop/tsconfig.json",
+        "shop/AGENTS.md",
+        "shop/public/robots.txt",
+        "shop/.dev.vars",
+    ] {
         assert!(created.contains(&file.into()), "{file} in {created:?}");
     }
     let root = sandbox.work.join("shop");
     let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
     assert!(cargo.contains("name = \"shop\""));
     assert!(cargo.contains(&format!("ocre = {{ path = {:?} }}", ocre.display().to_string())));
-    let wrangler = fs::read_to_string(root.join("wrangler.toml")).unwrap();
-    assert!(wrangler.contains("database_name = \"shop\"") && !wrangler.contains("account_id"));
+    assert!(!root.join("wrangler.toml").exists());
+    let config = fs::read_to_string(root.join("cloudflare.config.ts")).unwrap();
+    assert!(config.contains("\t\tname: \"shop\",\n"), "{config}");
+    assert!(config.contains("DB: bindings.d1({ name: \"shop\" }),") && !config.contains("accountId"), "{config}");
+    let build = fs::read_to_string(root.join("wrangler.config.ts")).unwrap();
+    assert!(build.contains("assetsDirectory: \"public\""), "{build}");
+    let package: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(root.join("package.json")).unwrap()).unwrap();
+    assert_eq!((&package["name"], &package["type"]), (&"shop".into(), &"module".into()), "{package}");
+    for dependency in ["cf", "wrangler", "typescript"] {
+        let version = package["devDependencies"][dependency].as_str().unwrap();
+        assert!(version.starts_with(|c: char| c.is_ascii_digit()), "exact pin for {dependency}: {package}");
+    }
     assert!(!root.join(".git").exists());
     assert_dev_secret(&root);
     let lib = fs::read_to_string(root.join("src/lib.rs")).unwrap();
     assert!(lib.contains(".route(\"/up\", get(up))\n        // ocre:routes"), "{lib}");
-    assert!(wrangler.contains("[assets]\ndirectory = \"public\""), "{wrangler}");
     assert!(fs::read_to_string(root.join("public/robots.txt")).unwrap().contains("User-agent: *"));
     let gitignore = fs::read_to_string(root.join(".gitignore")).unwrap();
     assert!(gitignore.contains("\n.dev.vars\n.dev.vars.*\n"), "{gitignore}");
+    assert!(gitignore.contains("\nnode_modules/\n") && gitignore.contains("\n.cloudflare/\n"), "{gitignore}");
+    assert!(gitignore.contains("\n.env\n.env.*\n"), "cf's credentials: {gitignore}");
     let agents = fs::read_to_string(root.join("AGENTS.md")).unwrap();
     assert!(
         agents.starts_with("# shop\n") && agents.contains("`https://ocre-docs.raitomm.workers.dev/llms.txt`"),
         "{agents}"
     );
-    assert!(!agents.contains("__"), "no template placeholder left: {agents}");
-    assert!(sandbox.calls().is_empty(), "no wrangler call without --login/--deploy");
+    for file in ["AGENTS.md", "cloudflare.config.ts", "package.json"] {
+        let text = fs::read_to_string(root.join(file)).unwrap();
+        assert!(!text.contains("__"), "no template placeholder left in {file}: {text}");
+    }
+    // The pinned cf and wrangler are installed in the app.
+    assert!(root.join("node_modules/.bin/cf").is_file() && root.join("package-lock.json").is_file());
+    assert!(report["ran"][0].as_str().unwrap().starts_with("npm install (cf "), "{report}");
+    assert_eq!(sandbox.calls(), ["npm install"], "no cf call without --login/--deploy");
 }
 
-/// `.dev.vars` holds a fresh 128-hex SECRET_KEY_BASE and MAIL_ADAPTER=log for `wrangler dev`.
+/// `.dev.vars` holds a fresh 128-hex SECRET_KEY_BASE and MAIL_ADAPTER=log for `ocre dev`.
 fn assert_dev_secret(root: &std::path::Path) {
     let vars = fs::read_to_string(root.join(".dev.vars")).unwrap();
     let secret =
         vars.strip_prefix("SECRET_KEY_BASE=").and_then(|rest| rest.strip_suffix("\nMAIL_ADAPTER=log\n")).unwrap();
     assert!(secret.len() == 128 && secret.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')), "{vars}");
-    let wrangler = fs::read_to_string(root.join("wrangler.toml")).unwrap();
-    assert!(wrangler.contains("[vars]\n# Sender") && wrangler.contains("\nMAIL_FROM = \""), "{wrangler}");
+    let config = fs::read_to_string(root.join("cloudflare.config.ts")).unwrap();
+    assert!(config.contains("\n\t\t\tMAIL_FROM: bindings.text(\""), "{config}");
 }
 
 #[test]
@@ -70,8 +96,40 @@ fn new_prints_a_human_summary_without_json() {
     let output = sandbox.ocre(&["new", "shop", "--yes"], &sandbox.work);
     let (stdout, _) = text(&output);
     assert!(output.status.success());
-    assert!(stdout.contains("  create  shop/wrangler.toml"), "{stdout}");
+    assert!(stdout.contains("  create  shop/cloudflare.config.ts"), "{stdout}");
+    assert!(stdout.contains("\n  npm install (cf "), "{stdout}");
     assert!(stdout.contains("Next:\n  cd shop\n  ocre dev\n  ocre deploy"), "{stdout}");
+}
+
+#[test]
+fn new_needs_npm_unless_told_not_to_install() {
+    let mut sandbox = Sandbox::new();
+    sandbox.remove_tool("npm");
+    sandbox.isolate_path();
+    let (report, ok) = sandbox.json(&["new", "shop"], &sandbox.work);
+    assert!(!ok);
+    assert_eq!(report["error"], "npm not found");
+    assert!(report["hint"].as_str().unwrap().contains("--no-install"), "{report}");
+    assert!(!sandbox.work.join("shop").exists(), "nothing written");
+
+    let (report, ok) = sandbox.json(&["new", "shop", "--no-install"], &sandbox.work);
+    assert!(ok, "{report}");
+    assert!(report.get("ran").is_none(), "npm did not run: {report}");
+    let root = sandbox.work.join("shop");
+    assert!(root.join("package.json").is_file() && !root.join("node_modules").exists());
+    assert!(sandbox.calls().is_empty());
+}
+
+#[test]
+fn new_reports_a_failing_npm_install() {
+    let sandbox = Sandbox::new();
+    sandbox.set("npm_install_fails");
+    let (report, ok) = sandbox.json(&["new", "shop"], &sandbox.work);
+    assert!(!ok);
+    let error = report["error"].as_str().unwrap();
+    assert!(error.starts_with("`npm install` failed in ") && error.contains("npm_install_fails"), "{error}");
+    assert!(report["hint"].as_str().unwrap().starts_with("the app is created"), "{report}");
+    assert!(sandbox.work.join("shop/package.json").is_file(), "kept for a later `npm install`");
 }
 
 #[test]
@@ -91,7 +149,13 @@ fn new_rejects_bad_input_before_writing_anything() {
 
     let (report, _) = sandbox.json(&["new", "shop", "--ocre-path", "/does/not/exist"], &sandbox.work);
     assert!(report["error"].as_str().unwrap().starts_with("--ocre-path /does/not/exist:"));
+
+    // Deploying needs the npm packages: refused before logging in or writing.
+    let (report, _) = sandbox.json(&["new", "shop", "--deploy", "--no-install"], &sandbox.work);
+    assert_eq!(report["error"], "--deploy needs the app's npm packages");
+    assert!(report["hint"].as_str().unwrap().contains("npm install && ocre deploy"), "{report}");
     assert!(!sandbox.work.join("shop").exists());
+    assert!(sandbox.calls().is_empty());
 }
 
 #[test]
@@ -137,7 +201,7 @@ fn new_with_login_runs_the_browser_login_when_needed() {
     let (report, ok) = sandbox.json(&["new", "shop", "--login"], &sandbox.work);
     assert!(ok, "{report}");
     assert_eq!(report["email"], "dev@example.com");
-    assert_eq!(sandbox.calls(), ["whoami --json", "login", "whoami --json"]);
+    assert_eq!(sandbox.calls(), ["cf auth whoami", "cf auth login", "cf auth whoami", "npm install"]);
 }
 
 #[test]
@@ -146,7 +210,7 @@ fn new_with_login_skips_the_login_when_already_logged_in() {
     sandbox.login_as(&[("acc1", "Main")]);
     let (report, ok) = sandbox.json(&["new", "shop", "--login"], &sandbox.work);
     assert!(ok, "{report}");
-    assert_eq!(sandbox.calls(), ["whoami --json"]);
+    assert_eq!(sandbox.calls(), ["cf auth whoami", "npm install"]);
 }
 
 #[test]
@@ -156,11 +220,12 @@ fn new_with_login_fails_when_the_login_does_not_complete() {
     let (report, ok) = sandbox.json(&["new", "shop", "--login"], &sandbox.work);
     assert!(!ok);
     assert_eq!(report["error"], "Cloudflare login did not complete");
+    assert!(!sandbox.work.join("shop").exists(), "nothing written");
 
     sandbox.set("login_fails");
     let (report, _) = sandbox.json(&["new", "shop", "--login"], &sandbox.work);
-    assert!(report["error"].as_str().unwrap().starts_with("`wrangler login` failed"), "{report}");
-    assert!(report["hint"].as_str().unwrap().contains("wrangler output above"));
+    assert!(report["error"].as_str().unwrap().starts_with("`cf auth login` failed"), "{report}");
+    assert!(report["hint"].as_str().unwrap().contains("cf output above"));
 }
 
 #[test]
@@ -171,18 +236,22 @@ fn new_needs_an_account_id_when_the_login_has_several_accounts() {
     assert!(!ok);
     assert_eq!(report["hint"], "pass --account-id with one of: acc1 (Main), acc2 (Side)");
 
+    let (report, _) = sandbox.json(&["new", "shop", "--login", "--account-id", "acc3"], &sandbox.work);
+    assert_eq!(report["error"], "account `acc3` is not available to this Cloudflare login");
+    assert!(!sandbox.work.join("shop").exists());
+
     let (report, ok) = sandbox.json(&["new", "shop", "--login", "--account-id", "acc2"], &sandbox.work);
     assert!(ok, "{report}");
-    let wrangler = fs::read_to_string(sandbox.work.join("shop/wrangler.toml")).unwrap();
-    assert!(wrangler.starts_with("name = \"shop\"\naccount_id = \"acc2\"\n"), "{wrangler}");
+    let config = fs::read_to_string(sandbox.work.join("shop/cloudflare.config.ts")).unwrap();
+    assert!(config.contains("defineConfig({\n\taccountId: \"acc2\",\n\tworker: {\n"), "{config}");
 }
 
 #[test]
 fn new_keeps_an_account_id_given_without_login() {
     let sandbox = Sandbox::new();
     sandbox.new_app("shop", &["--account-id", "acc9"]);
-    let wrangler = fs::read_to_string(sandbox.work.join("shop/wrangler.toml")).unwrap();
-    assert!(wrangler.contains("account_id = \"acc9\""));
+    let config = fs::read_to_string(sandbox.work.join("shop/cloudflare.config.ts")).unwrap();
+    assert!(config.contains("\taccountId: \"acc9\",\n\tworker: {\n"), "{config}");
 }
 
 #[test]
@@ -192,19 +261,22 @@ fn new_with_deploy_logs_in_deploys_and_returns_the_url() {
     let (report, ok) =
         sandbox.json(&["new", "shop", "--deploy", "--ocre-path", ocre_crate().to_str().unwrap()], &sandbox.work);
     assert!(ok, "{report}");
-    assert_eq!(report["url"], "https://app.example.workers.dev");
+    assert_eq!(report["url"], "https://shop.example.workers.dev");
     assert_eq!(report["next"], serde_json::json!(["cd shop", "ocre dev"]));
     assert_eq!(report["secret_created"], true, "a new Worker gets SECRET_KEY_BASE");
+    assert_eq!(report["provisioned"], serde_json::json!(["D1 database shop"]));
     assert_eq!(
         sandbox.calls(),
         [
-            "whoami --json",
-            "secret list --format json",
-            "d1 list --json",
-            "deploy --secrets-file .wrangler/ocre-secrets.env",
+            "cf auth whoami",
+            "npm install",
+            "cf d1 list --name shop",
+            "cf d1 create --name shop",
+            "cf workers secrets list --worker shop",
+            "cf d1 migrations apply uuid-shop",
+            "cf deploy --secrets-file .wrangler/ocre-secrets.env",
             "secrets file ok",
             "build --release",
-            "d1 migrations apply shop --remote"
         ]
     );
     assert!(!sandbox.work.join("shop/.wrangler/ocre-secrets.env").exists(), "secrets file deleted");
@@ -219,17 +291,19 @@ fn login_reports_the_existing_session() {
     let output = sandbox.ocre(&["login"], &sandbox.work);
     assert!(output.status.success());
     assert_eq!(text(&output).0, "Logged in to Cloudflare as dev@example.com\n");
+    assert_eq!(sandbox.calls(), ["cf auth whoami"]);
 }
 
 #[test]
-fn login_runs_wrangler_login_and_streams_its_output() {
+fn login_runs_cf_auth_login_and_streams_its_output() {
     let sandbox = Sandbox::new();
     sandbox.accounts_after_login(&[("acc1", "Main")]);
     let output = sandbox.ocre(&["login"], &sandbox.work);
     let (stdout, _) = text(&output);
     assert!(stdout.starts_with("Successfully logged in.\n"), "{stdout}");
+    assert_eq!(sandbox.calls(), ["cf auth whoami", "cf auth login", "cf auth whoami"]);
 
-    // With --json, wrangler's output moves to stderr.
+    // With --json, cf's output moves to stderr.
     let sandbox = Sandbox::new();
     sandbox.accounts_after_login(&[("acc1", "Main")]);
     let output = sandbox.ocre(&["login", "--json"], &sandbox.work);
@@ -246,16 +320,20 @@ fn login_rejects_unexpected_whoami_output() {
     let output = sandbox.ocre(&["login"], &sandbox.work);
     let (_, stderr) = text(&output);
     assert!(!output.status.success());
-    assert!(stderr.starts_with("error: unexpected `wrangler whoami --json` output"), "{stderr}");
+    assert!(stderr.starts_with("error: unexpected `cf auth whoami` output"), "{stderr}");
     assert!(!stderr.contains("hint:"));
 }
 
 #[test]
-fn logged_out_whoami_json_means_no_session() {
+fn a_logged_out_or_failing_whoami_means_no_session() {
+    // cf answers `{"authenticated": false, ...}` with exit 0 when logged out.
     let sandbox = Sandbox::new();
-    sandbox.set("logged_in");
-    sandbox.write_state("whoami.json", r#"{"loggedIn": false}"#);
     sandbox.set("login_does_nothing");
+    let (report, _) = sandbox.json(&["login"], &sandbox.work);
+    assert_eq!(report["error"], "Cloudflare login did not complete");
+    assert_eq!(sandbox.calls(), ["cf auth whoami", "cf auth login", "cf auth whoami"]);
+
+    sandbox.set("whoami_fails");
     let (report, _) = sandbox.json(&["login"], &sandbox.work);
     assert_eq!(report["error"], "Cloudflare login did not complete");
 }
@@ -263,12 +341,12 @@ fn logged_out_whoami_json_means_no_session() {
 #[test]
 fn commands_explain_a_missing_node() {
     let mut sandbox = Sandbox::new();
-    fs::remove_file(sandbox.work.join("../bin/npx")).unwrap();
+    sandbox.remove_tool("npx");
     sandbox.isolate_path();
     let (report, ok) = sandbox.json(&["login"], &sandbox.work);
     assert!(!ok);
-    assert!(report["error"].as_str().unwrap().starts_with("could not run npx"));
-    assert_eq!(report["hint"], "install Node.js 20 or newer (it provides npx)");
+    assert!(report["error"].as_str().unwrap().starts_with("could not run cf"), "{report}");
+    assert_eq!(report["hint"], "install Node.js 22 or newer, then run `npm install` in the app");
 }
 
 // ---------- ocre generate ----------
@@ -475,18 +553,26 @@ fn scaffold_needs_the_lib_markers() {
 }
 
 #[test]
-fn commands_explain_a_missing_or_broken_wrangler_toml() {
+fn commands_explain_a_missing_legacy_or_broken_config() {
     let sandbox = Sandbox::new();
     let (report, _) = sandbox.json(&["g", "migration", "x"], &sandbox.work);
-    assert_eq!(report["error"], "no wrangler.toml found in this directory or its parents");
+    assert_eq!(report["error"], "no cloudflare.config.ts found in this directory or its parents");
+    assert!(report["hint"].as_str().unwrap().contains("ocre new <name>"));
 
-    fs::write(sandbox.work.join("wrangler.toml"), "name = ").unwrap();
+    // An app from before cf: converted with `cf migrate`, never read half-way.
+    fs::write(sandbox.work.join("wrangler.toml"), "name = \"old\"\n").unwrap();
     let (report, _) = sandbox.json(&["g", "migration", "x"], &sandbox.work);
-    assert!(report["error"].as_str().unwrap().starts_with("wrangler.toml is not valid TOML"));
+    assert!(
+        report["error"].as_str().unwrap().ends_with(" uses wrangler.toml; Ocre now reads cloudflare.config.ts"),
+        "{report}"
+    );
+    assert!(report["hint"].as_str().unwrap().contains("`npx cf migrate --no-install`"), "{report}");
+    assert!(!sandbox.work.join("migrations").exists(), "nothing written");
 
-    fs::write(sandbox.work.join("wrangler.toml"), "name = \"x\"\n[[d1_databases]]\nbinding = \"OTHER\"\n").unwrap();
+    let config = "export default defineConfig({\n\tworker: {\n\t\tname: \"x\",\n\t\tenv: {},\n\t},\n});\n";
+    fs::write(sandbox.work.join("cloudflare.config.ts"), config).unwrap();
     let (report, _) = sandbox.json(&["g", "migration", "x"], &sandbox.work);
-    assert_eq!(report["error"], "wrangler.toml has no D1 database with binding \"DB\"");
+    assert_eq!(report["error"], "cloudflare.config.ts has no D1 database bound to `DB`");
 }
 
 // ---------- API mode and ocre generate api ----------
@@ -635,10 +721,34 @@ fn migrate_applies_locally_or_remotely() {
     let sandbox = Sandbox::new();
     let root = sandbox.new_app("shop", &[]);
     let output = sandbox.ocre(&["migrate"], &root);
-    assert_eq!(text(&output).0, "Migrations applied to shop (--local)\n");
+    assert_eq!(text(&output).0, "Migrations applied to DB (--local)\n");
+    // wrangler reads the local database from a config derived from cloudflare.config.ts.
+    let derived: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(root.join(".wrangler/ocre-d1.json")).unwrap()).unwrap();
+    assert_eq!(
+        derived["d1_databases"],
+        serde_json::json!([{"binding": "DB", "database_name": "shop", "migrations_dir": "../migrations"}])
+    );
+
+    // The remote database is created by the first deploy, not by migrate.
+    let (report, ok) = sandbox.json(&["migrate", "--remote"], &root);
+    assert!(!ok);
+    assert_eq!(report["error"], "the D1 database shop does not exist on Cloudflare yet");
+    assert!(report["hint"].as_str().unwrap().contains("ocre deploy"), "{report}");
+
+    sandbox.remote_database("shop");
     let (report, ok) = sandbox.json(&["migrate", "--remote"], &root);
     assert!(ok, "{report}");
-    assert_eq!(sandbox.calls(), ["d1 migrations apply shop --local", "d1 migrations apply shop --remote"]);
+    assert_eq!(report["remote"], true);
+    assert_eq!(
+        sandbox.calls(),
+        [
+            local_d1("d1 migrations apply DB --local"),
+            "cf d1 list --name shop".to_owned(),
+            "cf d1 list --name shop".to_owned(),
+            "cf d1 migrations apply uuid-shop".to_owned(),
+        ]
+    );
 }
 
 #[test]
@@ -650,7 +760,7 @@ fn migrate_failure_points_at_wrangler_output() {
     let (stdout, stderr) = text(&output);
     assert!(!output.status.success());
     assert!(stdout.contains("stdout before failure"));
-    assert!(stderr.contains("error: `wrangler d1 migrations apply shop --local` failed"), "{stderr}");
+    assert!(stderr.contains("error: `wrangler d1 migrations apply DB --local` failed"), "{stderr}");
     assert!(stderr.contains("hint: read the wrangler output above"));
 }
 
@@ -661,7 +771,27 @@ fn dev_migrates_then_serves() {
     let (report, ok) = sandbox.json(&["dev", "--port", "9123"], &root);
     assert!(ok, "{report}");
     assert_eq!(report["url"], "http://localhost:9123");
-    assert_eq!(sandbox.calls(), ["d1 migrations apply shop --local", "dev --port 9123", "build --dev"]);
+    assert_eq!(
+        sandbox.calls(),
+        [local_d1("d1 migrations apply DB --local"), "cf dev --port 9123".to_owned(), "build --dev".to_owned()]
+    );
+}
+
+#[test]
+fn dev_and_deploy_need_the_npm_packages() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    fs::remove_dir_all(root.join("node_modules")).unwrap();
+    for command in ["dev", "deploy"] {
+        let (report, ok) = sandbox.json(&[command], &root);
+        assert!(!ok);
+        assert_eq!(
+            report["error"],
+            "the app's npm packages are not installed (node_modules/.bin/cf, node_modules/.bin/wrangler)"
+        );
+        assert!(report["hint"].as_str().unwrap().starts_with("run `npm install` in "), "{report}");
+    }
+    assert!(sandbox.calls().is_empty());
 }
 
 #[test]
@@ -688,25 +818,34 @@ fn dev_and_deploy_need_the_wasm_target() {
 fn deploy_migrates_an_existing_database_before_the_code_goes_live() {
     let sandbox = Sandbox::new();
     let root = sandbox.new_app("shop", &[]);
-    sandbox.write_state("d1_list.json", r#"[{"name": "other"}, {"name": "shop"}]"#);
+    sandbox.remote_database("shop");
     sandbox.set("has_secret");
     let output = sandbox.ocre(&["deploy"], &root);
     let (stdout, _) = text(&output);
     assert!(output.status.success());
     assert!(
-        stdout.ends_with("Uploaded app\n  https://app.example.workers.dev\n\nhttps://app.example.workers.dev\n"),
+        stdout.contains("│    https://shop.example.workers.dev\n")
+            && stdout.ends_with("\n\nhttps://shop.example.workers.dev\n"),
         "{stdout}"
     );
     assert_eq!(
         sandbox.calls(),
         [
-            "secret list --format json",
-            "d1 list --json",
-            "d1 migrations apply shop --remote",
-            "deploy",
+            "cf d1 list --name shop",
+            "cf workers secrets list --worker shop",
+            "cf d1 migrations apply uuid-shop",
+            "cf deploy",
             "build --release"
         ]
     );
+
+    // A failed migration stops the deploy: the old code keeps running.
+    sandbox.clear_calls();
+    sandbox.set("migrate_fails");
+    let (report, ok) = sandbox.json(&["deploy"], &root);
+    assert!(!ok);
+    assert!(report["error"].as_str().unwrap().starts_with("`cf d1 migrations apply uuid-shop` failed"), "{report}");
+    assert_eq!(sandbox.calls().last().unwrap(), "cf d1 migrations apply uuid-shop");
 }
 
 #[test]
@@ -714,27 +853,31 @@ fn deploy_creates_secret_key_base_only_when_the_worker_has_none() {
     let sandbox = Sandbox::new();
     let root = sandbox.new_app("shop", &[]);
     let secrets_file = root.join(".wrangler/ocre-secrets.env");
-    let deploy_calls = || sandbox.calls().into_iter().filter(|call| call.starts_with("deploy")).collect::<Vec<_>>();
+    let deploy_calls = || sandbox.calls().into_iter().filter(|call| call.starts_with("cf deploy")).collect::<Vec<_>>();
 
-    // Deployed Worker without the secret; a stale file from a killed deploy is replaced.
+    // Deployed Worker without the secret, no database yet; a stale file
+    // from a killed deploy is replaced.
     fs::create_dir_all(secrets_file.parent().unwrap()).unwrap();
     fs::write(&secrets_file, "SECRET_KEY_BASE=stale\n").unwrap();
     let output = sandbox.ocre(&["deploy"], &root);
     let (stdout, _) = text(&output);
     assert!(output.status.success(), "{stdout}");
     assert!(
-        stdout.ends_with("Created the SECRET_KEY_BASE secret on Cloudflare\n\nhttps://app.example.workers.dev\n"),
+        stdout.ends_with(
+            "Created the SECRET_KEY_BASE secret on Cloudflare\nCreated D1 database shop on Cloudflare\n\nhttps://shop.example.workers.dev\n"
+        ),
         "{stdout}"
     );
     assert!(sandbox.calls().contains(&"secrets file ok".to_owned()));
-    assert_eq!(deploy_calls(), ["deploy --secrets-file .wrangler/ocre-secrets.env"]);
+    assert_eq!(deploy_calls(), ["cf deploy --secrets-file .wrangler/ocre-secrets.env"]);
     assert!(!secrets_file.exists(), "deleted after the deploy");
 
-    // No Worker yet: `secret list` fails with "not found".
+    // No Worker yet: `cf workers secrets list` fails with API code 10007.
     sandbox.set("secret_list_fails");
     let (report, ok) = sandbox.json(&["deploy"], &root);
     assert!(ok, "{report}");
     assert_eq!(report["secret_created"], true);
+    assert!(report.get("provisioned").is_none(), "the database exists now: {report}");
     assert_eq!(report.as_object().unwrap().len(), 4, "the secret itself is never reported: {report}");
 
     // The Worker has one: never replaced.
@@ -743,7 +886,7 @@ fn deploy_creates_secret_key_base_only_when_the_worker_has_none() {
     let (report, ok) = sandbox.json(&["deploy"], &root);
     assert!(ok, "{report}");
     assert!(report.get("secret_created").is_none(), "{report}");
-    assert_eq!(deploy_calls().last().unwrap(), "deploy");
+    assert_eq!(deploy_calls().last().unwrap(), "cf deploy");
 }
 
 #[test]
@@ -766,11 +909,7 @@ fn secret_prints_a_new_random_secret() {
 fn deploy_without_a_workers_dev_url_reports_none() {
     let sandbox = Sandbox::new();
     let root = sandbox.new_app("shop", &[]);
-    sandbox.script(
-        "npx",
-        &include_str!("../support/fake_npx.sh")
-            .replace("https://app.example.workers.dev", "https://custom.example.com"),
-    );
+    sandbox.set("deploy_no_url");
     let (report, ok) = sandbox.json(&["deploy"], &root);
     assert!(ok, "{report}");
     assert!(report.get("url").is_none());
@@ -780,36 +919,43 @@ fn deploy_without_a_workers_dev_url_reports_none() {
 fn deploy_failures_carry_hints() {
     let sandbox = Sandbox::new();
     let root = sandbox.new_app("shop", &[]);
-    sandbox.write_state("d1_list.json", "oops");
-    let (report, _) = sandbox.json(&["deploy"], &root);
-    assert!(report["error"].as_str().unwrap().starts_with("unexpected `wrangler d1 list --json` output"));
-
     sandbox.set("d1_list_fails");
     let (report, _) = sandbox.json(&["deploy"], &root);
-    assert_eq!(report["error"], "`wrangler d1 list` failed: ✘ [ERROR] d1_list_fails");
+    assert_eq!(report["error"], "`cf d1 list --name shop` failed: ┌ Error\n│ d1_list_fails\n└");
     assert!(report["hint"].as_str().unwrap().contains("ocre login"));
 
     fs::remove_file(sandbox.work.join("../state/d1_list_fails")).unwrap();
-    sandbox.write_state("d1_list.json", "[]");
+    sandbox.set("d1_create_no_uuid");
+    let (report, _) = sandbox.json(&["deploy"], &root);
+    assert!(
+        report["error"].as_str().unwrap().starts_with("`cf d1 create --name shop` returned no uuid: {\"created_at\""),
+        "{report}"
+    );
+    assert!(report["hint"].as_str().unwrap().contains("run `ocre deploy` again"), "{report}");
+
+    // The database exists now; the deploy itself fails.
     sandbox.set("deploy_fails");
     let (report, _) = sandbox.json(&["deploy"], &root);
     assert!(
-        report["error"]
-            .as_str()
-            .unwrap()
-            .starts_with("`wrangler deploy --secrets-file .wrangler/ocre-secrets.env` failed")
+        report["error"].as_str().unwrap().starts_with("`cf deploy --secrets-file .wrangler/ocre-secrets.env` failed")
     );
     assert!(!root.join(".wrangler/ocre-secrets.env").exists(), "deleted after a failed deploy");
 
     // Only a missing Worker means "no secret yet"; other failures stop the deploy.
+    sandbox.clear_calls();
     sandbox.set("secret_list_errors");
     let (report, _) = sandbox.json(&["deploy"], &root);
-    assert_eq!(report["error"], "`wrangler secret list` failed: ✘ [ERROR] secret_list_errors");
+    assert_eq!(
+        report["error"],
+        "`cf workers secrets list --worker shop` failed: ┌ APIError\n│ [10000] Authentication error\n│ 401 Unauthorized\n└"
+    );
     assert!(report["hint"].as_str().unwrap().contains("only creates SECRET_KEY_BASE when sure"));
+    assert_eq!(sandbox.calls(), ["cf d1 list --name shop", "cf workers secrets list --worker shop"]);
 
     fs::remove_file(sandbox.work.join("../state/secret_list_errors")).unwrap();
     sandbox.write_state("secret_list.json", "oops");
     let (report, _) = sandbox.json(&["deploy"], &root);
-    assert!(report["error"].as_str().unwrap().starts_with("unexpected `wrangler secret list` output"));
-    assert_eq!(sandbox.calls().last().unwrap(), "secret list --format json", "nothing ran after the failed check");
+    assert!(report["error"].as_str().unwrap().starts_with("unexpected `cf workers secrets list` output"));
+    let last = sandbox.calls().pop().unwrap();
+    assert_eq!(last, "cf workers secrets list --worker shop", "nothing ran after the failed check");
 }

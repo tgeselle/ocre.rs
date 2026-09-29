@@ -1,7 +1,7 @@
 //! File storage in Cloudflare R2: multipart uploads, attachments, streamed downloads.
 //!
 //! Like Active Storage without its extra tables: a file lives in the R2 bucket
-//! bound as `STORAGE` in wrangler.toml, and the record that owns it keeps four
+//! bound as `STORAGE` in cloudflare.config.ts, and the record that owns it keeps four
 //! columns (`<name>_key`, `<name>_filename`, `<name>_content_type`,
 //! `<name>_size`), read back as an [`Attachment`].
 //!
@@ -89,7 +89,7 @@ pub use crate::runtime::storage::{delete, delete_attachments, read, serve, store
 use crate::{IntoParam, Param, Validator, token::random_bytes};
 pub use multipart::{Multipart, MultipartForm};
 
-/// Name of the R2 binding holding every file: `[[r2_buckets]] binding = "STORAGE"` in wrangler.toml.
+/// Name of the R2 binding holding every file: `STORAGE: bindings.r2({ name: "<app>-storage" })` in cloudflare.config.ts.
 ///
 /// The bucket itself is `<app>-storage`; the first generator that needs it
 /// adds the entry, and `ocre deploy` creates the bucket. Every function of
@@ -738,10 +738,10 @@ pub(crate) fn unsatisfiable(size: i64) -> Response {
     response
 }
 
-/// Error for a missing `STORAGE` binding, naming the wrangler.toml entry.
+/// Error for a missing `STORAGE` binding, naming the cloudflare.config.ts entry.
 pub(crate) fn missing_binding(detail: &str) -> crate::Error {
     crate::Error::internal(format!(
-        "R2 binding `{STORAGE_BINDING}` is missing ({detail}). Fix: add to wrangler.toml\n[[r2_buckets]]\nbinding = \"{STORAGE_BINDING}\"\nbucket_name = \"<app>-storage\"\n(`ocre g scaffold <Model> <name>:attachment` adds it; `ocre deploy` creates the bucket)"
+        "R2 binding `{STORAGE_BINDING}` is missing ({detail}). Fix: add `{STORAGE_BINDING}: bindings.r2({{ name: \"<app>-storage\" }}),` to worker.env in cloudflare.config.ts\n(`ocre g scaffold <Model> <name>:attachment` adds it; `ocre deploy` creates the bucket)"
     ))
 }
 

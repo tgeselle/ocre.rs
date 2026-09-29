@@ -2,6 +2,11 @@ target/
 build/
 node_modules/
 .wrangler/
-# Local secrets for `wrangler dev` (SECRET_KEY_BASE, ...).
+.cloudflare/
+# Local secrets for `ocre dev` (SECRET_KEY_BASE, ...), production values for
+# `ocre secrets push --file .prod.vars`, and cf's credentials.
 .dev.vars
 .dev.vars.*
+.prod.vars
+.env
+.env.*

@@ -5,15 +5,6 @@ fn statements(json: &str) -> Vec<Statement> {
 }
 
 #[test]
-fn pending_migrations_come_from_the_wrangler_table() {
-    let output = "\n ⛅️ wrangler 4.143.0\n────────\nResource location: local \n\nMigrations to be applied:\n\
-                  ┌───────────────────┐\n│ Name              │\n├───────────────────┤\n\
-                  │ 0001_create_t.sql │\n├───────────────────┤\n│ 0002_x.sql        │\n└───────────────────┘\n";
-    assert_eq!(pending_migrations(output), ["0001_create_t.sql", "0002_x.sql"]);
-    assert!(pending_migrations("✅ No migrations to apply!\n").is_empty());
-}
-
-#[test]
 fn rows_render_as_a_table_in_column_order() {
     let json =
         r#"[{"results":[{"zeta":1.5,"name":"a","id":1},{"zeta":null,"name":"longer name","id":22}],"success":true}]"#;

@@ -47,8 +47,8 @@ async fn put(env: &Env, attachment: &Attachment, data: worker::Data) -> Result<(
 /// # Errors
 ///
 /// [`Error::Internal`](crate::Error::Internal) (500) when the `STORAGE`
-/// binding is missing (the message shows the `[[r2_buckets]]` entry to add
-/// to wrangler.toml) or the R2 write fails.
+/// binding is missing (the message shows the `STORAGE` entry to add
+/// to cloudflare.config.ts) or the R2 write fails.
 ///
 /// # Examples
 ///
@@ -85,8 +85,8 @@ pub fn store(ctx: &Ctx, prefix: &str, upload: Upload) -> impl Future<Output = Re
 /// # Errors
 ///
 /// [`Error::Internal`](crate::Error::Internal) (500) when the `STORAGE`
-/// binding is missing (the message shows the `[[r2_buckets]]` entry to add
-/// to wrangler.toml) or the R2 write fails.
+/// binding is missing (the message shows the `STORAGE` entry to add
+/// to cloudflare.config.ts) or the R2 write fails.
 ///
 /// # Examples
 ///
@@ -143,8 +143,8 @@ pub fn store_bytes(
 /// # Errors
 ///
 /// [`Error::Internal`](crate::Error::Internal) (500) when the `STORAGE`
-/// binding is missing (the message shows the `[[r2_buckets]]` entry to add
-/// to wrangler.toml), the body is not `size` bytes long, or the R2 write fails.
+/// binding is missing (the message shows the `STORAGE` entry to add
+/// to cloudflare.config.ts), the body is not `size` bytes long, or the R2 write fails.
 ///
 /// # Examples
 ///
@@ -199,8 +199,8 @@ pub fn store_body(
 /// # Errors
 ///
 /// [`Error::Internal`](crate::Error::Internal) (500) when the `STORAGE`
-/// binding is missing (the message shows the `[[r2_buckets]]` entry to add
-/// to wrangler.toml) or R2 fails.
+/// binding is missing (the message shows the `STORAGE` entry to add
+/// to cloudflare.config.ts) or R2 fails.
 ///
 /// # Examples
 ///
@@ -235,8 +235,8 @@ pub fn read(ctx: &Ctx, key: &str) -> impl Future<Output = Result<Option<Vec<u8>>
 /// # Errors
 ///
 /// [`Error::Internal`](crate::Error::Internal) (500) when the `STORAGE`
-/// binding is missing (the message shows the `[[r2_buckets]]` entry to add
-/// to wrangler.toml) or R2 fails.
+/// binding is missing (the message shows the `STORAGE` entry to add
+/// to cloudflare.config.ts) or R2 fails.
 ///
 /// # Examples
 ///
@@ -268,8 +268,8 @@ pub fn delete(ctx: &Ctx, key: &str) -> impl Future<Output = Result<()>> + Send +
 /// # Errors
 ///
 /// [`Error::Internal`](crate::Error::Internal) (500) when the `STORAGE`
-/// binding is missing (the message shows the `[[r2_buckets]]` entry to add
-/// to wrangler.toml) or R2 fails.
+/// binding is missing (the message shows the `STORAGE` entry to add
+/// to cloudflare.config.ts) or R2 fails.
 ///
 /// # Examples
 ///
@@ -332,8 +332,8 @@ pub fn delete_attachments(
 /// - [`Error::NotFound`](crate::Error::NotFound) (404) when no object has
 ///   `attachment.key`.
 /// - [`Error::Internal`](crate::Error::Internal) (500) when the `STORAGE`
-///   binding is missing (the message shows the `[[r2_buckets]]` entry to add
-///   to wrangler.toml) or R2 fails.
+///   binding is missing (the message shows the `STORAGE` entry to add
+///   to cloudflare.config.ts) or R2 fails.
 ///
 /// # Examples
 ///

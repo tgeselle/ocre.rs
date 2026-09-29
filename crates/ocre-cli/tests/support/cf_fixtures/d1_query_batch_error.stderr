@@ -1,0 +1,5 @@
+
+┌ APIError
+│ [7500] no such table: missing_table: SQLITE_ERROR
+│ 400 Bad Request · HTTP /accounts/0123456789abcdef0123456789abcdef/d1/database/71338291-825e-49d2-bea8-99b13f9db18a/query
+└

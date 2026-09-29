@@ -1,0 +1,5 @@
+
+┌ APIError
+│ [7404] The database 00000000-0000-4000-8000-000000000000 could not be found
+│ 404 Not Found · HTTP /accounts/0123456789abcdef0123456789abcdef/d1/database/00000000-0000-4000-8000-000000000000
+└

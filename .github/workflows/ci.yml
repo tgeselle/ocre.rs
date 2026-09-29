@@ -8,7 +8,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-# Jobs run in parallel. The e2e test (real `wrangler dev`) is run locally:
+# Jobs run in parallel. The e2e test (real `cf dev`) is run locally:
 # `cargo test -p ocre-cli --test e2e -- --ignored`.
 jobs:
   lint:
@@ -48,19 +48,24 @@ jobs:
       - run: rustup component add llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-llvm-cov
-      # Unit, CLI (fake wrangler) and pseudo-terminal tests; 100% line coverage.
+      # Unit, CLI (fake cf, wrangler and npm) and pseudo-terminal tests; 100% line coverage.
       # crates/ocre/src/runtime only runs inside workerd: the e2e test covers it.
       - run: >
           cargo llvm-cov --workspace --all-features
           --ignore-filename-regex 'crates/ocre/src/runtime/'
           --fail-under-lines 100 --show-missing-lines
 
-  # What users get: an app from `ocre new` with every generator applied must
-  # compile to WebAssembly. Catches generator output the unit tests only read as text.
+  # What users get: an app from `ocre new` (which runs `npm install` of the
+  # pinned cf and wrangler) with every generator applied must compile to
+  # WebAssembly, and its cloudflare.config.ts must type-check and load with
+  # cf's own loader. Catches generator output the unit tests only read as text.
   generated-app:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
@@ -124,7 +129,8 @@ jobs:
           # Application template.
           printf 'g model Label name:string\ng migration add_index_to_labels name\n' > ci.ocre
           ocre template ci.ocre --json
-          # Read-only commands (doctor warns about the login and pending migrations, which is fine).
+          # Read-only commands (doctor warns about the login and pending
+          # migrations, which is fine; it fails on an invalid cloudflare.config.ts).
           ocre version --json
           ocre about --json
           ocre stats --json
@@ -132,6 +138,7 @@ jobs:
           ocre routes --json
           ocre schedules --json
           ocre doctor --json
+          npx tsc -p .
           # cargo test, then the wasm32 check.
           ocre test --json
           cargo check --target wasm32-unknown-unknown

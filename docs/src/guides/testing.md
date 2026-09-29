@@ -6,7 +6,7 @@ An Ocre app is tested today in three layers: native `cargo test` for code that d
 
 - An Ocre app created with `ocre new` (the examples use `ocre new blog --starter blog`, whose `Post` model has `title:string`, `body:text` and `published:boolean`).
 - Rust installed with rustup; the app's `rust-toolchain.toml` adds the `wasm32-unknown-unknown` target.
-- Node.js 20 or newer, for `ocre dev` (it runs `npx wrangler@4`).
+- Node.js 22 or newer and the app's npm packages (`npm install`, run by `ocre new`), for `ocre dev` (it runs the app's `cf dev`).
 - No generator is needed: the tests below are added by hand.
 
 ## What you can test, and where
@@ -233,7 +233,7 @@ ocre dev                # http://localhost:8787
 ocre dev --port 8805    # another port, e.g. for a second app
 ```
 
-Wait for wrangler's `Ready on http://localhost:8787` line (the first build compiles every dependency to WebAssembly: a minute or two).
+Wait for the `Ready on http://localhost:8787` line, printed by the wrangler that `cf dev` runs (the first build compiles every dependency to WebAssembly: a minute or two).
 
 ### Send requests with curl
 
@@ -341,7 +341,7 @@ ocre db reset
   loaded db/seeds.sql (--local)
 ```
 
-With `--json`, wrangler's output goes to stderr and stdout holds one object listing the same steps, for example `{"command":"db reset","ok":true,"ran":["deleted .wrangler/state/v3/d1","applied migrations (--local)"]}` for an app without seeds. `ocre db reset` only touches the local database; it has no `--remote` flag.
+With `--json`, wrangler's output (local database commands run the app's wrangler) goes to stderr and stdout holds one object listing the same steps, for example `{"command":"db reset","ok":true,"ran":["deleted .wrangler/state/v3/d1","applied migrations (--local)"]}` for an app without seeds. `ocre db reset` only touches the local database; it has no `--remote` flag.
 
 ### A smoke-test script
 
@@ -399,7 +399,7 @@ The script exits with status 1 when a check fails, so an agent or a CI job can r
 
 ### Run the script with ocre test --e2e
 
-`ocre test --e2e` runs the whole chain unattended: `cargo test`, the wasm32 check, then local migrations, one `wrangler dev` on port 8788 (`--port` to change it) started for the run, and `sh tests/e2e.sh` with `BASE_URL=http://localhost:8788` once the server is ready. The server stops when the script ends, and the command fails when the script exits non-zero. Save the script above as `tests/e2e.sh`, reading `BASE_URL` instead of `BASE`:
+`ocre test --e2e` runs the whole chain unattended: `cargo test`, the wasm32 check, then local migrations, one `cf dev` on port 8788 (`--port` to change it) started for the run, and `sh tests/e2e.sh` with `BASE_URL=http://localhost:8788` once the server is ready. The server stops when the script ends, and the command fails when the script exits non-zero. Save the script above as `tests/e2e.sh`, reading `BASE_URL` instead of `BASE`:
 
 ```sh
 BASE=${BASE_URL:-http://localhost:8787}
@@ -441,7 +441,7 @@ fn start(sandbox: &Sandbox, root: &Path) -> Server {
     let log = sandbox.work.join("dev.log");
     let output = std::fs::File::create(&log).unwrap();
     let child = command.process_group(0).stdout(output.try_clone().unwrap()).stderr(output).spawn().unwrap();
-    // wrangler dev listens on `localhost`, which is IPv6-only on some Linux hosts.
+    // The dev server listens on `localhost`, which is IPv6-only on some Linux hosts.
     let mut server = Server { child, base: format!("http://localhost:{port}") };
     let deadline = Instant::now() + Duration::from_secs(240);
     while agent().get(&server.base).call().is_err() {

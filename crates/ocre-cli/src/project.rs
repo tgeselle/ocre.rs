@@ -5,14 +5,11 @@ use std::{
     process::Command,
 };
 
-use crate::output::CliError;
-
-/// Binding name every Ocre app uses for its D1 database.
-const DB_BINDING: &str = "DB";
+use crate::{config::Config, output::CliError};
 
 pub struct Project {
     pub root: PathBuf,
-    /// `database_name` of the `DB` binding in wrangler.toml.
+    /// `name` of the `DB` D1 binding in cloudflare.config.ts.
     pub database_name: String,
     /// `[package.metadata.ocre] mode = "api"` in Cargo.toml: JSON only, no HTML.
     pub api_only: bool,
@@ -21,25 +18,44 @@ pub struct Project {
 }
 
 impl Project {
-    /// Finds the app root (nearest directory with wrangler.toml) from the cwd.
+    /// Finds the app root (nearest directory with cloudflare.config.ts) from the cwd.
     pub fn find() -> Result<Self, CliError> {
         let cwd = std::env::current_dir()?;
         let root = cwd
             .ancestors()
-            .find(|dir| dir.join("wrangler.toml").is_file())
+            .find(|dir| dir.join(crate::config::FILE).is_file() || dir.join("wrangler.toml").is_file())
             .ok_or_else(|| {
-                CliError::new("no wrangler.toml found in this directory or its parents")
+                CliError::new(format!("no {} found in this directory or its parents", crate::config::FILE))
                     .hint("run this command inside an Ocre app, or create one with `ocre new <name>`")
             })?
             .to_path_buf();
+        if !root.join(crate::config::FILE).is_file() {
+            return Err(CliError::new(format!(
+                "{} uses wrangler.toml; Ocre now reads {}",
+                root.display(),
+                crate::config::FILE
+            ))
+            .hint(format!(
+                "convert it: `npm install --save-dev --save-exact cf@{} wrangler@{}`, then `npx cf migrate --no-install`, \
+                 then apply the Ocre fixes of the upgrading guide ({}/guides/upgrading.html)",
+                crate::cloudflare::CF_VERSION,
+                crate::cloudflare::WRANGLER_VERSION,
+                crate::new::DOCS_URL
+            )));
+        }
         Self::at(root)
     }
 
-    /// The app whose wrangler.toml is in `root`.
+    /// The app whose cloudflare.config.ts is in `root`.
     pub fn at(root: PathBuf) -> Result<Self, CliError> {
-        let database_name = read_database_name(&root.join("wrangler.toml"))?;
+        let database_name = Config::read(&root)?.database_name()?;
         let api_only = read_api_mode(&root.join("Cargo.toml"));
         Ok(Self { root, database_name, api_only, generate: Default::default() })
+    }
+
+    /// The app's cloudflare.config.ts, read now.
+    pub fn config(&self) -> Result<Config, CliError> {
+        Config::read(&self.root)
     }
 }
 
@@ -56,26 +72,6 @@ fn read_api_mode(path: &Path) -> bool {
         .and_then(|o| o.get("mode"))
         .and_then(|mode| mode.as_str())
         == Some("api")
-}
-
-fn read_database_name(path: &Path) -> Result<String, CliError> {
-    let text = std::fs::read_to_string(path)?;
-    let config: toml::Table =
-        text.parse().map_err(|err| CliError::new(format!("wrangler.toml is not valid TOML: {err}")))?;
-    config
-        .get("d1_databases")
-        .and_then(|v| v.as_array())
-        .into_iter()
-        .flatten()
-        .find(|db| db.get("binding").and_then(|b| b.as_str()) == Some(DB_BINDING))
-        .and_then(|db| db.get("database_name").and_then(|n| n.as_str()))
-        .map(str::to_owned)
-        .ok_or_else(|| {
-            CliError::new(format!("wrangler.toml has no D1 database with binding \"{DB_BINDING}\""))
-                .hint(format!(
-                    "add:\n[[d1_databases]]\nbinding = \"{DB_BINDING}\"\ndatabase_name = \"<app-name>\"\nmigrations_dir = \"migrations\""
-                ))
-        })
 }
 
 /// Fails early when rustc cannot target wasm32, which otherwise surfaces as a

@@ -14,7 +14,7 @@
 //!    account.
 //!
 //! Secrets per provider, in .dev.vars for `ocre dev` and with
-//! `npx wrangler secret put` for production: `GITHUB_CLIENT_ID`,
+//! `ocre secrets push NAME --file .prod.vars` for production: `GITHUB_CLIENT_ID`,
 //! `GITHUB_CLIENT_SECRET` (or `GOOGLE_...`). Register the callback URL
 //! `https://<your host>/auth/<provider>/callback` with the provider.
 
@@ -70,7 +70,7 @@ fn callback_url(uri: &Uri, provider: &Provider) -> String {
 async fn start(State(ctx): State<Ctx>, session: Session, uri: Uri, Path(name): Path<String>) -> Result<Redirect> {
     let provider = provider(&name)?;
     let client_id = ctx.env().secret(provider.client_id_secret).map_err(|_| {
-        Error::internal(format!("the {} secret is not set. Fix: add it to .dev.vars, and `npx wrangler secret put {0}`", provider.client_id_secret))
+        Error::internal(format!("the {} secret is not set. Fix: add it to .dev.vars, and `ocre secrets push {0} --file .prod.vars`", provider.client_id_secret))
     })?;
     let pkce = Pkce::new();
     let state = ocre::token::generate();

@@ -12,10 +12,10 @@ use serde::Serialize;
 
 use crate::{
     CliResult,
+    cloudflare::{Cloudflare, Echo},
     output::{CliError, Report},
     project::Project,
     secret::SECRET_KEY_BASE,
-    wrangler::{Echo, Wrangler},
 };
 
 /// A secret known locally, in production, or both.
@@ -27,9 +27,6 @@ pub struct SecretStatus {
     /// Set on the deployed Worker.
     pub deployed: bool,
 }
-
-/// Where `ocre secrets push` uploads the values from (git-ignored).
-const PUSH_FILE: &str = ".wrangler/ocre-secrets-push.json";
 
 /// `NAME=value` lines of a `.dev.vars`-style file; comments and blank lines skipped.
 pub fn parse_vars(text: &str) -> BTreeMap<String, String> {
@@ -60,7 +57,8 @@ fn read_vars(root: &Path, file: &str) -> Result<BTreeMap<String, String>, CliErr
 /// Every secret name of `.dev.vars` and of the deployed Worker.
 pub fn list(project: &Project, json: bool) -> CliResult {
     let local = read_vars(&project.root, ".dev.vars")?;
-    let deployed = Wrangler::new(&project.root, Echo::for_json(json)).secret_names()?.unwrap_or_default();
+    let worker = project.config()?.worker_name()?.to_owned();
+    let deployed = Cloudflare::new(&project.root, Echo::for_json(json)).secret_names(&worker)?.unwrap_or_default();
     let mut names: Vec<&String> = local.keys().chain(&deployed).collect();
     names.sort();
     names.dedup();
@@ -89,7 +87,7 @@ pub fn list(project: &Project, json: bool) -> CliResult {
 const DEV_ONLY: [&str; 2] = [SECRET_KEY_BASE, "MAIL_ADAPTER"];
 
 /// Uploads `names` with their values from `file` to the deployed Worker in
-/// one `wrangler secret bulk` call (a new Worker version, no rebuild).
+/// one `cf workers secrets bulk` call (a new Worker version, no rebuild).
 pub fn push(project: &Project, names: &[String], file: &str, json: bool) -> CliResult {
     if names.is_empty() {
         return Err(CliError::new("name the secrets to upload")
@@ -99,25 +97,19 @@ pub fn push(project: &Project, names: &[String], file: &str, json: bool) -> CliR
     let mut values = BTreeMap::new();
     for name in names {
         if file == ".dev.vars" && DEV_ONLY.contains(&name.as_str()) {
-            return Err(CliError::new(format!("{name} in .dev.vars is a development value")).hint(format!(
+            return Err(CliError::new(format!("{name} in .dev.vars is a development value")).hint(
                 "production needs its own: `ocre deploy` creates SECRET_KEY_BASE; for others put the production \
-                 value in another git-ignored file and pass `--file <it>`, or run `npx wrangler secret put {name}`"
-            )));
+                 value in another git-ignored file (e.g. .prod.vars) and pass `--file <it>`",
+            ));
         }
         let value = vars.get(name).ok_or_else(|| {
             CliError::new(format!("{name} is not set in {file}"))
-                .hint(format!("add `{name}=<value>` to {file}, or run `npx wrangler secret put {name}`"))
+                .hint(format!("add `{name}=<value>` to {file} (a git-ignored file), then run this again"))
         })?;
         values.insert(name.clone(), value.clone());
     }
-    let path = project.root.join(PUSH_FILE);
-    fs::create_dir_all(path.parent().expect("the push file is in .wrangler/"))?;
-    fs::write(&path, serde_json::to_string(&values).expect("strings serialize"))?;
-    let result = Wrangler::new(&project.root, Echo::for_json(json)).run(&["secret", "bulk", PUSH_FILE]);
-    // The values must not stay on disk, whatever wrangler did.
-    let removed = fs::remove_file(&path);
-    result?;
-    removed?;
+    let worker = project.config()?.worker_name()?.to_owned();
+    Cloudflare::new(&project.root, Echo::for_json(json)).put_secrets(&worker, &values)?;
     let mut report = Report::new("secrets push");
     report.ran = names.iter().map(|name| format!("uploaded {name}")).collect();
     Ok(report)

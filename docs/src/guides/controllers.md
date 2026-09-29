@@ -653,8 +653,8 @@ async fn request_id_header(RequestId(id): RequestId, req: Request, next: Next) -
     response
 }
 
-/// Maintenance mode: `MAINTENANCE = "on"` in wrangler.toml's [vars] (or in the
-/// dashboard) answers 503 everywhere but /up, without a new build.
+/// Maintenance mode: `MAINTENANCE: bindings.text("on")` in cloudflare.config.ts (or
+/// in the dashboard) answers 503 everywhere but /up, without a new build.
 async fn maintenance(Extension(ctx): Extension<Ctx>, req: Request, next: Next) -> Response {
     let on = ctx.env().var("MAINTENANCE").is_ok_and(|value| value.to_string() == "on");
     if on && req.uri().path() != "/up" {
@@ -669,7 +669,7 @@ Rate limiting per action uses the Workers Rate Limiting binding through `ocre::s
 
 | Middleware | On Ocre |
 |---|---|
-| Request logging (Loco's `logger`, Rails' request log) | Workers Logs records every request (method, URL, status, CPU time, `console` lines): `[observability] enabled = true`, in the generated `wrangler.toml`. Free plan: 200,000 events a day, kept 3 days |
+| Request logging (Loco's `logger`, Rails' request log) | Workers Logs records every request (method, URL, status, CPU time, `console` lines): `observability: { enabled: true }`, in the generated `cloudflare.config.ts`. Free plan: 200,000 events a day, kept 3 days |
 | `request_id` | `ocre::RequestId`: Cloudflare's `CF-Ray`, shown next to each request in Workers Logs |
 | `remote_ip` | `ocre::RemoteIp`, from `CF-Connecting-IP`, which Cloudflare sets and clients cannot forge |
 | `compression` | Cloudflare compresses responses at the edge (Brotli, gzip) |

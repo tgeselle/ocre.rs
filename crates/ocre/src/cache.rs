@@ -3,7 +3,7 @@
 //! Two opt-in tools, both chosen for the Workers free plan.
 //!
 //! **Values** ([`fetch`], [`read`], [`write`](fn@write), [`delete`]) are JSON in the
-//! `CACHE` KV namespace (`ocre g cache` adds the binding to `wrangler.toml`;
+//! `CACHE` KV namespace (`ocre g cache` adds the binding to `cloudflare.config.ts`;
 //! `ocre deploy` creates the namespace). Use them for results that are slow or
 //! costly to compute and read far more often than they change: an external API
 //! call, a D1 aggregate over many rows. [`fetch`] is Rails'
@@ -72,8 +72,8 @@ pub use crate::runtime::cache::{delete, fetch, read, write};
 
 /// Name of the KV namespace binding holding cached values: `CACHE`.
 ///
-/// `ocre g cache` adds `[[kv_namespaces]] binding = "CACHE"` to
-/// `wrangler.toml`. Without it, [`fetch`], [`read`], [`write`](fn@write) and [`delete`]
+/// `ocre g cache` adds `CACHE: bindings.kv(),` to
+/// `cloudflare.config.ts`. Without it, [`fetch`], [`read`], [`write`](fn@write) and [`delete`]
 /// fail with [`Error::Internal`] naming that entry.
 ///
 /// # Examples
@@ -100,7 +100,7 @@ const MAX_KEY_BYTES: usize = 512;
 /// Prefix of every line Ocre logs about the cache: `[ocre cache]`.
 ///
 /// Survived KV failures are logged as ``[ocre cache] <operation> `<key>` failed: <error>``
-/// (operation `read`, `write` or `decode`); grep `wrangler tail` for it.
+/// (operation `read`, `write` or `decode`); search the Worker logs for it.
 ///
 /// # Examples
 ///
@@ -147,7 +147,7 @@ pub(crate) fn decode<T: DeserializeOwned>(key: &str, text: &str) -> Option<T> {
 pub(crate) fn binding_error(err: &dyn fmt::Display) -> Error {
     Error::internal(format!(
         "KV binding `{CACHE_BINDING}` is missing ({err}). Fix: run `ocre g cache`, which adds \
-         [[kv_namespaces]] binding = \"{CACHE_BINDING}\" to wrangler.toml"
+         `{CACHE_BINDING}: bindings.kv(),` to worker.env in cloudflare.config.ts"
     ))
 }
 
@@ -247,8 +247,8 @@ impl CacheControl {
     /// A `public, max-age=N` policy: browsers **and Cloudflare** may reuse it for every visitor.
     ///
     /// Only for responses identical for everyone: no session data, no locale
-    /// unless it is in the path. With Workers Cache enabled (`[cache] enabled
-    /// = true` in wrangler.toml) such responses are served without running the
+    /// unless it is in the path. With Workers Cache enabled (`cache: { enabled:
+    /// true }` in `worker` of cloudflare.config.ts) such responses are served without running the
     /// Worker (no CPU, but each hit still counts toward the free plan's 100,000
     /// requests a day). `max_age` is truncated to whole seconds.
     ///

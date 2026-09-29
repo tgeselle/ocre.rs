@@ -5,12 +5,12 @@ This page documents every `ocre` command and flag, what each one does step by st
 ## Before you start
 
 - The `ocre` CLI, installed with `cargo install --git https://github.com/tgeselle/ocre.rs ocre-cli` (see [Installation](../getting-started/installation.md)).
-- Node.js 20 or newer: every command that touches the database, the dev server or Cloudflare runs `npx --yes wrangler@4` (the CLI pins wrangler's major version).
+- Node.js 22 or newer, and the app's npm packages (`npm install`, which `ocre new` runs): commands that touch Cloudflare or the dev server run the app's Cloudflare [`cf` CLI](https://www.npmjs.com/package/cf) (`node_modules/.bin/cf`, pinned in `package.json`; outside an app, `npx --yes cf@1.0.0-beta.5`), and local database commands run the app's own wrangler (see [Why wrangler still appears](../guides/deployment.md#why-wrangler-still-appears)).
 - A rustup toolchain with the `wasm32-unknown-unknown` target for `ocre dev` and `ocre deploy`.
-- Except `ocre new`, `ocre login`, `ocre secret`, `ocre version`, `ocre doctor` and `ocre help`, commands run inside an Ocre app: the CLI walks up from the current directory to the nearest `wrangler.toml`, and reads the `database_name` of its `[[d1_databases]]` entry with `binding = "DB"`.
-- Commands with `--remote`, `ocre login` and `ocre deploy` need a Cloudflare account (free) and a login (`ocre login`) or the `CLOUDFLARE_API_TOKEN` environment variable that wrangler reads.
+- Except `ocre new`, `ocre login`, `ocre secret`, `ocre version`, `ocre doctor` and `ocre help`, commands run inside an Ocre app: the CLI walks up from the current directory to the nearest `cloudflare.config.ts`, and reads the `name` of its `DB: bindings.d1({ name })` entry (see [Configuration](configuration.md#cloudflareconfigts)). A directory with only a `wrangler.toml` (an app made by an older Ocre) is refused with a hint pointing to [Upgrading from wrangler.toml](../guides/upgrading.md).
+- Commands with `--remote`, `ocre login` and `ocre deploy` need a Cloudflare account (free) and a login (`ocre login`) or the `CLOUDFLARE_API_TOKEN` environment variable that cf reads (plus `CLOUDFLARE_ACCOUNT_ID` when the token sees several accounts).
 
-The examples below were run with `ocre 0.1.0` and wrangler 4.143.0 on apps created by `ocre new ... --starter blog`. Commands that need Cloudflare (`login`, `deploy`, `--remote`, `new --login/--deploy`) were run against the fake wrangler of the CLI's integration tests (`crates/ocre-cli/tests/support/fake_npx.sh`), so the lines wrangler prints in those examples are the fake's, while the lines and JSON printed by `ocre` itself are real.
+The examples below come from `ocre 0.1.0` on apps created by `ocre new ... --starter blog`; the lines printed by wrangler come from wrangler 4.143.0 (local database commands, and `cf dev`, which delegates to it). Commands that need Cloudflare (`login`, `deploy`, `--remote`, `new --login/--deploy`) are shown with the fake cf of the CLI's integration tests, so the lines cf prints there are the fake's, while the lines and JSON printed by `ocre` itself are Ocre's.
 
 ## Summary
 
@@ -31,9 +31,9 @@ The examples below were run with `ocre 0.1.0` and wrangler 4.143.0 on apps creat
 | [`ocre db version`](#ocre-db-version) | Prints the last applied migration |
 | [`ocre db schema`](#ocre-db-schema) | Writes the database's `CREATE` statements to `db/schema.sql` |
 | [`ocre sql QUERY`](#ocre-sql) | Runs SQL on D1 and prints the rows |
-| [`ocre dev`](#ocre-dev) | Applies local migrations, then runs the app with `wrangler dev` |
+| [`ocre dev`](#ocre-dev) | Applies local migrations, then runs the app with `cf dev` |
 | [`ocre test`](#ocre-test) | Runs `cargo test`, the wasm32 check and, with `--e2e`, `tests/e2e.sh` against a local server |
-| [`ocre deploy`](#ocre-deploy) | Creates missing Cloudflare resources, deploys, applies remote migrations |
+| [`ocre deploy`](#ocre-deploy) | Creates missing Cloudflare resources, applies remote migrations, then runs `cf deploy` |
 | [`ocre secret`](#ocre-secret) | Prints a new random value for `SECRET_KEY_BASE` |
 | [`ocre secrets list` / `push`](#ocre-secrets) | Lists secret names locally and on the Worker; uploads values from a git-ignored file |
 | [`ocre routes [FILTER]`](#ocre-routes) | Lists the app's HTTP routes, read from its source |
@@ -51,7 +51,7 @@ The examples below were run with `ocre 0.1.0` and wrangler 4.143.0 on apps creat
 
 - stdout carries exactly one JSON object, on one line, printed when the command ends.
 - The command never prompts (`ocre new` skips its wizard).
-- Output of the tools the CLI runs (wrangler, and cargo through wrangler's build) goes to stderr instead of stdout.
+- Output of the tools the CLI runs (cf, wrangler, npm, and cargo through the build) goes to stderr instead of stdout.
 
 On success the object has `"ok": true`, `command`, and only the keys that apply (empty lists, `false` flags and absent values are omitted):
 
@@ -61,7 +61,7 @@ On success the object has `"ok": true`, `command`, and only the keys that apply 
 | `command` | string | every command | The command's name, e.g. `new`, `migrate`, `db seed`, `secrets list`, `schedules run`, `destroy`, `doctor`, or `generate <generator>` (`generate scaffold`; `generate custom` for app generators) |
 | `created` | string[] | `new`, generators | Files created, relative to the app root (to the current directory for `ocre new`, so they start with the app name) |
 | `updated` | string[] | generators, `destroy`, `template`, `db schema` | Existing files changed |
-| `skipped` | string[] | generators (`--skip`), `destroy` | Existing files kept: by `--skip`, or left changed by `destroy` (Cargo.toml, wrangler.toml, changed lines) |
+| `skipped` | string[] | generators (`--skip`), `destroy` | Existing files kept: by `--skip`, or left changed by `destroy` (Cargo.toml, cloudflare.config.ts, package.json, changed lines) |
 | `removed` | string[] | `destroy` | Files deleted, the generation record last |
 | `pretend` | `true` | generators, `destroy` | `--pretend`: nothing was written |
 | `templates` | object[] | `generate override` | `{"path", "overridden"}` per generator template |
@@ -72,22 +72,22 @@ On success the object has `"ok": true`, `command`, and only the keys that apply 
 | `version` | string or `null` | `db version` | Last applied migration file, `null` when none is |
 | `secrets` | object[] | `secrets list` | `{"name", "local", "deployed"}` |
 | `schedules` | object[] | `schedules` | `{"cron", "task"}` |
-| `url` | string | `dev`, `deploy`, `new --deploy` | `http://localhost:<port>`, or the `https://....workers.dev` URL found in wrangler's deploy output |
+| `url` | string | `dev`, `deploy`, `new --deploy` | `http://localhost:<port>`, or the `https://....workers.dev` URL found in `cf deploy`'s output |
 | `email` | string | `login`, `new --login`, `new --deploy` | Email of the Cloudflare login |
 | `pending` | string[] | `migrate --status` | Migration files not applied yet |
-| `ran` | string[] | `db seed`, `db reset`, `i18n missing` | Steps performed, in order |
-| `rows` | array | `sql` | Wrangler's JSON: one object per statement, with `results` (the rows), `success` and `meta` |
+| `ran` | string[] | `new`, `db seed`, `db reset`, `i18n missing` | Steps performed, in order |
+| `rows` | array | `sql` | D1's JSON: one object per statement, with `results` (the rows), `success` and `meta` |
 | `routes` | object[] | `routes` | `{"method", "path", "handler"}`, sorted by path then method |
 | `remote` | `true` | `migrate --status --remote`, `db seed --remote`, `sql --remote` | The command used the production database |
 | `secret` | string | `secret` | 128 lowercase hex characters |
 | `secret_created` | `true` | `deploy`, `new --deploy` | The deploy uploaded a new `SECRET_KEY_BASE` because the Worker had none |
-| `provisioned` | string[] | `deploy` | Cloudflare resources created because they were missing, e.g. `queue blog-jobs` |
+| `provisioned` | string[] | `deploy` | Cloudflare resources created because they were missing, e.g. `D1 database blog`, `queue blog-jobs` |
 | `next` | string[] | `new`, `migrate --status`, generators, `destroy`, db tasks, `secrets list` | Commands or actions to run next, in order |
 
 On failure the object is `{"ok": false, "error": "...", "hint": "..."}`. `hint` names the fix; it is `null` for the few errors without one (for example I/O errors). `ocre doctor` and `ocre test` report failed checks the same way, with the report's keys (`checks`, `ran`) alongside.
 
 ```json
-{"error":"no wrangler.toml found in this directory or its parents","hint":"run this command inside an Ocre app, or create one with `ocre new <name>`","ok":false}
+{"error":"no cloudflare.config.ts found in this directory or its parents","hint":"run this command inside an Ocre app, or create one with `ocre new <name>`","ok":false}
 ```
 
 Without `--json`, the same result is printed for humans: `  create  <path>` and `  update  <path>` lines, the steps, the route table, the URL, then a `Next:` list. Failures print `error: <message>` and `hint: <hint>` on stderr.
@@ -119,11 +119,14 @@ For more information, try '--help'.
 
 | Error | Hint | Cause |
 |---|---|---|
-| `no wrangler.toml found in this directory or its parents` | ``run this command inside an Ocre app, or create one with `ocre new <name>` `` | Run outside an app |
-| `wrangler.toml is not valid TOML: ...` | none | Syntax error in `wrangler.toml` |
-| `wrangler.toml has no D1 database with binding "DB"` | the `[[d1_databases]]` block to add, with `binding = "DB"`, `database_name` and `migrations_dir = "migrations"` | The `DB` binding was removed or renamed |
-| `could not run npx: ...` | `install Node.js 20 or newer (it provides npx)` | No `npx` on `PATH` |
-| `` `wrangler <arguments>` failed (exit status: N) `` | `read the wrangler output above; the first error line names the cause` | Wrangler failed; its own error is on stderr just above |
+| `no cloudflare.config.ts found in this directory or its parents` | ``run this command inside an Ocre app, or create one with `ocre new <name>` `` | Run outside an app |
+| `<dir> uses wrangler.toml; Ocre now reads cloudflare.config.ts` | ``convert it: `npm install --save-dev --save-exact cf@1.0.0-beta.5 wrangler@4.144.0`, then `npx cf migrate --no-install`, then apply the Ocre fixes of the upgrading guide (...)`` | An app made by an older Ocre; see [Upgrading from wrangler.toml](../guides/upgrading.md) |
+| ``cloudflare.config.ts has no D1 database bound to `DB` `` | ``add `DB: bindings.d1({ name: "<app>" }),` inside `worker.env` `` | The `DB` binding was removed or renamed |
+| ``cloudflare.config.ts defines `<KEY>` in a form Ocre cannot read`` | the canonical entry to write, e.g. ``write `STORAGE: bindings.r2({ name: "<bucket>" }),` `` | A value Ocre needs is not a literal (see [Configuration](configuration.md#how-ocre-reads-and-edits-it)) |
+| `the app's npm packages are not installed (node_modules/.bin/cf, node_modules/.bin/wrangler)` | ``run `npm install` in <app> (needs Node.js 22 or newer)`` | `ocre new --no-install`, or a fresh clone |
+| `could not run cf: ...` (or `wrangler`) | ``install Node.js 22 or newer, then run `npm install` in the app`` | No Node.js on `PATH` |
+| `` `cf <arguments>` failed (exit status: N) `` (or `` `wrangler <arguments>` ``) | `read the cf output above; the first error line names the cause` | The tool failed; its own error is on stderr just above |
+| `` `cf <arguments>` failed: ┌ APIError ... `` | ``log in with `ocre login`, or set CLOUDFLARE_API_TOKEN (and CLOUDFLARE_ACCOUNT_ID when the token sees several accounts)`` | A Cloudflare API call made by Ocre (lists, creations) failed; cf's error box, with the API code, is in the message |
 | `the wasm32-unknown-unknown target is not installed for rustc at <sysroot>` | ``use a rustup toolchain (Homebrew's `rust` has no wasm target) and run `rustup target add wasm32-unknown-unknown` `` | `ocre dev`, `ocre deploy`, `ocre new --deploy` with a toolchain that cannot build WebAssembly |
 | `rustc not found` | `install Rust with rustup: https://rustup.rs` | No Rust on `PATH` |
 | `invalid locale files:` followed by one line per problem | ``fix each line named above (quote values with "..." when in doubt); `ocre i18n missing` checks them again`` | `ocre dev` and `ocre deploy` refuse locale files the Worker could not load (see [ocre i18n missing](#ocre-i18n-missing)) |
@@ -142,10 +145,11 @@ Creates a new app in `./NAME`. When stdin and stdout are both terminals and neit
 | `--api` | off | API-only app: JSON endpoints, no HTML templates, no askama; Ocre's default features (`html`) are off |
 | `--full-stack` | on | HTML pages with askama and htmx, plus JSON APIs when generated. `--api` and `--full-stack` override each other; the last one wins |
 | `--starter <STARTER>` | `empty` | `empty`: home page (status endpoint in API mode) only. `blog`: adds a `Post` resource (`title:string body:text published:boolean`) with CRUD pages, or a JSON API in an API-only app |
-| `--login` / `--no-login` | no login | Log in to Cloudflare (opens a browser) if not logged in yet |
-| `--account-id <ACCOUNT_ID>` | none | Cloudflare account to deploy to, written as `account_id` into `wrangler.toml`. Required with `--login`/`--deploy` when the login has several accounts |
+| `--login` / `--no-login` | no login | Log in to Cloudflare (`cf auth login`, opens a browser) if not logged in yet |
+| `--account-id <ACCOUNT_ID>` | none | Cloudflare account to deploy to, written as `accountId: "<id>",` at the top of `cloudflare.config.ts`. Required with `--login`/`--deploy` when the login has several accounts |
 | `--git` / `--no-git` | no git | Run `git init` in the new app |
 | `--deploy` / `--no-deploy` | no deploy | Deploy right after creating the app; implies `--login` |
+| `--no-install` | install | Skip `npm install` in the new app (for offline use); run `npm install` in it before `ocre dev`. Cannot be combined with `--deploy` |
 | `-y`, `--yes` | off | Never prompt, even in a terminal |
 | `--ocre-path <OCRE_PATH>` | git dependency | Use a local checkout of the `ocre` crate (`crates/ocre` of the Ocre repository) instead of `git = "https://github.com/tgeselle/ocre.rs"` |
 | `-m`, `--template <TEMPLATE>` | none | Application template to apply once the app exists: a file or `https://` URL of ocre commands, one per line (see [ocre template](#ocre-template)). Every line is checked before the app is written |
@@ -153,15 +157,16 @@ Creates a new app in `./NAME`. When stdin and stdout are both terminals and neit
 What it does, in flag mode:
 
 1. Checks the name and that `./NAME` does not exist, resolves `--ocre-path`, and checks that `git` runs when `--git` is given. Nothing is written if any check fails.
-2. With `--login` or `--deploy`: runs `wrangler whoami --json`, runs `wrangler login` if not logged in, and picks the account (`--account-id` must be one of the login's accounts; with one account none is needed).
-3. Writes the app: `Cargo.toml`, `wrangler.toml`, `rust-toolchain.toml`, `.gitignore`, `AGENTS.md`, `migrations/.gitkeep`, `public/robots.txt`, `src/lib.rs`, and in full-stack apps `templates/layout.html`, `templates/home.html` and `templates/error.html`. An API-only app's `Cargo.toml` has `ocre = { ..., default-features = false }`, no askama, and `[package.metadata.ocre] mode = "api"`, which generators read.
+2. With `--login` or `--deploy`: runs `cf auth whoami`, runs `cf auth login` if not logged in, and picks the account (`--account-id` must be one of the login's accounts; with one account none is needed).
+3. Writes the app: `Cargo.toml`, `cloudflare.config.ts` (with `accountId` when an account was picked), `wrangler.config.ts`, `package.json`, `tsconfig.json`, `rust-toolchain.toml`, `.gitignore`, `AGENTS.md`, `migrations/.gitkeep`, `public/robots.txt`, `src/lib.rs`, and in full-stack apps `templates/layout.html`, `templates/home.html` and `templates/error.html`. An API-only app's `Cargo.toml` has `ocre = { ..., default-features = false }`, no askama, and `[package.metadata.ocre] mode = "api"`, which generators read.
 4. Writes `.dev.vars` (git-ignored) with a new random `SECRET_KEY_BASE` and `MAIL_ADAPTER=log`, used by `ocre dev` only.
 5. With `--starter blog`: runs the equivalent of `ocre g scaffold Post title:string body:text published:boolean` (`ocre g api` in an API-only app).
 6. With `--template`: runs the template's lines in the new app, like [`ocre template`](#ocre-template); the files they create are added to `created` and the lines to `ran`.
-7. With `--git`: runs `git init --quiet`.
-8. With `--deploy`: runs the same steps as [`ocre deploy`](#ocre-deploy), without the locale check.
+7. Unless `--no-install`: runs `npm install` in the app, which installs the pinned `cf`, `wrangler` and `typescript` into `node_modules/` and writes `package-lock.json` (commit it). `ran` gets `npm install (cf 1.0.0-beta.5, wrangler 4.144.0)`.
+8. With `--git`: runs `git init --quiet`.
+9. With `--deploy`: runs the same steps as [`ocre deploy`](#ocre-deploy), without the locale check.
 
-The wizard asks, in order: the app name, "What are you building?" (full-stack or API only), "Pick a starter", then checks the Cloudflare login and offers it ("Log in now" or "Later"), asks which account when the login has several, "Initialize a git repository?" (default yes), and "Deploy it now?" (default yes, only when logged in). Wrangler's output is hidden behind a spinner and included in error messages. Each question is skipped when its flag was given. When the user chose not to log in, `ocre login` is added to the next steps. Esc or Ctrl-C cancels with the error `cancelled`.
+The wizard asks, in order: the app name, "What are you building?" (full-stack or API only), "Pick a starter", then checks the Cloudflare login and offers it ("Log in now" or "Later"), asks which account when the login has several, "Initialize a git repository?" (default yes), and "Deploy it now?" (default yes, only when logged in). The output of cf and npm is hidden behind a spinner and included in error messages; with `--no-install`, the wizard does not offer to deploy. Each question is skipped when its flag was given. When the user chose not to log in, `ocre login` is added to the next steps. Esc or Ctrl-C cancels with the error `cancelled`.
 
 Example, flag mode:
 
@@ -171,7 +176,10 @@ ocre new blog --starter blog --yes
 
 ```text
   create  blog/Cargo.toml
-  create  blog/wrangler.toml
+  create  blog/cloudflare.config.ts
+  create  blog/wrangler.config.ts
+  create  blog/package.json
+  create  blog/tsconfig.json
   create  blog/rust-toolchain.toml
   create  blog/.gitignore
   create  blog/AGENTS.md
@@ -191,6 +199,7 @@ ocre new blog --starter blog --yes
   create  blog/templates/posts/new.html
   create  blog/templates/posts/edit.html
   create  blog/templates/posts/_form.html
+  npm install (cf 1.0.0-beta.5, wrangler 4.144.0)
 
 Next:
   cd blog
@@ -198,19 +207,19 @@ Next:
   ocre deploy
 ```
 
-(The example ran with `--ocre-path` pointing at a local checkout, which only changes the `ocre` line of `Cargo.toml`.)
+(With `--ocre-path` pointing at a local checkout, which only changes the `ocre` line of `Cargo.toml`; `npm install`'s own output is not shown.)
 
-An API-only app, with `--json`:
+An API-only app, with `--json` and without the npm install (run `npm install` in it before `ocre dev`; `ocre doctor` reminds you):
 
 ```sh
-ocre new shop --api --json
+ocre new shop --api --no-install --json
 ```
 
 ```json
-{"command":"new","created":["shop/Cargo.toml","shop/wrangler.toml","shop/rust-toolchain.toml","shop/.gitignore","shop/AGENTS.md","shop/migrations/.gitkeep","shop/public/robots.txt","shop/src/lib.rs","shop/.dev.vars"],"next":["cd shop","ocre dev","ocre deploy"],"ok":true}
+{"command":"new","created":["shop/Cargo.toml","shop/cloudflare.config.ts","shop/wrangler.config.ts","shop/package.json","shop/tsconfig.json","shop/rust-toolchain.toml","shop/.gitignore","shop/AGENTS.md","shop/migrations/.gitkeep","shop/public/robots.txt","shop/src/lib.rs","shop/.dev.vars"],"next":["cd shop","ocre dev","ocre deploy"],"ok":true}
 ```
 
-Creating and deploying in one command (fake wrangler; the account has two Cloudflare accounts, hence `--account-id`):
+Creating and deploying in one command (fake cf; the account has two Cloudflare accounts, hence `--account-id`):
 
 ```sh
 ocre new two --deploy --account-id def456 --git
@@ -233,10 +242,10 @@ Next:
   ocre dev
 ```
 
-The same with `--json` prints wrangler's lines on stderr and this on stdout:
+The same with `--json` prints cf's lines on stderr and this on stdout:
 
 ```json
-{"command":"new","created":["three/Cargo.toml","three/wrangler.toml","three/rust-toolchain.toml","three/.gitignore","three/AGENTS.md","three/migrations/.gitkeep","three/public/robots.txt","three/src/lib.rs","three/templates/layout.html","three/templates/home.html","three/templates/error.html","three/.dev.vars"],"email":"ada@example.com","next":["cd three","ocre dev"],"ok":true,"secret_created":true,"url":"https://app.example.workers.dev"}
+{"command":"new","created":["three/Cargo.toml","three/cloudflare.config.ts","three/wrangler.config.ts","three/package.json","three/tsconfig.json","three/rust-toolchain.toml","three/.gitignore","three/AGENTS.md","three/migrations/.gitkeep","three/public/robots.txt","three/src/lib.rs","three/templates/layout.html","three/templates/home.html","three/templates/error.html","three/.dev.vars"],"email":"ada@example.com","next":["cd three","ocre dev"],"ok":true,"ran":["npm install (cf 1.0.0-beta.5, wrangler 4.144.0)"],"secret_created":true,"url":"https://app.example.workers.dev"}
 ```
 
 Errors:
@@ -252,6 +261,9 @@ Errors:
 | `Cloudflare login did not complete` | ``run `ocre login` and approve access in the browser, or set CLOUDFLARE_API_TOKEN`` |
 | `this Cloudflare login has several accounts` | `pass --account-id with one of: abc123 (Ada), def456 (Work)` (the login's accounts) |
 | ``account `zzz` is not available to this Cloudflare login`` | `use one of: abc123 (Ada), def456 (Work)` |
+| `npm not found` | ``install Node.js 22 or newer (it provides npm), or pass --no-install and run `npm install` in the app later`` |
+| `` `npm install` failed in <dir> (<status>): ... `` | ``the app is created: fix the cause above (network, Node.js 22+), then run `npm install` in it`` |
+| `--deploy needs the app's npm packages` | ``drop --no-install, or deploy later with `npm install && ocre deploy` `` |
 | `this Cloudflare login has no accounts` | ``create an account at https://dash.cloudflare.com/sign-up, then run `ocre login` again`` |
 | `cancelled` (wizard only) | ``run `ocre new <name>` with flags (see `ocre new --help`) to skip the questions`` |
 
@@ -263,9 +275,11 @@ With `--deploy`, the errors of [ocre deploy](#ocre-deploy) apply too. The app di
 ocre login [--json]
 ```
 
-Logs in to Cloudflare. It runs `wrangler whoami --json`; when not logged in, it runs `wrangler login`, which opens a browser to approve access, then checks `wrangler whoami --json` again. Already logged in, it only prints the login. It takes no flags besides `--json`.
+Logs in to Cloudflare. It runs `cf auth whoami`; when not logged in, it runs `cf auth login`, which opens a browser to approve access (OAuth), then checks `cf auth whoami` again. Already logged in, it only prints the login. It takes no flags besides `--json`. Inside an app it runs the app's `cf`; elsewhere `npx --yes cf@1.0.0-beta.5`.
 
-Example (fake wrangler, not logged in yet; `Successfully logged in.` is wrangler's line):
+cf keeps its own login, separate from wrangler's: after upgrading from an Ocre that used wrangler, run `ocre login` once again. On a machine with several Cloudflare accounts, `npx cf auth activate <profile> .` binds a cf profile to the app directory. CI uses `CLOUDFLARE_API_TOKEN` instead (see [Deployment](../guides/deployment.md#ci)).
+
+Example (fake cf, not logged in yet; `Successfully logged in.` is the fake's line):
 
 ```sh
 ocre login
@@ -284,7 +298,7 @@ ocre login --json
 {"command":"login","email":"ada@example.com","ok":true}
 ```
 
-`email` is absent when the session has none (an API token). Errors: `Cloudflare login did not complete` (hint: ``run `ocre login` and approve access in the browser, or set CLOUDFLARE_API_TOKEN``), `` unexpected `wrangler whoami --json` output: ... ``, and the shared wrangler errors.
+`email` is absent when the session has none (an API token). Errors: `Cloudflare login did not complete` (hint: ``run `ocre login` and approve access in the browser, or set CLOUDFLARE_API_TOKEN``), `` unexpected `cf auth whoami` output: ... ``, and the shared errors.
 
 ## ocre generate
 
@@ -310,7 +324,7 @@ ocre destroy <GENERATOR> [NAME] [--force] [--pretend] [--json]
 ocre d <GENERATOR> [NAME]
 ```
 
-Undoes a generator run, like `rails destroy`, from its record in `.ocre/generated/`: deletes the files it created (and the directories left empty), takes the lines it added out of existing files and puts back the lines it replaced, then deletes the record. Changes to `Cargo.toml` and `wrangler.toml` stay (features and bindings later code may use); they are reported as `skipped`. No wrangler, no network.
+Undoes a generator run, like `rails destroy`, from its record in `.ocre/generated/`: deletes the files it created (and the directories left empty), takes the lines it added out of existing files and puts back the lines it replaced, then deletes the record. Changes to `Cargo.toml`, `cloudflare.config.ts` and `package.json` stay (features and bindings later code may use); they are reported as `skipped`. No cf, no network.
 
 | Argument or flag | Default | Effect |
 |---|---|---|
@@ -417,7 +431,7 @@ Errors:
 ocre migrate [--remote] [--status] [--json]
 ```
 
-Applies the pending SQL files of `migrations/` to the app's D1 database, in file-name order, with `wrangler d1 migrations apply <database> --local` (or `--remote`). Wrangler records applied migrations in the database's `d1_migrations` table, so each file runs once.
+Applies the pending SQL files of `migrations/` to the app's D1 database, in file-name order. Locally it runs the app's wrangler, `wrangler d1 migrations apply DB --local -c .wrangler/ocre-d1.json --persist-to .wrangler/state` (a config Ocre derives from `cloudflare.config.ts`; see [Why wrangler still appears](../guides/deployment.md#why-wrangler-still-appears)); with `--remote` it looks the database id up with `cf d1 list --name <database>` and runs `cf d1 migrations apply <id>`. Applied migrations are recorded in the database's `d1_migrations` table, so each file runs once.
 
 | Flag | Default | Effect |
 |---|---|---|
@@ -443,7 +457,7 @@ Your database may not be available to serve requests during the migration, conti
 ...
 ```
 
-All of it is wrangler's output (wrangler answers its own question with its non-interactive default, yes). With `--json`, wrangler's output goes to stderr and stdout gets:
+All of it is wrangler's output (wrangler answers its own question with its non-interactive default, yes). With `--json`, that output goes to stderr and stdout gets:
 
 ```json
 {"command":"migrate","ok":true}
@@ -453,7 +467,7 @@ The object is the same with `--remote`: the success report of `ocre migrate` has
 
 ### ocre migrate --status
 
-Runs `wrangler d1 migrations list <database> --local` (or `--remote`), shows wrangler's table, and reads the pending file names from it.
+Locally, runs `wrangler d1 migrations list DB --local` (same derived config), shows its table and reads the pending file names from it. With `--remote`, runs `cf d1 migrations list <id>` and reads the names from its JSON.
 
 ```sh
 ocre migrate --status
@@ -484,13 +498,13 @@ With nothing pending, wrangler prints `No migrations to apply!` and the report i
 
 ### ocre migrate --remote
 
-Applies (or with `--status`, lists) migrations on the production D1 database. It needs a Cloudflare login and a database that exists: the first [`ocre deploy`](#ocre-deploy) creates it, and every deploy applies remote migrations itself, so `ocre migrate --remote` is only needed to migrate without deploying. With `--status`, the human output ends with `Target: remote D1 database on Cloudflare` and the JSON has `"remote": true` (fake wrangler):
+Applies (or with `--status`, lists) migrations on the production D1 database. It needs a Cloudflare login and a database that exists: the first [`ocre deploy`](#ocre-deploy) creates it, and every deploy applies remote migrations itself, so `ocre migrate --remote` is only needed to migrate without deploying. With `--status`, the human output ends with `Target: remote D1 database on Cloudflare` and the JSON has `"remote": true` (fake cf):
 
 ```json
 {"command":"migrate","next":["ocre migrate --remote"],"ok":true,"pending":["0002_create_comments.sql"],"remote":true}
 ```
 
-Errors: the shared ones. A failing migration is reported as `` `wrangler d1 migrations apply blog --remote` failed (exit status: 1) `` with wrangler's error above it.
+Errors: the shared ones, and `the D1 database blog does not exist on Cloudflare yet` (hint: ``run `ocre deploy` (or `ocre db create --remote`) first``) with `--remote`. A failing migration is reported as `` `wrangler d1 migrations apply DB --local` failed (exit status: 1) `` (or `` `cf d1 migrations apply <id>` failed ``) with the tool's error above it.
 
 ## ocre db seed
 
@@ -498,7 +512,7 @@ Errors: the shared ones. A failing migration is reported as `` `wrangler d1 migr
 ocre db seed [--remote] [--replant] [--json]
 ```
 
-Runs `db/seeds.sql` with `wrangler d1 execute <database> --file db/seeds.sql --local --yes` (`--remote` for production). `--yes` answers wrangler's "database unavailable during import" question, so remote seeding never waits for input. The file is plain SQL, typically `INSERT` statements; it is not tracked, so running it twice inserts the rows twice.
+Runs `db/seeds.sql`: locally with `wrangler d1 execute DB --file db/seeds.sql --local --yes` (the app's wrangler; `--yes` answers its "database unavailable during import" question), with `--remote` through `cf d1 query <id> --batch @.wrangler/ocre-batch.json` (a temporary file holding the SQL). The file is plain SQL, typically `INSERT` statements; it is not tracked, so running it twice inserts the rows twice.
 
 | Flag | Default | Effect |
 |---|---|---|
@@ -542,7 +556,7 @@ With `--remote`, `ran` is `["loaded db/seeds.sql (--remote)"]`, the JSON has `"r
 
 `ocre db seed --replant --json` reports both steps: `{"command":"db seed","ok":true,"ran":["emptied posts (--local)","loaded db/seeds.sql (--local)"]}`.
 
-Errors: `db/seeds.sql not found in the app` (hint: ``create db/seeds.sql with INSERT statements, then run `ocre db seed` ``), ``` `ocre db seed --replant` only runs on the local database ``` for `--replant --remote` (hint: ``Ocre never deletes production data; use the Cloudflare dashboard or `npx wrangler d1 ...` for that on purpose``), and the shared ones.
+Errors: `db/seeds.sql not found in the app` (hint: ``create db/seeds.sql with INSERT statements, then run `ocre db seed` ``), ``` `ocre db seed --replant` only runs on the local database ``` for `--replant --remote` (hint: ``Ocre never deletes production data; use the Cloudflare dashboard or `cf d1 ...` for that on purpose``), and the shared ones.
 
 ## ocre db reset
 
@@ -550,7 +564,7 @@ Errors: `db/seeds.sql not found in the app` (hint: ``create db/seeds.sql with IN
 ocre db reset [--json]
 ```
 
-Local only. Deletes `.wrangler/state/v3/d1` (the local D1 databases) when it exists, applies every migration with `wrangler d1 migrations apply <database> --local`, then loads `db/seeds.sql` when the file exists. It takes no `--remote`: production data is never reset.
+Local only. Deletes `.wrangler/state/v3/d1` (the local D1 databases) when it exists, applies every migration like `ocre migrate`, then loads `db/seeds.sql` when the file exists. It takes no `--remote`: production data is never reset.
 
 ```sh
 ocre db reset
@@ -579,7 +593,7 @@ ocre db reset --json
 ocre db create [--remote] [--json]
 ```
 
-Creates the app's database. Locally, it runs `SELECT 1` with `wrangler d1 execute <database> --local`, which makes wrangler create its database file under `.wrangler/state/v3/d1`; the next step is `ocre migrate`. With `--remote`, it looks for the D1 database in `wrangler d1 list --json` and runs `wrangler d1 create <database>` when it is missing (the first `ocre deploy` does the same on its own).
+Creates the app's database. Locally, it runs `SELECT 1` through the app's wrangler (`wrangler d1 execute DB --local`), which creates the database file under `.wrangler/state/v3/d1`; the next step is `ocre migrate`. With `--remote`, it looks for the D1 database with `cf d1 list --name <database>` and runs `cf d1 create --name <database>` when it is missing (the first `ocre deploy` does the same on its own).
 
 ```json
 {"command":"db create","next":["ocre migrate"],"ok":true,"ran":["created local database shop"]}
@@ -616,7 +630,7 @@ Next:
   ocre db prepare
 ```
 
-Without a local database, `ran` is `["no local database to delete"]`. `ocre db drop --remote` is refused: ``` `ocre db drop` only runs on the local database ``` (hint: ``Ocre never deletes production data; use the Cloudflare dashboard or `npx wrangler d1 ...` for that on purpose``).
+Without a local database, `ran` is `["no local database to delete"]`. `ocre db drop --remote` is refused: ``` `ocre db drop` only runs on the local database ``` (hint: ``Ocre never deletes production data; use the Cloudflare dashboard or `cf d1 ...` for that on purpose``).
 
 ## ocre db truncate
 
@@ -638,7 +652,7 @@ With no table, `ran` is `["no tables to empty"]`. `--remote` is refused with ```
 ocre db version [--remote] [--json]
 ```
 
-Prints the last migration applied (local database unless `--remote`), read from wrangler's `d1_migrations` table.
+Prints the last migration applied (local database unless `--remote`), read from the `d1_migrations` table.
 
 ```sh
 ocre db version
@@ -684,7 +698,7 @@ CREATE TABLE posts (
 );
 ```
 
-Later runs report `update  db/schema.sql` (`"updated": ["db/schema.sql"]`). Errors: the shared wrangler errors, and `` unexpected `wrangler d1 execute --json` output: ... ``.
+Later runs report `update  db/schema.sql` (`"updated": ["db/schema.sql"]`). Errors: the shared errors, and `unexpected D1 query output: ...`.
 
 ## ocre sql
 
@@ -692,14 +706,14 @@ Later runs report `update  db/schema.sql` (`"updated": ["db/schema.sql"]`). Erro
 ocre sql [--remote] [--json] <QUERY>
 ```
 
-Runs one or more SQL statements separated by `;` with `wrangler d1 execute <database> --command <QUERY> --local --json` (or `--remote`) and prints each statement's rows. Quote the query for the shell.
+Runs one or more SQL statements separated by `;` locally with `wrangler d1 execute DB --command <QUERY> --local --json` (the app's wrangler), with `--remote` with `cf d1 query <id> --batch @.wrangler/ocre-batch.json`, and prints each statement's rows. Quote the query for the shell.
 
 | Argument or flag | Default | Effect |
 |---|---|---|
 | `QUERY` | required | SQL statements separated by `;` |
 | `--remote` | local | Run on the production database on Cloudflare |
 
-Wrangler's output is captured, not printed, in both modes: the human output is one table per statement, each followed by its row count, with `NULL` for null values.
+The tool's output is captured, not printed, in both modes: the human output is one table per statement, each followed by its row count, with `NULL` for null values.
 
 ```sh
 ocre sql "SELECT id, title, published FROM posts"
@@ -726,7 +740,7 @@ n
 (0 rows)
 ```
 
-With `--json`, `rows` is wrangler's JSON unchanged, one object per statement:
+With `--json`, `rows` is D1's JSON unchanged, one object per statement:
 
 ```sh
 ocre sql "SELECT id, title FROM posts WHERE published = 1; SELECT COUNT(*) AS n FROM posts" --json
@@ -738,17 +752,17 @@ ocre sql "SELECT id, title FROM posts WHERE published = 1; SELECT COUNT(*) AS n 
 
 With `--remote`, the JSON has `"remote": true` and the human output ends with `Target: remote D1 database on Cloudflare`.
 
-Errors: a failing statement is reported with wrangler's captured output in the message:
+Errors: a failing statement is reported with the tool's captured output in the message (here the local database, through the app's wrangler):
 
 ```sh
 ocre sql "SELECT * FROM nope" --json
 ```
 
 ```json
-{"error":"`wrangler d1 execute demo --command SELECT * FROM nope --local --json` failed (exit status: 1):\n\n{\n  \"error\": {\n    \"text\": \"no such table: nope: SQLITE_ERROR\"\n  }\n}","hint":"the wrangler output above names the cause","ok":false}
+{"error":"`wrangler d1 execute DB --local --command SELECT * FROM nope --json` failed (exit status: 1):\n\n{\n  \"error\": {\n    \"text\": \"no such table: nope: SQLITE_ERROR\"\n  }\n}","hint":"the wrangler output above names the cause","ok":false}
 ```
 
-Also `` unexpected `wrangler d1 execute --json` output: ... `` when wrangler's output is not the expected JSON, and the shared errors.
+Also `unexpected D1 query output: ...` when the tool's output is not the expected JSON, and the shared errors (with `--remote`, a missing database too).
 
 ## ocre dev
 
@@ -766,10 +780,11 @@ Steps:
 
 1. Checks the locale files (see [ocre i18n missing](#ocre-i18n-missing)); a file the Worker could not load stops here.
 2. Checks that rustc has the `wasm32-unknown-unknown` target.
-3. Applies local migrations (`wrangler d1 migrations apply <database> --local`).
-4. Runs `wrangler dev --port <PORT>`. Wrangler builds the app with the `[build]` command of `wrangler.toml`; `ocre dev` sets `OCRE_BUILD=--dev`, so `worker-build` makes an unoptimized build, much faster to compile than the `--release` build of deploys. The first build compiles every dependency (about a minute); later ones are incremental. Local D1, R2, KV, Queues and Durable Objects are simulated by wrangler under `.wrangler/state`, and `.dev.vars` provides the local secrets.
+3. Checks that the app's npm packages are installed (`node_modules/.bin/cf` and `wrangler`).
+4. Applies local migrations, like `ocre migrate` (through the app's wrangler).
+5. Runs `cf dev --port <PORT>`. cf delegates the build and the local server to the app's wrangler, which runs the `build.command` of `wrangler.config.ts`; `ocre dev` sets `OCRE_BUILD=--dev`, so `worker-build` makes an unoptimized build, much faster to compile than the `--release` build of deploys. The first build compiles every dependency (about a minute); later ones are incremental. Local D1, R2, KV, Queues and Durable Objects are simulated under `.wrangler/state`, the same state the local database commands use, and `.dev.vars` provides the local secrets.
 
-Abridged output of a real run on a new blog app:
+Abridged output of a run on a new blog app (the lines come from wrangler, which cf runs):
 
 ```sh
 ocre dev --port 8943
@@ -792,13 +807,13 @@ env.MAIL_ADAPTER ("(hidden)")                           Environment Variable    
 [wrangler:info] Ready on http://localhost:8943
 ```
 
-The report is printed after `wrangler dev` exits successfully; with `--json` it is:
+The report is printed after `cf dev` exits successfully; with `--json` it is:
 
 ```json
 {"command":"dev","ok":true,"url":"http://localhost:8787"}
 ```
 
-and every line above goes to stderr. Errors: the shared ones (locale files, wasm target, wrangler). `` `wrangler dev --port 8787` failed `` usually means the build failed: the compiler errors are in the output above it.
+and every line above goes to stderr. Errors: the shared ones (locale files, wasm target, npm packages, cf). `` `cf dev --port 8787` failed `` usually means the build failed: the compiler errors are in the output above it.
 
 ## ocre test
 
@@ -810,7 +825,7 @@ Runs the app's checks in one command, like `bin/rails test:all`, and stops at th
 
 1. `cargo test`, the native unit tests, with the arguments after `--` passed on (`ocre test -- models` runs the tests whose name contains `models`);
 2. `cargo check --target wasm32-unknown-unknown`, the type check of the real build;
-3. with `--e2e`: applies the local migrations, starts one `wrangler dev --port <PORT>` for the whole run (a development build; the first one can take minutes), runs `sh tests/e2e.sh` with `BASE_URL=http://localhost:<PORT>` once the server is ready, then stops the server.
+3. with `--e2e`: applies the local migrations, starts one `cf dev --port <PORT>` for the whole run (a development build; the first one can take minutes), runs `sh tests/e2e.sh` with `BASE_URL=http://localhost:<PORT>` once the server is ready, then stops the server.
 
 | Flag | Default | Effect |
 |---|---|---|
@@ -836,7 +851,7 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 {"command":"test","ok":true,"ran":["cargo test: ok","cargo check --target wasm32-unknown-unknown: ok"]}
 ```
 
-With `--json`, cargo's and wrangler's output go to stderr. A failing step ends with, for example, `error: cargo test failed (exit status: 101)` and `hint: the cargo output above names the failure`; the steps that passed are still listed in `ran`. Other errors: `tests/e2e.sh not found` (hint: ``create tests/e2e.sh: a shell script sending requests to $BASE_URL (e.g. `curl -fsS "$BASE_URL/up"`) that exits non-zero on failure``, checked before anything runs), `tests/e2e.sh failed (<status>)` (hint: `its output above shows the failing request`), `wrangler dev stopped or did not get ready` (hint: ``run `ocre dev` to see the build or startup error``), the missing wasm target, and `could not run cargo: ...`.
+With `--json`, the output of cargo, cf and wrangler goes to stderr. A failing step ends with, for example, `error: cargo test failed (exit status: 101)` and `hint: the cargo output above names the failure`; the steps that passed are still listed in `ran`. Other errors: `tests/e2e.sh not found` (hint: ``create tests/e2e.sh: a shell script sending requests to $BASE_URL (e.g. `curl -fsS "$BASE_URL/up"`) that exits non-zero on failure``, checked before anything runs), `tests/e2e.sh failed (<status>)` (hint: `its output above shows the failing request`), `cf dev stopped or did not get ready` (hint: ``run `ocre dev` to see the build or startup error``), the missing wasm target, and `could not run cargo: ...`.
 
 ## ocre deploy
 
@@ -844,37 +859,36 @@ With `--json`, cargo's and wrangler's output go to stderr. A failing step ends w
 ocre deploy [--json]
 ```
 
-Builds the app in release mode and deploys it to Cloudflare as the Worker named in `wrangler.toml`, creating what it needs on the way. It needs a Cloudflare login ([`ocre login`](#ocre-login)) or `CLOUDFLARE_API_TOKEN` (with `CLOUDFLARE_ACCOUNT_ID` when the token reaches several accounts). Steps, in order:
+Builds the app in release mode and deploys it to Cloudflare as the Worker named in `cloudflare.config.ts`, creating what it needs first. It needs a Cloudflare login ([`ocre login`](#ocre-login)) or `CLOUDFLARE_API_TOKEN` (with `CLOUDFLARE_ACCOUNT_ID` when the token reaches several accounts), and the app's npm packages. Ocre provisions every resource itself before `cf deploy` runs. Steps, in order:
 
-1. Checks the locale files and the wasm target, like `ocre dev`.
-2. Queues: for each queue `wrangler.toml` names (`[[queues.producers]]` `queue`, `[[queues.consumers]]` `queue` and `dead_letter_queue`), runs `wrangler queues info <name>` and, when the queue does not exist, `wrangler queues create <name>`. A consumer of a missing queue would fail the deploy.
-3. KV namespaces: for each `[[kv_namespaces]]` entry without an `id` (the `CACHE` binding added by `ocre g cache`), finds the namespace titled `<worker>-<binding>` (lowercase, `_` as `-`, e.g. `blog-cache`) in `wrangler kv namespace list`, creates it when missing, and writes its `id` into `wrangler.toml`. Commit that change: later deploys reuse the namespace.
-4. R2 buckets: for each `bucket_name` of `[[r2_buckets]]` (the `STORAGE` bucket added by the first `attachment` field), runs `wrangler r2 bucket info <name> --json` and creates the bucket when missing.
-5. `SECRET_KEY_BASE`: runs `wrangler secret list --format json`. When the Worker does not exist yet or has no `SECRET_KEY_BASE`, a new random value is written to `.wrangler/ocre-secrets.env` (mode 0600, deleted afterwards) and uploaded with `wrangler deploy --secrets-file`. An existing secret is never replaced (that would sign every user out); any other failure of `secret list` stops the deploy rather than risk it.
-6. Database: when `wrangler d1 list --json` has the database, applies remote migrations first, then runs `wrangler deploy`, so the new code never runs on the old schema. When it does not exist, runs `wrangler deploy` first (which creates the D1 database), then applies the migrations.
-7. Reports the `https://...workers.dev` URL found in wrangler's output.
+1. Checks the locale files, the wasm target and that `node_modules` has the app's `cf` and `wrangler` (hint: `npm install`).
+2. Database: looks for the `DB` database with `cf d1 list --name <database>` and creates it with `cf d1 create --name <database>` when missing.
+3. Queues: lists the account's queues (`cf queues list`) and creates, with `cf queues create --queue-name <name>`, each queue the config names (`bindings.queue` names, `triggers.queue` names and their `deadLetterQueue`) that is missing. A consumer of a missing queue would fail the deploy.
+4. R2 buckets: for each `bindings.r2({ name })` (the `STORAGE` bucket added by the first `attachment` field), runs `cf r2 buckets get <name>` and creates the bucket (`cf r2 buckets create`) when Cloudflare answers that it does not exist (API code 10006).
+5. KV namespaces: for each `bindings.kv()` entry without an `id` (the `CACHE` binding added by `ocre g cache`), finds the namespace titled `<worker>-<binding>` (lowercase, `_` as `-`, e.g. `blog-cache`) in `cf kv namespaces list`, creates it when missing, and rewrites the entry to `CACHE: bindings.kv({ id: "<id>" }),` in `cloudflare.config.ts`. Commit that change: later deploys reuse the namespace.
+6. `SECRET_KEY_BASE`: runs `cf workers secrets list --worker <name>`. When the Worker does not exist yet or has no `SECRET_KEY_BASE`, a new random value is written to `.wrangler/ocre-secrets.env` (mode 0600, deleted afterwards) and uploaded with `cf deploy --secrets-file`. An existing secret is never replaced (that would sign every user out); any other failure of the secrets list stops the deploy rather than risk it.
+7. Migrations: `cf d1 migrations apply <id>` on the production database, always before the new code goes live, so it never runs on the old schema.
+8. Deploy: `cf deploy`, with `OCRE_BUILD=--release`; cf delegates the release build to the app's wrangler (`build.command` of `wrangler.config.ts`).
+9. Reports the `https://...workers.dev` URL found in cf's output.
 
-`wrangler deploy` builds with `OCRE_BUILD=--release`. Durable Object namespaces (realtime channels) need no step: wrangler creates them from the `[[migrations]]` of `wrangler.toml`.
+Durable Object namespaces (realtime channels) need no step: `cf deploy` creates them from the `exports` of `cloudflare.config.ts`.
 
-First deploy of an app with a job, a cache, attachments (fake wrangler; the lines before `Created the SECRET_KEY_BASE secret` are wrangler's):
+First deploy of an app with a job, a cache, attachments (fake cf; the lines before `Created the SECRET_KEY_BASE secret` are cf's):
 
 ```sh
 ocre deploy
 ```
 
 ```text
-Created queue blog-jobs
-Created queue blog-jobs-failed
-Creating namespace with title "blog-cache"
-Created bucket 'blog-storage' with default storage class of Standard.
+Migrations applied to the remote database
 Uploaded app
   https://app.example.workers.dev
-Migrations applied to blog (--remote)
 Created the SECRET_KEY_BASE secret on Cloudflare
+Created D1 database blog on Cloudflare
 Created queue blog-jobs on Cloudflare
 Created queue blog-jobs-failed on Cloudflare
-Created KV namespace blog-cache (id written to wrangler.toml) on Cloudflare
 Created R2 bucket blog-storage on Cloudflare
+Created KV namespace blog-cache (id written to cloudflare.config.ts) on Cloudflare
 
 https://app.example.workers.dev
 ```
@@ -882,7 +896,7 @@ https://app.example.workers.dev
 The same first deploy with `--json`:
 
 ```json
-{"command":"deploy","ok":true,"provisioned":["queue blog-jobs","queue blog-jobs-failed","KV namespace blog-cache (id written to wrangler.toml)","R2 bucket blog-storage"],"secret_created":true,"url":"https://app.example.workers.dev"}
+{"command":"deploy","ok":true,"provisioned":["D1 database blog","queue blog-jobs","queue blog-jobs-failed","R2 bucket blog-storage","KV namespace blog-cache (id written to cloudflare.config.ts)"],"secret_created":true,"url":"https://app.example.workers.dev"}
 ```
 
 A later deploy, with everything in place:
@@ -897,14 +911,14 @@ Errors (besides the shared ones):
 
 | Error | Hint |
 |---|---|
-| `` `wrangler queues info <queue>` failed: ... `` | ``log in with `ocre login`, or set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID`` |
-| `` `wrangler kv namespace list` failed: ... `` | same |
-| `KV namespace <title> was created but is not listed` | ``run `ocre deploy` again; it links the namespace once Cloudflare lists it`` |
-| `` `wrangler r2 bucket info <bucket>` failed: ... `` | R2 not enabled (code 10042): ``enable R2 once in the Cloudflare dashboard (Storage & databases > R2; the free plan asks for a payment method but charges nothing within 10 GB, 1M writes and 10M reads a month), then run `ocre deploy` again``; otherwise the login hint above |
-| `` `wrangler secret list` failed: ... `` | ``log in with `ocre login`, or set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID; Ocre only creates SECRET_KEY_BASE when sure the Worker has none`` |
-| `` `wrangler d1 list` failed: ... `` | the login hint above |
-| `` `wrangler deploy` failed (exit status: 1) `` | `read the wrangler output above; the first error line names the cause` |
-| `` unexpected `wrangler ...` output: ... `` | none |
+| `` `cf d1 list --name <database>` failed: ... `` (also `cf queues list`, `cf queues create ...`, `cf kv namespaces list ...`, `cf d1 create ...`) | ``log in with `ocre login`, or set CLOUDFLARE_API_TOKEN (and CLOUDFLARE_ACCOUNT_ID when the token sees several accounts)`` |
+| `` `cf d1 create --name <database>` returned no uuid: ... `` | ``run `ocre deploy` again: it finds the database by name once Cloudflare lists it`` |
+| `` `cf kv namespaces create --title <title>` returned no id: ... `` | ``run `ocre deploy` again: it links the namespace once Cloudflare lists it`` |
+| `` `cf r2 buckets get <bucket>` failed: ... `` | R2 not enabled (code 10042): ``enable R2 once in the Cloudflare dashboard (Storage & databases > R2; the free plan asks for a payment method but charges nothing within 10 GB, 1M writes and 10M reads a month), then run `ocre deploy` again``; otherwise the login hint above |
+| `` `cf workers secrets list --worker <name>` failed: ... `` | the login hint above, then `; Ocre only creates SECRET_KEY_BASE when sure the Worker has none` |
+| `` `cf d1 migrations apply <id>` failed (exit status: 1) `` | `read the cf output above; the first error line names the cause`; the previous code keeps running |
+| `` `cf deploy` failed (exit status: 1) `` | same |
+| `` unexpected `cf ...` output: ... `` | none |
 
 Resources created before a failure stay created; running `ocre deploy` again skips them.
 
@@ -914,10 +928,10 @@ Resources created before a failure stay created; running `ocre deploy` again ski
 ocre secret [--json]
 ```
 
-Prints a new random value for `SECRET_KEY_BASE`, like `rails secret`: 64 bytes from the operating system's random number generator, as 128 lowercase hex characters. It works anywhere (no app needed) and writes nothing. `ocre new` already puts one in `.dev.vars` and the first `ocre deploy` uploads one; use `ocre secret` to replace a leaked secret (which signs every user out):
+Prints a new random value for `SECRET_KEY_BASE`, like `rails secret`: 64 bytes from the operating system's random number generator, as 128 lowercase hex characters. It works anywhere (no app needed) and writes nothing. `ocre new` already puts one in `.dev.vars` and the first `ocre deploy` uploads one; use `ocre secret` to replace a leaked secret (which signs every user out): put the value in `.prod.vars` (git-ignored) as `SECRET_KEY_BASE=<value>`, then
 
 ```sh
-ocre secret | npx wrangler secret put SECRET_KEY_BASE
+ocre secrets push SECRET_KEY_BASE --file .prod.vars
 ```
 
 ```sh
@@ -947,7 +961,7 @@ ocre secrets push <NAMES>... [--file <FILE>] [--json]
 
 Worker secrets are Ocre's credentials (Rails' `credentials.yml.enc`): Cloudflare stores them encrypted, the Worker reads them with `ctx.env().secret(NAME)`, and nothing secret is committed. Values can be written but never read back.
 
-`ocre secrets list` shows each secret name of `.dev.vars` (used by `ocre dev`) and of the deployed Worker (`wrangler secret list`), side by side. Names set locally but not deployed get a next step; `SECRET_KEY_BASE` and `MAIL_ADAPTER` are left out of it, their `.dev.vars` values being for development only.
+`ocre secrets list` shows each secret name of `.dev.vars` (used by `ocre dev`) and of the deployed Worker (`cf workers secrets list --worker <name>`), side by side. Names set locally but not deployed get a next step; `SECRET_KEY_BASE` and `MAIL_ADAPTER` are left out of it, their `.dev.vars` values being for development only.
 
 ```text
   GITHUB_CLIENT_ID                .dev.vars
@@ -962,7 +976,7 @@ Next:
 {"command":"secrets list","next":["ocre secrets push GITHUB_CLIENT_ID --file <production values>"],"ok":true,"secrets":[{"deployed":false,"local":true,"name":"GITHUB_CLIENT_ID"},{"deployed":false,"local":true,"name":"MAIL_ADAPTER"},{"deployed":false,"local":true,"name":"SECRET_KEY_BASE"}]}
 ```
 
-`ocre secrets push` uploads the named secrets to the deployed Worker, with their values read from a `NAME=value` file (`--file`, default `.dev.vars`; keep production values in another git-ignored file such as `.prod.vars`). It writes them to a temporary JSON file under `.wrangler/`, runs one `wrangler secret bulk` (a new Worker version, no rebuild), and deletes the file whatever happened. The report's `ran` is `["uploaded GITHUB_CLIENT_ID", ...]`.
+`ocre secrets push` uploads the named secrets to the deployed Worker, with their values read from a `NAME=value` file (`--file`, default `.dev.vars`; keep production values in `.prod.vars`, which the app's `.gitignore` lists). It writes them to a temporary JSON file under `.wrangler/` (readable only by you), runs one `cf workers secrets bulk --worker <name> --file <it>` (a new Worker version, no rebuild), and deletes the file whatever happened. Values never appear on a command line. The report's `ran` is `["uploaded GITHUB_CLIENT_ID", ...]`.
 
 ```sh
 ocre secrets push GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET --file .prod.vars
@@ -973,11 +987,11 @@ Errors:
 | Error | Hint |
 |---|---|
 | `name the secrets to upload` | ``e.g. `ocre secrets push GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET`; `ocre secrets list` shows them`` |
-| `SECRET_KEY_BASE in .dev.vars is a development value` (also `MAIL_ADAPTER`) | ``production needs its own: `ocre deploy` creates SECRET_KEY_BASE; for others put the production value in another git-ignored file and pass `--file <it>`, or run `npx wrangler secret put SECRET_KEY_BASE` `` |
-| `NOPE is not set in .prod.vars` | ``add `NOPE=<value>` to .prod.vars, or run `npx wrangler secret put NOPE` `` |
+| `SECRET_KEY_BASE in .dev.vars is a development value` (also `MAIL_ADAPTER`) | ``production needs its own: `ocre deploy` creates SECRET_KEY_BASE; for others put the production value in another git-ignored file (e.g. .prod.vars) and pass `--file <it>` `` |
+| `NOPE is not set in .prod.vars` | ``add `NOPE=<value>` to .prod.vars (a git-ignored file), then run this again`` |
 | `cannot read <file>: ...` | none |
 
-Both commands need a Cloudflare login for the deployed side, and the shared wrangler errors apply.
+Both commands need a Cloudflare login for the deployed side, and the shared errors apply.
 
 ## ocre routes
 
@@ -1023,7 +1037,7 @@ ocre schedules [--json]
 ocre schedules run <TASK> [--port <PORT>] [--json]
 ```
 
-`ocre schedules` lists the expressions of `[triggers] crons` in `wrangler.toml` with the task that handles each, read from the `"<cron>" => <task>::run(...)` arms of `src/schedules/mod.rs` (see [`ocre g schedule`](generators.md#ocre-g-schedule)), without building the app. A cron no task handles fails when it fires; it is listed as `(no task: fails when it fires)`, with a next step.
+`ocre schedules` lists the `triggers.scheduled` expressions of `cloudflare.config.ts` with the task that handles each, read from the `"<cron>" => <task>::run(...)` arms of `src/schedules/mod.rs` (see [`ocre g schedule`](generators.md#ocre-g-schedule)), without building the app. A cron no task handles fails when it fires; it is listed as `(no task: fails when it fires)`, with a next step.
 
 ```text
 CRON (UTC)   TASK
@@ -1035,7 +1049,7 @@ CRON (UTC)   TASK
 {"command":"schedules","ok":true,"schedules":[{"cron":"0 3 * * *","task":"nightly_cleanup"},{"cron":"0 9 * * MON","task":"weekly_digest"}]}
 ```
 
-`ocre schedules run <TASK>` fires the task's cron on the running `ocre dev`, through wrangler's local `/cdn-cgi/local/scheduled` endpoint, and returns once it answered; the task's `[ocre cron] <cron> done` (or `failed`) line is in the `ocre dev` output. Cron Triggers never fire in `ocre dev` by themselves.
+`ocre schedules run <TASK>` fires the task's cron on the running `ocre dev`, through the dev server's local `/cdn-cgi/local/scheduled` endpoint, and returns once it answered; the task's `[ocre cron] <cron> done` (or `failed`) line is in the `ocre dev` output. Cron Triggers never fire in `ocre dev` by themselves.
 
 | Argument | Default | Effect |
 |---|---|---|
@@ -1102,18 +1116,22 @@ Checks the tools and, inside an app, its setup, like `cargo loco doctor`. Each c
 | Check | Fails or warns when |
 |---|---|
 | `rust` | Fails: rustc has no `wasm32-unknown-unknown` target |
-| `node` | Fails: `npx` does not run (install Node.js 20 or newer) |
-| `cloudflare login` | Warns: not logged in (`wrangler whoami`); fails when wrangler errors |
-| `cache binding`, `storage binding`, `jobs queue`, `cron triggers`, `realtime binding` | Only when the code uses them (`ocre::cache::`, `ocre::storage::`, the `queue` and `scheduled` events, realtime channels). Fails: `wrangler.toml` lacks the `CACHE` KV namespace, the `STORAGE` R2 bucket, the queue producers and consumers, `[triggers] crons`, or the `OcreChannel` Durable Object |
-| `migrations` | Warns: local migrations are pending (`wrangler d1 migrations list --local`) |
+| `node` | Fails: `node --version` does not run or is older than 22 (cf's requirement) |
+| `cloudflare login` | Warns: not logged in (`cf auth whoami`); the hint says to log in once more when a wrangler login exists, since cf keeps its own. Fails when cf errors |
+| `npm packages` | In an app. Fails: `node_modules` has no `cf` or `wrangler` (run `npm install`), or wrangler is older than 4.136. Warns: the installed versions differ from the ones this CLI is tested with (cf 1.0.0-beta.5, wrangler 4.144.0) |
+| `config` | In an app, with the packages installed. Fails: cf's own loader (`@cloudflare/config`) rejects `cloudflare.config.ts`, or `tsc -p .` reports type errors in it or in `wrangler.config.ts` |
+| `cache binding`, `storage binding`, `jobs queue`, `cron triggers`, `realtime binding` | Only when the code uses them (`ocre::cache::`, `ocre::storage::`, the `queue` and `scheduled` events, realtime channels). Fails: `cloudflare.config.ts` lacks the `CACHE` KV binding, the `STORAGE` R2 binding, a queue binding and its `triggers.queue`, a `triggers.scheduled` entry, or the `CHANNELS` binding and `OcreChannel` export |
+| `migrations` | Warns: local migrations are pending (`wrangler d1 migrations list DB --local`, through the app's wrangler) |
 | `local secrets` | Fails: `.dev.vars` has no `SECRET_KEY_BASE` |
 | `production secrets` | When logged in. Warns: the deployed Worker lacks `SECRET_KEY_BASE` (or `RESEND_API_KEY` with `MAIL_ADAPTER = "resend"`); ok when the Worker is not deployed yet |
 
 ```text
   ok    rust                wasm32-unknown-unknown target installed
-  ok    node                npx 10.9.8
+  ok    node                node v22.23.2
   ok    cloudflare login    logged in as ada@example.com
-  ok    storage binding     configured in wrangler.toml
+  ok    npm packages        cf 1.0.0-beta.5, wrangler 4.144.0
+  ok    config              cloudflare.config.ts is valid
+  ok    storage binding     configured in cloudflare.config.ts
   warn  migrations          pending locally: 0001_create_posts.sql
                             run `ocre migrate`
   ok    local secrets       SECRET_KEY_BASE set in .dev.vars
@@ -1128,7 +1146,7 @@ With `--json`, `checks` holds one `{"name", "status", "detail", "hint"}` object 
 ocre about [--json]
 ```
 
-Versions and the app's configuration, read from `Cargo.toml`, `wrangler.toml` and `rust-toolchain.toml` without building anything (Rails' `about`, Loco's `doctor --config`). Variable values are never printed, only their names.
+Versions and the app's configuration, read from `Cargo.toml`, `cloudflare.config.ts`, `wrangler.config.ts` and `rust-toolchain.toml` without building anything (Rails' `about`, Loco's `doctor --config`). Variable values are never printed, only their names.
 
 ```text
 Ocre CLI            0.1.0
@@ -1219,7 +1237,7 @@ Prints the help of `ocre` or of a command (`ocre help db seed`, `ocre g model --
 ## See also
 
 - [Generators](generators.md): every `ocre g` generator.
-- [Configuration](configuration.md): `wrangler.toml`, `.dev.vars`, secrets and variables.
+- [Configuration](configuration.md): `cloudflare.config.ts`, `wrangler.config.ts`, `package.json`, `.dev.vars`, secrets and variables.
 - [Deployment](../guides/deployment.md): deploying, custom domains, production data.
 - [Models and migrations](../guides/models.md): writing migrations and seeds.
 - [Free-plan limits](limits.md).

@@ -1,7 +1,7 @@
 //! `ocre generate job`: `src/jobs/<name>.rs`, a struct holding the job's
 //! arguments with a `perform` method, added to the `Job` enum and the
 //! `perform` dispatch match in `src/jobs/mod.rs`. The first job also wires
-//! the `JOBS` queue in wrangler.toml and the Worker's `queue` event in
+//! the `JOBS` queue in cloudflare.config.ts and the Worker's `queue` event in
 //! src/lib.rs.
 
 use std::fmt::Write as _;
@@ -11,9 +11,11 @@ use super::{
     fields::{RESERVED, parse_fields},
     insert_after_marker,
     mailer::pascal,
+    read_config,
 };
 use crate::{
     CliResult,
+    config::{self, Config, ENV_MARKER, TRIGGERS_MARKER},
     names::{humanize, is_identifier, split_words},
     output::CliError,
     project::Project,
@@ -199,8 +201,8 @@ impl {pascal} {{
 }
 
 /// First job: the registry, `mod jobs;` and the `queue` event in src/lib.rs,
-/// and the queues in wrangler.toml unless a `JOBS` producer exists. Returns
-/// the queue's name.
+/// and the queue in cloudflare.config.ts unless a `JOBS` producer exists.
+/// Returns the queue's name.
 fn wire(edits: &mut Edits) -> Result<String, CliError> {
     let lib = edits.read("src/lib.rs")?.unwrap_or_default();
     if lib.contains("event(queue)") {
@@ -215,89 +217,65 @@ fn wire(edits: &mut Edits) -> Result<String, CliError> {
     })?;
     edits.update("src/lib.rs", lib + QUEUE_EVENT);
     edits.update("src/jobs/mod.rs", REGISTRY.to_owned());
-    let text = edits.read("wrangler.toml")?.unwrap_or_default();
-    let config: toml::Table = text.parse().expect("Project::find parsed wrangler.toml");
-    let producer = config
-        .get("queues")
-        .and_then(|queues| queues.get("producers"))
-        .and_then(|producers| producers.as_array())
-        .into_iter()
-        .flatten()
-        .find(|p| p.get("binding").and_then(|b| b.as_str()) == Some("JOBS"));
-    if let Some(producer) = producer {
-        return producer.get("queue").and_then(|q| q.as_str()).map(str::to_owned).ok_or_else(|| {
-            CliError::new("the JOBS queue producer in wrangler.toml has no `queue`")
-                .hint("add `queue = \"<app-name>-jobs\"` to the [[queues.producers]] entry with binding = \"JOBS\"")
-        });
+    let config = read_config(edits)?;
+    if config.binding("JOBS").is_some() {
+        return config.binding_field("JOBS", "name", "JOBS: bindings.queue({ name: \"<app-name>-jobs\" }),");
     }
-    let app = config.get("name").and_then(|name| name.as_str()).ok_or_else(|| {
-        CliError::new("wrangler.toml has no `name`").hint("add `name = \"<app-name>\"` at the top of wrangler.toml")
-    })?;
+    let app = config.worker_name()?.to_owned();
     let queue = format!("{app}-jobs");
-    edits.update("wrangler.toml", text + &queues_toml(app));
+    add_queue(
+        edits,
+        &config,
+        &format!(
+            "// Background jobs (`ocre g job`): the Worker sends jobs to this queue and runs
+// them (src/jobs/). `ocre deploy` creates it and its dead-letter queue. Free
+// plan: 10,000 Queues operations a day (a job costs 3: write, read, delete; a
+// retry one more read), messages kept 24 hours, 128 KB each.
+JOBS: bindings.queue({{ name: \"{queue}\" }}),"
+        ),
+        &format!(
+            "// Runs the jobs of {queue}: up to 10 messages per run, waiting at most 5 s
+// to fill a batch. Each run is one Worker request with 10 ms of CPU on the free
+// plan: lower maxBatchSize for CPU-heavy jobs. A failing job is retried with a
+// growing delay (30 s, 1 min, 3 min, 9 min, 27 min), then moved to
+// {queue}-failed, where it stays 24 hours (dashboard: Queues > {queue}-failed).
+triggers.queue({{ name: \"{queue}\", deadLetterQueue: \"{queue}-failed\", maxBatchSize: 10, maxBatchTimeout: 5, maxRetries: 5 }}),"
+        ),
+    )?;
     Ok(queue)
 }
 
-/// A named queue: its producer `JOBS_<NAME>` and consumer, unless wrangler.toml
-/// already binds it. Returns the queue created, if any.
+/// A named queue: its producer `JOBS_<NAME>` and consumer, unless
+/// cloudflare.config.ts already binds it. Returns the queue created, if any.
 fn wire_queue(edits: &mut Edits, queue: &str) -> Result<Option<String>, CliError> {
     let binding = queue_binding(queue);
-    let text = edits.read("wrangler.toml")?.unwrap_or_default();
-    if text.contains(&format!("binding = \"{binding}\"")) {
+    let config = read_config(edits)?;
+    if config.binding(&binding).is_some() {
         return Ok(None);
     }
-    let config: toml::Table = text.parse().expect("Project::find parsed wrangler.toml");
-    let app = config.get("name").and_then(|name| name.as_str()).ok_or_else(|| {
-        CliError::new("wrangler.toml has no `name`").hint("add `name = \"<app-name>\"` at the top of wrangler.toml")
-    })?;
-    let name = format!("{app}-jobs-{queue}");
-    edits.update(
-        "wrangler.toml",
-        text + &format!(
-            r#"
-# The `{queue}` job queue (`ocre::jobs::queue(&ctx, "{queue}")`): its own
-# consumer, so its jobs never wait behind the `default` queue. Same Queues
-# costs per message; batches wait at most 1 s.
-[[queues.producers]]
-binding = "{binding}"
-queue = "{name}"
-
-[[queues.consumers]]
-queue = "{name}"
-max_batch_size = 10
-max_batch_timeout = 1
-max_retries = 5
-dead_letter_queue = "{name}-failed"
-"#
+    let name = format!("{}-jobs-{queue}", config.worker_name()?);
+    add_queue(
+        edits,
+        &config,
+        &format!(
+            "// The `{queue}` job queue (`ocre::jobs::queue(&ctx, \"{queue}\")`): its own
+// consumer, so its jobs never wait behind the `default` queue. Same Queues
+// costs per message; batches wait at most 1 s.
+{binding}: bindings.queue({{ name: \"{name}\" }}),"
         ),
-    );
+        &format!(
+            "triggers.queue({{ name: \"{name}\", deadLetterQueue: \"{name}-failed\", maxBatchSize: 10, maxBatchTimeout: 1, maxRetries: 5 }}),"
+        ),
+    )?;
     Ok(Some(name))
 }
 
-fn queues_toml(app: &str) -> String {
-    format!(
-        r#"
-# Background jobs (`ocre g job`): the Worker sends jobs to this queue and runs
-# them (src/jobs/). `ocre deploy` creates both queues. Free plan: 10,000
-# Queues operations a day (a job costs 3: write, read, delete; a retry one more
-# read), messages kept 24 hours, 128 KB each.
-[[queues.producers]]
-binding = "JOBS"
-queue = "{app}-jobs"
-
-# Up to 10 messages per run, waiting at most 5 s to fill a batch. Each run is
-# one Worker request with 10 ms of CPU on the free plan: lower max_batch_size
-# for CPU-heavy jobs. A failing job is retried with a growing delay (30 s,
-# 1 min, 3 min, 9 min, 27 min), then moved to {app}-jobs-failed, where it
-# stays 24 hours (dashboard: Queues > {app}-jobs-failed).
-[[queues.consumers]]
-queue = "{app}-jobs"
-max_batch_size = 10
-max_batch_timeout = 5
-max_retries = 5
-dead_letter_queue = "{app}-jobs-failed"
-"#
-    )
+/// Adds a queue's producer binding and its consumer trigger.
+fn add_queue(edits: &mut Edits, config: &Config, producer: &str, consumer: &str) -> Result<(), CliError> {
+    let text = config.insert(ENV_MARKER, producer)?;
+    let text = Config::parse(text)?.insert(TRIGGERS_MARKER, consumer)?;
+    edits.update(config::FILE, text);
+    Ok(())
 }
 
 /// Adds the module, the enum variant and the dispatch arm to src/jobs/mod.rs.

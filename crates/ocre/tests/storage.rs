@@ -245,9 +245,9 @@ fn not_modified_and_unsatisfiable_have_no_body() {
 }
 
 #[test]
-fn a_missing_binding_names_the_wrangler_entry() {
+fn a_missing_binding_names_the_config_entry() {
     let message = missing_binding("no such binding").to_string();
-    assert!(message.contains("[[r2_buckets]]\nbinding = \"STORAGE\""), "{message}");
+    assert!(message.contains("STORAGE: bindings.r2({ name: \"<app>-storage\" }),"), "{message}");
     assert!(message.contains("no such binding"));
 }
 

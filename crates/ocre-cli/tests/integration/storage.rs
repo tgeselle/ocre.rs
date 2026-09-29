@@ -4,12 +4,16 @@
 #[path = "../support/mod.rs"]
 mod support;
 
-use std::fs;
+use std::{fs, path::Path};
 
 use serde_json::json;
 use support::Sandbox;
 
-const BUCKET: &str = "[[r2_buckets]]\nbinding = \"STORAGE\"\nbucket_name = \"shop-storage\"\n";
+const BUCKET: &str = "STORAGE: bindings.r2({ name: \"shop-storage\" }),\n";
+
+fn config(root: &Path) -> String {
+    fs::read_to_string(root.join("cloudflare.config.ts")).unwrap()
+}
 
 #[test]
 fn scaffold_with_attachments_writes_multipart_forms_and_file_routes() {
@@ -18,9 +22,8 @@ fn scaffold_with_attachments_writes_multipart_forms_and_file_routes() {
     let (report, ok) =
         sandbox.json(&["g", "scaffold", "Photo", "title:string", "image:attachment", "notes:attachment?"], &root);
     assert!(ok, "{report}");
-    assert_eq!(report["updated"], json!(["src/lib.rs", "wrangler.toml"]));
-    let wrangler = fs::read_to_string(root.join("wrangler.toml")).unwrap();
-    assert!(wrangler.ends_with(BUCKET), "{wrangler}");
+    assert_eq!(report["updated"], json!(["src/lib.rs", "cloudflare.config.ts"]));
+    assert!(config(&root).contains(BUCKET), "{}", config(&root));
 
     let migration = fs::read_to_string(root.join("migrations/0001_create_photos.sql")).unwrap();
     assert!(migration.contains(
@@ -88,25 +91,27 @@ fn scaffold_with_attachments_writes_multipart_forms_and_file_routes() {
     // A second model with files reuses the bucket.
     let (report, ok) = sandbox.json(&["g", "model", "Avatar", "picture:attachment"], &root);
     assert!(ok, "{report}");
-    assert_eq!(fs::read_to_string(root.join("wrangler.toml")).unwrap().matches("[[r2_buckets]]").count(), 1);
+    assert_eq!(config(&root).matches("bindings.r2(").count(), 1);
     // Without attachments nothing changes: plain forms, no bucket.
     let plain = sandbox.new_app("plain", &[]);
     let (report, ok) = sandbox.json(&["g", "scaffold", "Tag", "name:string"], &plain);
-    assert!(ok && !report["updated"].as_array().unwrap().contains(&json!("wrangler.toml")), "{report}");
+    assert!(ok && !report["updated"].as_array().unwrap().contains(&json!("cloudflare.config.ts")), "{report}");
     let controller = fs::read_to_string(plain.join("src/tags.rs")).unwrap();
     assert!(controller.contains("    Form, Router,") && !controller.contains("storage"), "{controller}");
 }
 
 #[test]
-fn a_wrangler_toml_without_trailing_newline_gets_the_bucket_on_its_own_lines() {
+fn a_worker_name_ocre_cannot_read_stops_the_bucket_and_writes_nothing() {
     let sandbox = Sandbox::new();
     let root = sandbox.new_app("shop", &[]);
-    let wrangler = fs::read_to_string(root.join("wrangler.toml")).unwrap();
-    fs::write(root.join("wrangler.toml"), wrangler.trim_end()).unwrap();
+    let unreadable = config(&root).replacen("name: \"shop\",", "name: `${prefix}shop`,", 1);
+    fs::write(root.join("cloudflare.config.ts"), &unreadable).unwrap();
     let (report, ok) = sandbox.json(&["g", "model", "Doc", "file:attachment"], &root);
-    assert!(ok, "{report}");
-    let wrangler = fs::read_to_string(root.join("wrangler.toml")).unwrap();
-    assert!(wrangler.contains("\n\n# Files (`ocre::storage`"), "{wrangler}");
+    assert!(!ok);
+    assert_eq!(report["error"], "cloudflare.config.ts has no `worker.name` Ocre can read");
+    assert!(report["hint"].as_str().unwrap().contains("`name: \"<app-name>\",`"), "{report}");
+    assert_eq!(config(&root), unreadable);
+    assert!(!root.join("src/models/doc.rs").exists(), "nothing written");
 }
 
 #[test]
@@ -138,7 +143,7 @@ fn api_attachments_are_optional_and_uploaded_with_put() {
     ] {
         assert!(module.contains(expected), "missing {expected}\n{module}");
     }
-    assert!(fs::read_to_string(root.join("wrangler.toml")).unwrap().ends_with(BUCKET));
+    assert!(config(&root).contains(BUCKET));
 }
 
 #[test]
@@ -146,16 +151,21 @@ fn deploy_creates_the_bucket_when_missing() {
     let sandbox = Sandbox::new();
     let root = sandbox.new_app("shop", &[]);
     sandbox.set("has_secret");
+    sandbox.remote_database("shop");
     let (report, ok) = sandbox.json(&["g", "model", "Photo", "image:attachment"], &root);
     assert!(ok, "{report}");
+    sandbox.clear_calls();
 
     let (report, ok) = sandbox.json(&["deploy"], &root);
     assert!(ok, "{report}");
     assert_eq!(report["provisioned"], json!(["R2 bucket shop-storage"]));
     let calls = sandbox.calls();
-    let info = calls.iter().position(|call| call == "r2 bucket info shop-storage --json").unwrap();
-    assert_eq!(calls[info + 1], "r2 bucket create shop-storage");
-    assert!(calls.iter().position(|call| call.starts_with("deploy")).unwrap() > info + 1, "created before the deploy");
+    let get = calls.iter().position(|call| call == "cf r2 buckets get shop-storage").unwrap();
+    assert_eq!(calls[get + 1], "cf r2 buckets create --name shop-storage");
+    assert!(
+        calls.iter().position(|call| call.starts_with("cf deploy")).unwrap() > get + 1,
+        "created before the deploy"
+    );
 
     // It exists now: nothing to create.
     let (report, ok) = sandbox.json(&["deploy"], &root);
@@ -164,15 +174,21 @@ fn deploy_creates_the_bucket_when_missing() {
     // An account without R2 gets told how to enable it; nothing is deployed.
     fs::remove_file(sandbox.work.join("../state/bucket_shop-storage")).unwrap();
     sandbox.set("r2_not_enabled");
-    let before = sandbox.calls().len();
+    sandbox.clear_calls();
     let (report, ok) = sandbox.json(&["deploy"], &root);
     assert!(!ok);
+    let error = report["error"].as_str().unwrap();
     assert!(
-        report["error"].as_str().unwrap().starts_with("`wrangler r2 bucket info shop-storage` failed:"),
-        "{report}"
+        error.starts_with(
+            "`cf r2 buckets get shop-storage` failed: ┌ APIError\n│ [10042] Please enable R2 through the Cloudflare \
+             Dashboard.\n│ 403 Forbidden · HTTP "
+        ),
+        "{error}"
     );
     assert!(report["hint"].as_str().unwrap().contains("Storage & databases > R2"), "{report}");
-    assert!(!sandbox.calls()[before..].iter().any(|call| call.starts_with("deploy")));
+    assert!(
+        !sandbox.calls().iter().any(|call| call.starts_with("cf r2 buckets create") || call.starts_with("cf deploy"))
+    );
 }
 
 #[test]
@@ -180,24 +196,42 @@ fn bucket_errors_stop_the_deploy() {
     let sandbox = Sandbox::new();
     let root = sandbox.new_app("shop", &[]);
     sandbox.set("has_secret");
+    sandbox.remote_database("shop");
     sandbox.json(&["g", "model", "Photo", "image:attachment"], &root);
-    // A second entry naming the same bucket is checked once.
-    let wrangler = fs::read_to_string(root.join("wrangler.toml")).unwrap();
+    // A second binding naming the same bucket is checked once.
+    let with_other =
+        config(&root).replace("// ocre:env", "OTHER: bindings.r2({ name: \"shop-storage\" }),\n\t\t\t// ocre:env");
+    fs::write(root.join("cloudflare.config.ts"), &with_other).unwrap();
+    sandbox.set("r2_create_fails");
+    sandbox.clear_calls();
+    let (report, ok) = sandbox.json(&["deploy"], &root);
+    assert!(!ok);
+    assert_eq!(report["error"], "`cf r2 buckets create --name shop-storage` failed: ┌ Error\n│ r2_create_fails\n└");
+    assert_eq!(sandbox.calls().iter().filter(|call| call.starts_with("cf r2 buckets get")).count(), 1);
+    assert!(!sandbox.calls().iter().any(|call| call.starts_with("cf deploy")), "never deployed without its bucket");
+
+    // Any other failure of `get` names the login.
+    fs::remove_file(sandbox.work.join("../state/r2_create_fails")).unwrap();
+    sandbox.set("r2_get_fails");
+    let (report, ok) = sandbox.json(&["deploy"], &root);
+    assert!(!ok);
+    assert_eq!(
+        report["error"],
+        "`cf r2 buckets get shop-storage` failed: ┌ APIError\n│ [10000] Authentication error\n│ 401 Unauthorized\n└"
+    );
+    assert!(report["hint"].as_str().unwrap().contains("ocre login"), "{report}");
+
+    // A bucket name that is not a literal: the canonical form, before any call.
+    fs::remove_file(sandbox.work.join("../state/r2_get_fails")).unwrap();
     fs::write(
-        root.join("wrangler.toml"),
-        format!("{wrangler}\n[[r2_buckets]]\nbinding = \"OTHER\"\nbucket_name = \"shop-storage\"\n"),
+        root.join("cloudflare.config.ts"),
+        with_other.replace("{ name: \"shop-storage\" }),\n\t\t\t// ocre:env", "{ name: bucket }),\n\t\t\t// ocre:env"),
     )
     .unwrap();
-    sandbox.set("r2_create_fails");
+    sandbox.clear_calls();
     let (report, ok) = sandbox.json(&["deploy"], &root);
     assert!(!ok);
-    assert_eq!(report["error"], "`wrangler r2 bucket create shop-storage` failed (exit status: 1)");
-    assert_eq!(sandbox.calls().iter().filter(|call| call.starts_with("r2 bucket info")).count(), 1);
-
-    // Any other failure of `info` names the login.
-    fs::remove_file(sandbox.work.join("../state/r2_create_fails")).unwrap();
-    sandbox.script("npx", "#!/bin/sh\necho 'Not logged in' >&2\nexit 1\n");
-    let (report, ok) = sandbox.json(&["deploy"], &root);
-    assert!(!ok);
-    assert!(report["hint"].as_str().unwrap().contains("ocre login"), "{report}");
+    assert_eq!(report["error"], "cloudflare.config.ts defines `OTHER` in a form Ocre cannot read");
+    assert_eq!(report["hint"], "write it as a literal: `OTHER: bindings.r2({ name: \"<bucket>\" }),`");
+    assert!(!sandbox.calls().iter().any(|call| call.starts_with("cf r2") || call.starts_with("cf deploy")));
 }

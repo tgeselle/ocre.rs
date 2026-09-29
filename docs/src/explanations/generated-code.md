@@ -117,7 +117,7 @@ error: src/lib.rs is missing the `// ocre:modules` or `// ocre:routes` marker
 hint: put `// ocre:modules` on its own line where `mod` declarations go, and `// ocre:routes` inside the `Router::new()` chain
 ```
 
-No `orders` file was created. Generators also append to `wrangler.toml` (bindings such as `JOBS`, `STORAGE`, `CACHE`, `CHANNELS`) and turn on Cargo features in `Cargo.toml` (`graphql`, `realtime`) the first time a feature needs them.
+No `orders` file was created. Generators also add entries to `cloudflare.config.ts` (bindings such as `JOBS`, `STORAGE`, `CACHE`, `CHANNELS`) and turn on Cargo features in `Cargo.toml` (`graphql`, `realtime`) the first time a feature needs them.
 
 ## Trade-offs
 

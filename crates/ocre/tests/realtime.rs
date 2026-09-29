@@ -17,8 +17,11 @@ fn channel_names_are_url_safe() {
 #[test]
 fn missing_binding_names_the_fix() {
     let Error::Internal(message) = missing_binding("Binding `CHANNELS` is undefined.") else { panic!() };
-    assert!(message.contains("[[durable_objects.bindings]] name = \"CHANNELS\", class_name = \"OcreChannel\""));
-    assert!(message.contains("new_sqlite_classes = [\"OcreChannel\"]"), "{message}");
+    assert!(
+        message.contains("CHANNELS: bindings.durableObject({ worker: \"<app>\", exportName: \"OcreChannel\" }),"),
+        "{message}"
+    );
+    assert!(message.contains("OcreChannel: exports.durableObject({ storage: \"sqlite\" }),"), "{message}");
 }
 
 #[test]

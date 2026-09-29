@@ -10,7 +10,7 @@
 //! Each provider needs an OAuth app registered with it; its client id and
 //! secret are Worker secrets named after the provider (`GITHUB_CLIENT_ID`,
 //! `GITHUB_CLIENT_SECRET`, see [`Provider::client_id_secret`]), in
-//! `.dev.vars` for `ocre dev` and uploaded with `npx wrangler secret put`.
+//! `.dev.vars` for `ocre dev` and uploaded with `ocre secrets push NAME --file .prod.vars`.
 //!
 //! # Free plan
 //!

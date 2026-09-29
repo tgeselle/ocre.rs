@@ -36,9 +36,9 @@ use crate::session::{Keys, Session};
 /// requests may change data. Read once per request by `serve`; no binding
 /// call.
 ///
-/// ```toml
-/// [vars]
-/// ALLOWED_ORIGINS = "https://app.example.com, https://admin.example.com"
+/// ```ts
+/// // worker.env in cloudflare.config.ts
+/// ALLOWED_ORIGINS: bindings.text("https://app.example.com, https://admin.example.com"),
 /// ```
 ///
 /// # Examples
@@ -68,9 +68,9 @@ pub const ALLOWED_ORIGINS: &str = "ALLOWED_ORIGINS";
 /// custom domain to keep search engines and users on it. Read once per
 /// request by [`serve`](crate::serve); no binding call.
 ///
-/// ```toml
-/// [vars]
-/// ALLOWED_HOSTS = "example.com, .example.com"
+/// ```ts
+/// // worker.env in cloudflare.config.ts
+/// ALLOWED_HOSTS: bindings.text("example.com, .example.com"),
 /// ```
 ///
 /// # Examples

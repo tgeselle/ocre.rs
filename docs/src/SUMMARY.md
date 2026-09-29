@@ -26,6 +26,7 @@
 - [Translations](guides/i18n.md)
 - [Testing an Ocre app](guides/testing.md)
 - [Deployment](guides/deployment.md)
+- [Upgrading from wrangler.toml](guides/upgrading.md)
 
 # Reference
 

@@ -7,10 +7,10 @@ use cliclack::{confirm, input, intro, note, outro, select, spinner};
 
 use crate::{
     CliResult,
+    cloudflare::{Cloudflare, Echo, Session, pick_account},
     new::{NewArgs, Plan, Starter, check_new_app},
     output::CliError,
     template::Template,
-    wrangler::{Echo, Session, Wrangler, pick_account},
 };
 
 pub fn new_app(args: NewArgs, cwd: &Path) -> CliResult {
@@ -43,8 +43,8 @@ pub fn new_app(args: NewArgs, cwd: &Path) -> CliResult {
             .interact())?,
     };
 
-    let wrangler = Wrangler::new(cwd, Echo::Capture);
-    let session = cloudflare_session(&wrangler, args.login)?;
+    let cloudflare = Cloudflare::new(cwd, Echo::Capture);
+    let session = cloudflare_session(&cloudflare, args.login)?;
     let account_id = match &session {
         Some(session) if session.accounts.len() > 1 && args.account_id.is_none() => {
             let mut choice = select("Which Cloudflare account should host it?");
@@ -63,6 +63,8 @@ pub fn new_app(args: NewArgs, cwd: &Path) -> CliResult {
     };
     let deploy = match (&session, args.deploy) {
         (None, _) => false,
+        // Deploying needs the npm packages `--no-install` skips.
+        (Some(_), _) if !args.install => false,
         (Some(_), Some(deploy)) => deploy,
         (Some(_), None) => {
             ask(confirm("Deploy it now? The first build takes about a minute.").initial_value(true).interact())?
@@ -71,11 +73,13 @@ pub fn new_app(args: NewArgs, cwd: &Path) -> CliResult {
 
     let mut plan = Plan::new(cwd, &name, args.ocre_path.as_deref(), api, starter, git, account_id)?;
     plan.template = args.template.map(|source| Template::load(&source, cwd)).transpose()?;
+    plan.install = args.install;
     let mut report = step("Creating your app", &format!("Created {name}/"), || plan.create())?;
     if deploy {
         let deployed = step("Building and deploying to Cloudflare", "Deployed", || plan.deploy(Echo::Capture))?;
         report.url = deployed.url;
         report.secret_created = deployed.secret_created;
+        report.provisioned = deployed.provisioned;
         report.next.retain(|step| step != "ocre deploy");
     } else if session.is_none() {
         report.next.push("ocre login".to_owned());
@@ -93,8 +97,8 @@ pub fn new_app(args: NewArgs, cwd: &Path) -> CliResult {
 }
 
 /// Current session, after offering (or, with `--login`, running) the login.
-fn cloudflare_session(wrangler: &Wrangler, login: Option<bool>) -> Result<Option<Session>, CliError> {
-    let session = step("Checking your Cloudflare login", "Checked your Cloudflare login", || wrangler.whoami())?;
+fn cloudflare_session(cloudflare: &Cloudflare, login: Option<bool>) -> Result<Option<Session>, CliError> {
+    let session = step("Checking your Cloudflare login", "Checked your Cloudflare login", || cloudflare.whoami())?;
     if let Some(session) = session {
         let who = session.email.as_deref().unwrap_or("an API token");
         ask(cliclack::log::success(format!("Logged in to Cloudflare as {who}")))?;
@@ -110,7 +114,7 @@ fn cloudflare_session(wrangler: &Wrangler, login: Option<bool>) -> Result<Option
     if !login {
         return Ok(None);
     }
-    step("Approve access in your browser", "Logged in to Cloudflare", || wrangler.ensure_login()).map(Some)
+    step("Approve access in your browser", "Logged in to Cloudflare", || cloudflare.ensure_login()).map(Some)
 }
 
 /// Runs `work` behind a spinner.

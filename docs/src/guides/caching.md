@@ -24,7 +24,7 @@ ocre g cache
 ```
 
 ```text
-  update  wrangler.toml
+  update  cloudflare.config.ts
 
 Next:
   use it: ocre::cache::fetch(&ctx, "key:v1", Duration::from_secs(3600), || async { ... }).await?
@@ -32,31 +32,30 @@ Next:
   ocre deploy (creates the KV namespace)
 ```
 
-It appends this to `wrangler.toml`:
+It adds this to `cloudflare.config.ts`, after the `// ocre:env` marker:
 
-```toml
-# Cached values for `ocre::cache` (Workers KV), added by `ocre g cache`. The
-# first `ocre deploy` creates the namespace and writes its id here; `ocre dev`
-# uses a local one. Free plan: 100,000 reads and 1,000 writes a day, 1 GB.
-[[kv_namespaces]]
-binding = "CACHE"
+```ts
+// Cached values for `ocre::cache` (Workers KV), added by `ocre g cache`. The
+// first `ocre deploy` creates the namespace and writes its id here; `ocre dev`
+// uses a local one. Free plan: 100,000 reads and 1,000 writes a day, 1 GB.
+CACHE: bindings.kv(),
 ```
 
 Running it again fails without changing anything:
 
 ```text
-error: wrangler.toml already has the `CACHE` KV binding
+error: cloudflare.config.ts already has the `CACHE` binding
 hint: nothing to generate: call `ocre::cache::fetch(&ctx, key, ttl, || async { ... })` in a handler
 ```
 
 - `ocre dev` uses a local namespace (under `.wrangler/state`); its startup bindings table lists `env.CACHE` as a local `KV Namespace`.
-- `ocre deploy` gives each `[[kv_namespaces]]` entry without an `id` the namespace titled `<worker>-<binding>` (`blog-cache`): it links an existing namespace with that title, or runs `wrangler kv namespace create`, then writes `id = "..."` into `wrangler.toml`. Commit that change so every later deploy uses the same namespace.
+- `ocre deploy` gives each `bindings.kv()` entry without an `id` the namespace titled `<worker>-<binding>` (`blog-cache`): it links an existing namespace with that title, or runs `cf kv namespaces create`, then rewrites the entry to `CACHE: bindings.kv({ id: "..." }),`. Commit that change so every later deploy uses the same namespace.
 - The binding is not in `ocre new` apps because KV writes are the scarcest free resource (see [The write budget](#the-write-budget)).
 
 Without the binding, every `ocre::cache` function fails with a 500 whose log line names the fix:
 
 ```text
-KV binding `CACHE` is missing (...). Fix: run `ocre g cache`, which adds [[kv_namespaces]] binding = "CACHE" to wrangler.toml
+KV binding `CACHE` is missing (...). Fix: run `ocre g cache`, which adds `CACHE: bindings.kv(),` to worker.env in cloudflare.config.ts
 ```
 
 ## Caching a value with fetch
@@ -300,14 +299,14 @@ Use `public` only for responses that are the same for everyone: no session data,
 Two Cloudflare caches can answer requests before the Worker runs. Ocre wraps neither; here is why, as of September 2026:
 
 - The [Cache API](https://developers.cloudflare.com/workers/runtime-apis/cache/) (`caches.default`) only works on custom domains: on `*.workers.dev`, where Ocre apps deploy by default, `put` does nothing. It is also local to one data center, and the Worker still runs (and counts) for every request.
-- [Workers Cache](https://developers.cloudflare.com/workers/cache/) (`[cache] enabled = true` in `wrangler.toml`, Wrangler 4.69 or later) works on `workers.dev` too and serves `CacheControl::public(..)` responses from Cloudflare's tiered cache: hits use no CPU. But on the free plan every hit still counts toward the 100,000 requests a day, and turning it on also counts requests for static assets in `public/`, which are otherwise free ([pricing](https://developers.cloudflare.com/workers/cache/#pricing)). Its cache key ignores cookies and `Accept-Language`, so only mark responses `public` when they are the same for every visitor; responses with `Set-Cookie` are never stored.
+- [Workers Cache](https://developers.cloudflare.com/workers/cache/) (`cache: { enabled: true }` in `worker` of `cloudflare.config.ts`) works on `workers.dev` too and serves `CacheControl::public(..)` responses from Cloudflare's tiered cache: hits use no CPU. But on the free plan every hit still counts toward the 100,000 requests a day, and turning it on also counts requests for static assets in `public/`, which are otherwise free ([pricing](https://developers.cloudflare.com/workers/cache/#pricing)). Its cache key ignores cookies and `Accept-Language`, so only mark responses `public` when they are the same for every visitor; responses with `Set-Cookie` are never stored.
 
 For most free-plan apps, `no_cache` pages with an `ETag` (cheap 304s) and KV values for the expensive parts are the better trade.
 
 ## See also
 
 - [Generators](../reference/generators.md#ocre-g-cache): `ocre g cache`.
-- [Configuration](../reference/configuration.md#kv_namespaces): the `[[kv_namespaces]]` entry.
+- [Configuration](../reference/configuration.md#env-cache-workers-kv): the `CACHE` entry.
 - [CLI commands](../reference/cli.md#ocre-deploy): what `ocre deploy` provisions.
 - [Translations](i18n.md): the locale in ETags.
 - [File storage](files.md): files have their own ETag/304 handling in `storage::serve`.

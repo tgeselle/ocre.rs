@@ -4,11 +4,10 @@ Files in an Ocre app's `public/` directory are served by [Workers Static Assets]
 
 ## Before you start
 
-- An app from `ocre new`. Its `wrangler.toml` has:
+- An app from `ocre new`. Its `wrangler.config.ts` has:
 
-  ```toml
-  [assets]
-  directory = "public"
+  ```ts
+  assetsDirectory: "public",
   ```
 
 - Free plan (September 2026): static asset requests are free and unlimited, and do not count toward the Worker's 100,000 requests a day. Each file can be up to 25 MiB, and a Worker version up to 20,000 files ([limits](https://developers.cloudflare.com/workers/platform/limits/#static-assets)).
@@ -62,14 +61,13 @@ Tailwind CSS runs without Node through its standalone CLI (Rails' `tailwindcss-r
 ./tailwindcss -i assets/app.css -o public/css/app.css --watch            # while `ocre dev` runs
 ```
 
-`@source "../templates"` makes Tailwind scan the askama templates for class names. To build CSS on every build, chain the command before the Worker build in `wrangler.toml`:
+`@source "../templates"` makes Tailwind scan the askama templates for class names. To build CSS on every build, chain the command before the Worker build in `wrangler.config.ts`:
 
-```toml
-[build]
-command = "./tailwindcss -i assets/app.css -o public/css/app.css --minify && cargo install -q \"worker-build@^0.8\" && worker-build ${OCRE_BUILD:---release}"
+```ts
+build: { command: './tailwindcss -i assets/app.css -o public/css/app.css --minify && cargo install -q "worker-build@^0.8" && worker-build ${OCRE_BUILD:---release}' },
 ```
 
-Sass, PostCSS or Bootstrap builds (Rails' `cssbundling-rails`) work the same way: any command that writes into `public/`, chained in `[build] command`. Commit the tool's configuration, not its output, if you build on deploy; commit the output if you would rather not install the tool on every machine.
+Sass, PostCSS or Bootstrap builds (Rails' `cssbundling-rails`) work the same way: any command that writes into `public/`, chained in `build.command`. Commit the tool's configuration, not its output, if you build on deploy; commit the output if you would rather not install the tool on every machine.
 
 ## JavaScript
 
@@ -84,21 +82,19 @@ For your own scripts, plain ES modules need no bundler. An import map (Rails' `i
 <script type="module" src="/js/main.js"></script>
 ```
 
-The generated Content-Security-Policy (`content_security_policy()` in `src/lib.rs`) allows scripts only from the app and `https://unpkg.com`, and no inline scripts, which includes inline import maps. Put the module entry point in a file (`/js/main.js` above, which starts with `import "app";`), and for the import map add `NONCE` to `script_src` and pass `nonce: ocre::security::CspNonce` from the handler to the template, as the page's `nonce` field. A CDN other than unpkg goes into `script_src` too (see [Security](security.md)). To bundle npm packages (Rails' `jsbundling-rails`), run esbuild, Bun or Rollup in `[build] command`, writing into `public/js/`:
+The generated Content-Security-Policy (`content_security_policy()` in `src/lib.rs`) allows scripts only from the app and `https://unpkg.com`, and no inline scripts, which includes inline import maps. Put the module entry point in a file (`/js/main.js` above, which starts with `import "app";`), and for the import map add `NONCE` to `script_src` and pass `nonce: ocre::security::CspNonce` from the handler to the template, as the page's `nonce` field. A CDN other than unpkg goes into `script_src` too (see [Security](security.md)). To bundle npm packages (Rails' `jsbundling-rails`), run esbuild, Bun or Rollup in `build.command` of `wrangler.config.ts`, writing into `public/js/` (add the bundler to `package.json` with `npm install --save-dev esbuild`):
 
-```toml
-[build]
-command = "npx esbuild assets/js/app.js --bundle --minify --outfile=public/js/app.js && cargo install -q \"worker-build@^0.8\" && worker-build ${OCRE_BUILD:---release}"
+```ts
+build: { command: 'npx esbuild assets/js/app.js --bundle --minify --outfile=public/js/app.js && cargo install -q "worker-build@^0.8" && worker-build ${OCRE_BUILD:---release}' },
 ```
 
 ## Single-page apps
 
 An app whose front end is a single-page app (React, Vue, Svelte) builds it into `public/`, serves JSON from the Worker (see [JSON APIs](json-apis.md)), and lets client-side routes survive a reload with Cloudflare's SPA fallback: every navigation request no file matches gets `public/index.html`.
 
-```toml
-[assets]
-directory = "public"
-not_found_handling = "single-page-application"
+```ts
+// cloudflare.config.ts, in worker
+assets: { notFoundHandling: "single-page-application" },
 ```
 
 Requests to the API still reach the Worker: they are not navigations (`fetch()` sends `Sec-Fetch-Mode: cors`). Ocre's generators produce htmx pages, not SPA code.

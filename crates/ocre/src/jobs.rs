@@ -67,8 +67,8 @@
 //! [`Error`] such as `NotFound`: Rails' `discard_on`); retries any other
 //! `Err` with a growing delay (30 s, 1 min, 3 min, 9 min, 27 min: twice the
 //! time since it was due); and drops a message it cannot decode (an unknown
-//! or changed job), so it is never retried forever. After `max_retries = 5`
-//! (wrangler.toml) Cloudflare moves a failing message to the dead-letter
+//! or changed job), so it is never retried forever. After `maxRetries: 5`
+//! (cloudflare.config.ts) Cloudflare moves a failing message to the dead-letter
 //! queue `<app>-jobs-failed`, kept 24 hours. Delivery is at-least-once: write
 //! jobs to be safe to repeat. Every line Ocre logs starts with
 //! [`LOG_PREFIX`] or [`CRON_LOG_PREFIX`].
@@ -102,8 +102,8 @@ use crate::{Error, Result, mail::Email};
 
 /// Name of the queue producer binding every Ocre app sends jobs to.
 ///
-/// `ocre g job` adds `[[queues.producers]] binding = "JOBS"` (and the
-/// consumer) to wrangler.toml; without it, enqueueing is an
+/// `ocre g job` adds `JOBS: bindings.queue({ name: "<app>-jobs" })` (and the
+/// consumer trigger) to cloudflare.config.ts; without it, enqueueing is an
 /// [`Error::Internal`] naming that entry.
 ///
 /// # Examples
@@ -259,14 +259,15 @@ pub(crate) fn retry_delay(now: i64, at: i64) -> u32 {
 /// Error for a missing queue producer binding.
 pub(crate) fn missing_queue(binding: &str, detail: &str) -> Error {
     let fix = if binding == QUEUE_BINDING {
-        "run `ocre g job <Name>` once; it adds [[queues.producers]] binding = \"JOBS\" and the consumer".to_owned()
+        "run `ocre g job <Name>` once; it adds `JOBS: bindings.queue(...)` and its `triggers.queue(...)` consumer"
+            .to_owned()
     } else {
         let name = binding.trim_start_matches("JOBS_").to_ascii_lowercase().replace('_', "-");
         format!(
-            "run `ocre g job <Name> --queue {name}`; it adds [[queues.producers]] binding = \"{binding}\" and the consumer"
+            "run `ocre g job <Name> --queue {name}`; it adds `{binding}: bindings.queue(...)` and its `triggers.queue(...)` consumer"
         )
     };
-    Error::internal(format!("the queue binding `{binding}` is missing ({detail}). Fix: {fix} to wrangler.toml"))
+    Error::internal(format!("the queue binding `{binding}` is missing ({detail}). Fix: {fix} to cloudflare.config.ts"))
 }
 
 /// The producer binding of a named queue: `default` is `JOBS`, `urgent` is

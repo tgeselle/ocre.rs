@@ -3,9 +3,11 @@
 //! Commands never prompt unless `ocre new` runs in a terminal without
 //! `--json`/`--yes`. With `--json`, stdout carries exactly one JSON object
 //! (`{"ok": true, ...}` or `{"ok": false, "error", "hint"}`) and all tool
-//! output (wrangler, cargo) goes to stderr.
+//! output (cf, wrangler, cargo, npm) goes to stderr.
 
 mod about;
+mod cloudflare;
+mod config;
 mod db;
 mod db_admin;
 mod destroy;
@@ -25,7 +27,6 @@ mod stats;
 mod template;
 mod testing;
 mod wizard;
-mod wrangler;
 
 use std::{path::PathBuf, process::ExitCode};
 
@@ -85,6 +86,10 @@ enum Command {
         deploy: bool,
         #[arg(long)]
         no_deploy: bool,
+        /// Skip `npm install` (cf, wrangler, typescript) in the new app; run
+        /// it before `ocre dev`.
+        #[arg(long)]
+        no_install: bool,
         /// Never prompt; use defaults for anything not given.
         #[arg(long, short)]
         yes: bool,
@@ -102,7 +107,7 @@ enum Command {
     #[command(alias = "g")]
     Generate(GenerateArgs),
     /// Undo a generator run (alias: `d`): delete the files it created, take
-    /// out the lines it added (Cargo.toml and wrangler.toml changes stay).
+    /// out the lines it added (Cargo.toml, cloudflare.config.ts and package.json changes stay).
     ///
     /// Example: `ocre destroy scaffold Post`. Refuses when generated files
     /// changed since, unless --force.
@@ -141,7 +146,7 @@ enum Command {
         #[arg(long)]
         remote: bool,
     },
-    /// Apply local migrations, then run the app with `wrangler dev`.
+    /// Apply local migrations, then run the app with `cf dev`.
     Dev {
         #[arg(long, default_value_t = 8787)]
         port: u16,
@@ -150,7 +155,7 @@ enum Command {
     Deploy,
     /// Print a new random secret, like `rails secret`: a value for SECRET_KEY_BASE.
     ///
-    /// Example: `ocre secret | npx wrangler secret put SECRET_KEY_BASE`.
+    /// Example: `ocre secret` for a value to put in a git-ignored env file, then `ocre secrets push`.
     Secret,
     /// Worker secrets (Ocre's credentials): list them, or upload values from a
     /// git-ignored env file. Values are encrypted by Cloudflare and never
@@ -166,7 +171,7 @@ enum Command {
         /// Only routes whose method, path or handler contains this text (case-insensitive).
         filter: Option<String>,
     },
-    /// List the Cron Triggers of wrangler.toml and the task each runs; `run <task>`
+    /// List the Cron Triggers of cloudflare.config.ts and the task each runs; `run <task>`
     /// fires one on the running `ocre dev`.
     ///
     /// Example: `ocre schedules`, `ocre schedules run nightly_cleanup`.
@@ -214,7 +219,7 @@ enum Command {
     },
     /// Run the app's checks: `cargo test`, then `cargo check --target
     /// wasm32-unknown-unknown`; with --e2e, then tests/e2e.sh against one
-    /// `wrangler dev` started for the run. Stops at the first failure.
+    /// `cf dev` started for the run. Stops at the first failure.
     ///
     /// Example: `ocre test --e2e`, or `ocre test -- models` to filter unit tests.
     Test {
@@ -318,7 +323,7 @@ enum GenerateCommand {
     /// (src/auth.rs); in every app a JSON API with JWTs and API keys and the
     /// `BearerUser` extractor (src/auth_api.rs), and a rate limit on every route
     /// that checks a password or sends an email (`AUTH_RATE_LIMITER` in
-    /// wrangler.toml). Runs once per app.
+    /// cloudflare.config.ts). Runs once per app.
     ///
     /// Example: `ocre g auth --db-sessions --oauth github`, then `ocre migrate`.
     Auth {
@@ -360,7 +365,7 @@ enum GenerateCommand {
     Mailbox,
     /// Background job: `src/jobs/<name>.rs` (arguments, `perform_later` and
     /// `perform`), added to the `Job` enum and `perform` match in
-    /// `src/jobs/mod.rs`. The first job wires the `JOBS` queue (wrangler.toml)
+    /// `src/jobs/mod.rs`. The first job wires the `JOBS` queue (cloudflare.config.ts)
     /// and the `queue` event (src/lib.rs); `--queue` adds a named queue.
     ///
     /// Example: `ocre g job SendWelcome user_id:integer`, then
@@ -376,7 +381,7 @@ enum GenerateCommand {
         queue: Option<String>,
     },
     /// Scheduled task: `src/schedules/<name>.rs`, run by a Cron Trigger (UTC)
-    /// added to `[triggers] crons` in wrangler.toml, dispatched by cron in
+    /// added to the triggers of cloudflare.config.ts, dispatched by cron in
     /// `src/schedules/mod.rs`. The first one wires the `scheduled` event.
     ///
     /// Example: `ocre g schedule nightly_cleanup "every day at 3am"` or `ocre g schedule nightly_cleanup "0 3 * * *"`.
@@ -387,7 +392,7 @@ enum GenerateCommand {
         /// "midnight on tuesdays") or five cron fields ("*/15 * * * *").
         cron: String,
     },
-    /// `CACHE` Workers KV binding in wrangler.toml for `ocre::cache::fetch`
+    /// `CACHE` Workers KV binding in cloudflare.config.ts for `ocre::cache::fetch`
     /// (read-through cache of JSON values). `ocre deploy` creates the namespace.
     ///
     /// Example: `ocre g cache`.
@@ -456,7 +461,7 @@ enum GenerateCommand {
 
 #[derive(Subcommand)]
 enum SchedulesCommand {
-    /// Fire a scheduled task now on the running `ocre dev`, through wrangler's
+    /// Fire a scheduled task now on the running `ocre dev`, through the
     /// local `/cdn-cgi/local/scheduled` endpoint (Cron Triggers only fire on
     /// the deployed Worker).
     ///
@@ -483,7 +488,7 @@ enum SecretsCommand {
     /// Secret names in .dev.vars and on the deployed Worker, side by side.
     List,
     /// Upload secrets to the deployed Worker, values read from --file (one
-    /// `wrangler secret bulk` call, then the temporary file is deleted).
+    /// `cf workers secrets bulk` call, then the temporary file is deleted).
     Push {
         /// Names of the secrets to upload.
         names: Vec<String>,
@@ -570,6 +575,7 @@ fn main() -> ExitCode {
             no_git,
             deploy,
             no_deploy,
+            no_install,
             yes,
             ocre_path,
             template,
@@ -584,18 +590,19 @@ fn main() -> ExitCode {
                 login: toggle(login, no_login),
                 deploy: toggle(deploy, no_deploy),
                 yes,
+                install: !no_install,
                 template,
             };
             new::run(args, json)
         }
-        Command::Login => wrangler::login(json),
+        Command::Login => cloudflare::login(json),
         Command::Generate(args) => generate_command(args),
         Command::Destroy { generator, name, force, pretend } => {
             Project::find().and_then(|project| destroy::destroy(&project, &generator, name.as_deref(), force, pretend))
         }
         Command::I18n(I18nCommand::Missing) => Project::find().and_then(|project| i18n::missing(&project)),
         Command::Migrate { remote, status: true } => db::status(remote, json),
-        Command::Migrate { remote, status: false } => wrangler::migrate(remote, json),
+        Command::Migrate { remote, status: false } => cloudflare::migrate(remote, json),
         Command::Db(DbCommand::Seed { remote, replant: false }) => db::seed(remote, json),
         Command::Db(DbCommand::Seed { remote, replant: true }) => db_admin::replant(remote, json),
         Command::Db(DbCommand::Create { remote }) => db_admin::create(remote, json),
@@ -615,8 +622,8 @@ fn main() -> ExitCode {
         Command::Db(DbCommand::Reset) => db::reset(json),
         Command::Db(DbCommand::Schema { remote }) => db::schema(remote, json),
         Command::Sql { query, remote } => db::sql(&query, remote, json),
-        Command::Dev { port } => wrangler::dev(port, json),
-        Command::Deploy => wrangler::deploy(json),
+        Command::Dev { port } => cloudflare::dev(port, json),
+        Command::Deploy => cloudflare::deploy(json),
         Command::Secret => secret::run(),
         Command::Secrets(SecretsCommand::List) => Project::find().and_then(|project| secrets::list(&project, json)),
         Command::Secrets(SecretsCommand::Push { names, file }) => {

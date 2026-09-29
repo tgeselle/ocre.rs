@@ -1,0 +1,319 @@
+├  Build
+│  Delegating to Wrangler
+[custom build] Running: cargo install -q "worker-build@^0.8" && worker-build ${OCRE_BUILD:---release}
+[custom build] [INFO]: 🎯  Checking for the Wasm target...
+[custom build] 
+[custom build] [INFO]: 🌀  Compiling to Wasm...
+[custom build] 
+[custom build]    Compiling unicode-ident v1.0.26
+[custom build]    Compiling proc-macro2 v1.0.107
+[custom build] 
+[custom build]    Compiling quote v1.0.47
+[custom build]    Compiling wasm-bindgen-shared v0.2.129
+[custom build]    Compiling rustversion v1.0.23
+[custom build]    Compiling bumpalo v3.20.3
+[custom build]    Compiling pin-project-lite v0.2.17
+[custom build]    Compiling futures-core v0.3.34
+[custom build]    Compiling memchr v2.8.3
+[custom build]    Compiling futures-task v0.3.34
+[custom build]    Compiling slab v0.4.12
+[custom build]    Compiling futures-sink v0.3.34
+[custom build]    Compiling futures-io v0.3.34
+[custom build]    Compiling cfg-if v1.0.5
+[custom build]    Compiling once_cell v1.21.4
+[custom build]    Compiling version_check v0.9.5
+[custom build]    Compiling typenum v1.20.1
+[custom build] 
+[custom build]    Compiling stable_deref_trait v1.2.1
+[custom build] 
+[custom build]    Compiling itoa v1.0.18
+[custom build] 
+[custom build]    Compiling subtle v2.6.1
+[custom build] 
+[custom build]    Compiling serde_core v1.0.229
+[custom build] 
+[custom build]    Compiling writeable v0.6.4
+[custom build] 
+[custom build]    Compiling percent-encoding v2.3.2
+[custom build] 
+[custom build]    Compiling litemap v0.8.3
+[custom build] 
+[custom build]    Compiling bytes v1.12.1
+[custom build] 
+[custom build]    Compiling utf8_iter v1.0.4
+[custom build] 
+[custom build]    Compiling serde v1.0.229
+[custom build] 
+[custom build]    Compiling icu_normalizer_data v2.3.0
+[custom build] 
+[custom build]    Compiling icu_properties_data v2.3.0
+[custom build] 
+[custom build]    Compiling generic-array v0.14.7
+[custom build] 
+[custom build]    Compiling zerocopy v0.8.59
+[custom build] 
+[custom build]    Compiling smallvec v1.16.2
+[custom build] 
+[custom build]    Compiling tower-layer v0.3.3
+[custom build] 
+[custom build]    Compiling http v1.5.0
+[custom build] 
+[custom build]    Compiling futures-util v0.3.34
+[custom build] 
+[custom build]    Compiling autocfg v1.5.1
+[custom build] 
+[custom build]    Compiling heck v0.5.0
+[custom build] 
+[custom build]    Compiling zmij v1.0.23
+[custom build] 
+[custom build]    Compiling tower-service v0.3.3
+[custom build] 
+[custom build]    Compiling form_urlencoded v1.2.2
+[custom build] 
+[custom build]    Compiling opaque-debug v0.3.1
+[custom build] 
+[custom build]    Compiling serde_json v1.0.151
+[custom build] 
+[custom build]    Compiling sync_wrapper v1.0.2
+[custom build] 
+[custom build]    Compiling rustc-hash v2.1.3
+[custom build] 
+[custom build]    Compiling ryu v1.0.23
+[custom build] 
+[custom build]    Compiling glob v0.3.4
+[custom build] 
+[custom build]    Compiling time-core v0.1.9
+[custom build] 
+[custom build]    Compiling num-conv v0.2.2
+[custom build] 
+[custom build]    Compiling mime v0.3.17
+[custom build] 
+[custom build]    Compiling cookie v0.18.2
+[custom build] 
+[custom build]    Compiling num-traits v0.2.19
+[custom build] 
+[custom build]    Compiling winnow v1.0.4
+[custom build] 
+[custom build]    Compiling wasm-bindgen v0.2.129
+[custom build] 
+[custom build]    Compiling matchit v0.8.4
+[custom build] 
+[custom build]    Compiling time-macros v0.2.32
+[custom build] 
+[custom build]    Compiling powerfmt v0.2.0
+[custom build] 
+[custom build]    Compiling block-buffer v0.10.4
+[custom build] 
+[custom build]    Compiling inout v0.1.4
+[custom build]    Compiling deranged v0.5.8
+[custom build] 
+[custom build]    Compiling futures-channel v0.3.34
+[custom build] 
+[custom build]    Compiling syn v3.0.6
+[custom build] 
+[custom build]    Compiling syn v2.0.119
+[custom build] 
+[custom build]    Compiling tokio v1.53.1
+[custom build]    Compiling base64 v0.22.1
+[custom build] 
+[custom build]    Compiling bitflags v2.13.2
+[custom build] 
+[custom build]    Compiling matchit v0.7.3
+[custom build] 
+[custom build]    Compiling http-body v1.1.0
+[custom build] 
+[custom build]    Compiling tower-http v0.7.1
+[custom build] 
+[custom build]    Compiling http-body-util v0.1.5
+[custom build] 
+[custom build]    Compiling axum-core v0.5.6
+[custom build] 
+[custom build]    Compiling time v0.3.55
+[custom build] 
+[custom build]    Compiling serde_path_to_error v0.1.20
+[custom build] 
+[custom build]    Compiling basic-toml v0.1.10
+[custom build] 
+[custom build]    Compiling strum_macros v0.28.0
+[custom build] 
+[custom build]    Compiling pin-project-internal v1.1.13
+[custom build] 
+[custom build]    Compiling ppv-lite86 v0.2.21
+[custom build] 
+[custom build]    Compiling wasm-bindgen-macro-support v0.2.129
+[custom build] 
+[custom build]    Compiling synstructure v0.14.0
+[custom build] 
+[custom build]    Compiling pin-project v1.1.13
+[custom build] 
+[custom build]    Compiling futures-macro v0.3.34
+[custom build] 
+[custom build]    Compiling zerovec-derive v0.11.6
+[custom build]    Compiling displaydoc v0.2.7
+[custom build]    Compiling serde_derive v1.0.229
+[custom build]    Compiling async-trait v0.1.92
+[custom build] 
+[custom build]    Compiling zerofrom-derive v0.1.8
+[custom build] 
+[custom build]    Compiling yoke-derive v0.8.3
+[custom build] 
+[custom build]    Compiling strum v0.28.0
+[custom build] 
+[custom build]    Compiling zerofrom v0.1.8
+[custom build] 
+[custom build]    Compiling yoke v0.8.3
+[custom build] 
+[custom build]    Compiling zerovec v0.11.8
+[custom build] 
+[custom build]    Compiling zerotrie v0.2.5
+[custom build] 
+[custom build]    Compiling askama_parser v0.16.1
+[custom build] 
+[custom build]    Compiling tinystr v0.8.4
+[custom build] 
+[custom build]    Compiling potential_utf v0.1.6
+[custom build] 
+[custom build]    Compiling icu_collections v2.3.0
+[custom build] 
+[custom build]    Compiling icu_locale_core v2.3.0
+[custom build] 
+[custom build]    Compiling wasm-bindgen-macro v0.2.129
+[custom build] 
+[custom build]    Compiling serde_urlencoded v0.7.1
+[custom build] 
+[custom build]    Compiling tower v0.5.3
+[custom build] 
+[custom build]    Compiling icu_provider v2.3.1
+[custom build] 
+[custom build]    Compiling icu_normalizer v2.3.0
+[custom build] 
+[custom build]    Compiling icu_properties v2.3.0
+[custom build] 
+[custom build]    Compiling axum v0.8.9
+[custom build] 
+[custom build]    Compiling js-sys v0.3.106
+[custom build] 
+[custom build]    Compiling idna_adapter v1.2.2
+[custom build] 
+[custom build]    Compiling idna v1.1.0
+[custom build] 
+[custom build]    Compiling url v2.5.8
+[custom build] 
+[custom build]    Compiling askama_derive v0.16.1
+[custom build] 
+[custom build]    Compiling askama_macros v0.16.1
+[custom build] 
+[custom build]    Compiling askama v0.16.1
+[custom build] 
+[custom build]    Compiling web-sys v0.3.106
+[custom build] 
+[custom build]    Compiling worker-sys v0.8.7
+[custom build] 
+[custom build]    Compiling worker-macros v0.8.7
+[custom build] 
+[custom build]    Compiling getrandom v0.2.17
+[custom build]    Compiling wasm-bindgen-futures v0.4.79
+[custom build]    Compiling serde-wasm-bindgen v0.6.5
+[custom build]    Compiling chrono v0.4.45
+[custom build] 
+[custom build]    Compiling rand_core v0.6.4
+[custom build] 
+[custom build]    Compiling crypto-common v0.1.7
+[custom build] 
+[custom build]    Compiling rand_chacha v0.3.1
+[custom build] 
+[custom build]    Compiling universal-hash v0.5.1
+[custom build] 
+[custom build]    Compiling digest v0.10.7
+[custom build]    Compiling cipher v0.4.4
+[custom build]    Compiling aead v0.5.2
+[custom build] 
+[custom build]    Compiling rand v0.8.8
+[custom build] 
+[custom build]    Compiling polyval v0.6.2
+[custom build] 
+[custom build]    Compiling hmac v0.12.1
+[custom build] 
+[custom build]    Compiling sha2 v0.10.9
+[custom build] 
+[custom build]    Compiling aes v0.8.4
+[custom build] 
+[custom build]    Compiling ctr v0.9.2
+[custom build] 
+[custom build]    Compiling ghash v0.5.1
+[custom build] 
+[custom build]    Compiling hkdf v0.12.4
+[custom build] 
+[custom build]    Compiling aes-gcm v0.10.3
+[custom build] 
+[custom build]    Compiling wasm-streams v0.7.0
+[custom build] 
+[custom build]    Compiling worker v0.8.7
+[custom build] 
+[custom build]    Compiling ocre v0.1.0 (/Users/user/Documents/Projets/ocre/crates/ocre)
+[custom build] 
+[custom build]    Compiling demo v0.1.0 (/private/tmp/cfcheck/run/app)
+[custom build] 
+[custom build] warning: unused variable: `record`
+[custom build]   --> src/ps.rs:83:20
+[custom build]    |
+[custom build] 83 |     fn from_record(record: &P) -> Self {
+[custom build]    |                    ^^^^^^ help: if this is intentional, prefix it with an underscore: `_record`
+[custom build]    |
+[custom build]    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+[custom build] 
+[custom build] 
+[custom build] warning: field `form` is never read
+[custom build]    --> src/ps.rs:128:5
+[custom build]     |
+[custom build] 127 | struct NewView {
+[custom build]     |        ------- field in this struct
+[custom build] 128 |     form: PForm,
+[custom build]     |     ^^^^
+[custom build]     |
+[custom build]     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+[custom build] 
+[custom build] 
+[custom build] warning: field `form` is never read
+[custom build]    --> src/ps.rs:136:5
+[custom build]     |
+[custom build] 134 | struct EditView {
+[custom build]     |        -------- field in this struct
+[custom build] 135 |     id: i64,
+[custom build] 136 |     form: PForm,
+[custom build]     |     ^^^^
+[custom build] 
+[custom build] 
+[custom build] warning: `demo` (lib) generated 3 warnings (run `cargo fix --lib -p demo` to apply 1 suggestion)
+[custom build]     Finished `release` profile [optimized] target(s) in 28.84s
+[custom build] 
+[custom build] [INFO]: Optimizing wasm binaries with `wasm-opt`...
+[custom build] 
+[custom build] [INFO]: ✨  Done in 29.32s
+[custom build] [INFO]: 📦   Your wasm pkg is ready to publish at /private/tmp/cfcheck/run/app/build/.tmp.
+[custom build] 
+[custom build] 
+[custom build]   index.js  33.6kb
+[custom build] 
+[custom build] ⚡ Done in 10ms
+[custom build] 
+◆  Build complete
+│
+├  Deploy
+│  🌀 Building list of assets...
+│  ✨ Read 1 file from the assets directory /private/tmp/cfcheck/run/app/.cloudflare/output/v0/workers/default/assets
+│  🌀 Starting asset upload...
+│  🌀 Found 1 new or modified static asset to upload. Proceeding with upload...
+│  + /robots.txt
+│  Uploaded 1 of 1 asset
+│  ✨ Success! Uploaded 1 file (0.64 sec)
+│
+│  Total Upload: 1616.45 KiB / gzip: 438.42 KiB
+│
+│  The following bindings need to be provisioned:
+│  Binding           Resource          
+│  env.CACHE         KV Namespace      
+│
+│
+│  Provisioning CACHE (KV Namespace)...
+│  🌀 Creating new KV Namespace "ocre-cfcheck-demo-cache"...

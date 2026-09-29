@@ -1,0 +1,6 @@
+Cannot connect to the Docker daemon at unix:///Users/user/.orbstack/run/docker.sock. Is the docker daemon running?
+
+┌ APIError
+│ [10014] a namespace with this account ID and title already exists [code: 10014]
+│ 400 Bad Request
+└

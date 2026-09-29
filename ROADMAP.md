@@ -25,10 +25,11 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [CLI and generators](#cli-and-generators)
 - [Testing](#testing)
 - [Deployment and platform (Rails 8 / 8.1 and Loco)](#deployment-and-platform-rails-8--81-and-loco)
+- [Ocre platform work](#ocre-platform-work)
 
 ## Models and database
 
-**On Workers:** D1 (SQLite): 5 GB and daily row read/write quotas on the free plan, so batch queries and avoid N+1. Migrations are forward-only SQL files applied by wrangler; rollbacks need hand-written reverse SQL (D1 Time Travel restores a point in time). Several databases are several D1 bindings. Encryption uses WebCrypto AES-GCM. Everything here is Rust code over D1: feasible.
+**On Workers:** D1 (SQLite): 5 GB and daily row read/write quotas on the free plan, so batch queries and avoid N+1. Migrations are forward-only SQL files applied by `ocre migrate` (the app's wrangler locally, `cf d1 migrations apply` in production); rollbacks need hand-written reverse SQL (D1 Time Travel restores a point in time). Several databases are several D1 bindings. Encryption uses WebCrypto AES-GCM. Everything here is Rust code over D1: feasible.
 
 246 features: 67 done, 33 partial, 135 to do, 11 not applicable.
 
@@ -228,17 +229,17 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [~] **Foreign keys (add_foreign_key/remove_foreign_key)** (R): Add database FK constraints with column, primary_key, name, on_delete/on_update, validate, deferrable options. [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
 - [ ] **Composite primary key tables** (R): create_table primary_key: [:a, :b] defines multi-column primary keys. [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
 - [x] **execute raw SQL** (R): execute runs arbitrary SQL inside a migration. [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
-- [-] **Reversible change method** (R): change auto-generates the rollback for supported reversible operations. *Not applicable: D1 migrations are forward-only (wrangler applies them, with no way to run one backwards); undo with a new migration or D1 Time Travel.* [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
+- [-] **Reversible change method** (R): change auto-generates the rollback for supported reversible operations. *Not applicable: D1 migrations are forward-only (D1 applies them, with no way to run one backwards); undo with a new migration or D1 Time Travel.* [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
 - [-] **reversible block** (R): reversible { |dir| dir.up {...}; dir.down {...} } defines custom up/down steps inside change. *Not applicable: D1 migrations are forward-only SQL files; there is no down step to run.* [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
 - [-] **up/down methods** (R): Explicit up and down methods define forward and rollback logic. *Not applicable: D1 migrations are forward-only SQL files; there is no down step to run.* [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
 - [-] **IrreversibleMigration** (R): Raising ActiveRecord::IrreversibleMigration prevents a migration from being rolled back. *Not applicable: no D1 migration can be rolled back.* [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
 - [-] **revert** (R): revert re-applies an earlier migration or block in reverse. *Not applicable: D1 migrations are forward-only; write the reverse SQL as a new migration.* [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
-- [-] **db:rollback / db:migrate:redo** (R): Rollback the last N migrations (STEP=) or redo them. *Not applicable: wrangler has no rollback for D1 migrations; locally `ocre db reset`, in production a new migration or D1 Time Travel (7 days on the free plan).* [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
-- [~] **Transactional migrations** (R): Migrations run in a DDL transaction where supported; disable_ddl_transaction! opts out. *Ocre: wrangler applies each migration file as one unit (a failed statement leaves none applied); no opt-out.* [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
+- [-] **db:rollback / db:migrate:redo** (R): Rollback the last N migrations (STEP=) or redo them. *Not applicable: D1 has no rollback for migrations; locally `ocre db reset`, in production a new migration or D1 Time Travel (7 days on the free plan).* [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
+- [~] **Transactional migrations** (R): Migrations run in a DDL transaction where supported; disable_ddl_transaction! opts out. *Ocre: D1 applies each migration file as one unit (a failed statement leaves none applied); no opt-out.* [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
 - [x] **db:setup** (R): Creates the database, loads schema, and runs seeds. *Ocre: `ocre db prepare` on a new local database (migrations, then seeds).* [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
 - [x] **db:prepare** (R): Idempotently creates/loads schema/seeds or migrates as needed. *Ocre: `ocre db prepare` (local).* [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
 - [x] **db:reset / db:drop / db:create** (R): Drop and recreate the database from the schema file. *Ocre: `ocre db reset` (replays migrations, then seeds), `ocre db drop` (local only), `ocre db create [--remote]`.* [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
-- [-] **db:migrate:up / db:migrate:down** (R): Run or revert a single migration by VERSION. *Not applicable: wrangler applies every pending D1 migration in order and cannot revert one.* [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
+- [-] **db:migrate:up / db:migrate:down** (R): Run or revert a single migration by VERSION. *Not applicable: D1 applies every pending migration in order and cannot revert one.* [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
 - [ ] **Per-environment migration runs** (R): RAILS_ENV selects which database environment migrations run against. [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
 - [ ] **Migration output control** (R): suppress_messages, say, and say_with_time customize migration console output. [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
 - [x] **Migration version tracking** (R): schema_migrations table records applied versions; db:migrate:status shows state. [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
@@ -254,7 +255,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 ### Multiple databases
 
-- [~] **Multi-database configuration** (R): database.yml supports multiple primary/replica databases per environment, with connects_to in abstract classes. *Ocre: extra `[[d1_databases]]` bindings reached with `ctx.db_named("ANALYTICS")`; no generator support yet.* [active_record_multiple_databases](https://guides.rubyonrails.org/active_record_multiple_databases.html)
+- [~] **Multi-database configuration** (R): database.yml supports multiple primary/replica databases per environment, with connects_to in abstract classes. *Ocre: extra `bindings.d1(...)` entries in cloudflare.config.ts reached with `ctx.db_named("ANALYTICS")`; no generator support yet.* [active_record_multiple_databases](https://guides.rubyonrails.org/active_record_multiple_databases.html)
 - [ ] **Databases without managed schema** (R): database_tasks: false connects to external DBs without migrations/schema. [active_record_multiple_databases](https://guides.rubyonrails.org/active_record_multiple_databases.html)
 - [ ] **Per-database generators and migrations** (R): --database flag and migrations_paths target a specific database; db:migrate:<name> tasks. [active_record_multiple_databases](https://guides.rubyonrails.org/active_record_multiple_databases.html)
 - [ ] **Automatic role switching** (R): Middleware routes GET/HEAD to replicas and writes to primary with read-your-writes delay. [active_record_multiple_databases](https://guides.rubyonrails.org/active_record_multiple_databases.html)
@@ -300,7 +301,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [x] **Page response envelopes** (L): PageResponse<T> holds the rows plus PagerMeta (page, page_size, total_pages, total_items), and scaffolds return a flat, ts-exported Page<T> built with Page::from_query. *Ocre: `ocre::Paginated<T>` from `Query::paginate` (items, total, limit, offset, page helpers).* [loco/how-to/paginate](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/paginate.md)
 - [~] **ModelError / ModelResult** (L): A model-layer error type (EntityNotFound, EntityAlreadyExists, Validation, Jwt, DbErr...) that converts into HTTP errors with ?. [loco/reference/query-pagination](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/query-pagination.md)
 - [ ] **Row-level multi-tenancy** (L): With the multi-tenancy feature, TenantEntity declares an entity's tenant column, in_tenant scopes selects and bulk update/delete, and set_tenant assigns the tenant while rejecting reassignment with TenantMismatch (400). [loco/how-to/multi-tenancy](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/multi-tenancy.md)
-- [x] **Multiple databases (MultiDbInitializer)** (L): Opens named extra DB connections from initializers.multi_db, and handlers look them up by name through a MultiDb extension. *Ocre: each extra database is a `[[d1_databases]]` binding, reached by name with `ctx.db_named("ANALYTICS")`.* [loco/how-to/multi-database](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/multi-database.md)
+- [x] **Multiple databases (MultiDbInitializer)** (L): Opens named extra DB connections from initializers.multi_db, and handlers look them up by name through a MultiDb extension. *Ocre: each extra database is a `bindings.d1(...)` binding in cloudflare.config.ts, reached by name with `ctx.db_named("ANALYTICS")`.* [loco/how-to/multi-database](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/multi-database.md)
 - [ ] **Add a database to a DB-less app** (L): Documents the manual steps for turning a --db none app into a DB app: enable with-db, add the migration crate and models module, wire Hooks and the binaries, and configure the connection. [loco/how-to/add-a-database](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/add-a-database.md)
 
 ### Data
@@ -491,7 +492,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 ### JavaScript
 
 - [x] **Import maps** (R): importmap-rails loads ES modules without a bundler, with bin/importmap pin for npm packages. *Ocre: a `<script type="importmap">` pointing to `public/` files, documented.* [working_with_javascript_in_rails](https://guides.rubyonrails.org/working_with_javascript_in_rails.html)
-- [x] **JavaScript bundler support** (R): Use Bun, esbuild, Rollup or Webpack via jsbundling with Node/Yarn or Bun runtimes. *Ocre: esbuild/Bun/Rollup chained in wrangler's `[build] command`, documented.* [working_with_javascript_in_rails](https://guides.rubyonrails.org/working_with_javascript_in_rails.html)
+- [x] **JavaScript bundler support** (R): Use Bun, esbuild, Rollup or Webpack via jsbundling with Node/Yarn or Bun runtimes. *Ocre: esbuild/Bun/Rollup chained in `build.command` of wrangler.config.ts, documented.* [working_with_javascript_in_rails](https://guides.rubyonrails.org/working_with_javascript_in_rails.html)
 - [x] **Turbo Drive** (R): Intercept link clicks/form submits to swap page body without full reloads. *Ocre: `hx-boost` on the generated layout's `<body>`.* [working_with_javascript_in_rails](https://guides.rubyonrails.org/working_with_javascript_in_rails.html)
 - [x] **Turbo Frames** (R): Independently updated page segments via turbo_frame_tag. *Ocre: htmx targets with the `Htmx` extractor.* [working_with_javascript_in_rails](https://guides.rubyonrails.org/working_with_javascript_in_rails.html)
 - [x] **Turbo Streams** (R): Server-sent append/prepend/replace/update/remove DOM actions over HTTP responses or WebSockets. *Ocre: htmx out-of-band swaps; `ocre::realtime` over WebSockets.* [working_with_javascript_in_rails](https://guides.rubyonrails.org/working_with_javascript_in_rails.html)
@@ -514,7 +515,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [x] **Development asset serving** (R): Uncached, auto-reloaded asset serving in development with optional file watchers. *Ocre: `ocre dev` serves `public/` uncached.* [asset_pipeline](https://guides.rubyonrails.org/asset_pipeline.html)
 - [x] **Asset precompilation** (R): bin/rails assets:precompile copies digested assets to public/assets with far-future caching. *Ocre: nothing to precompile; `ocre deploy` uploads `public/`.* [asset_pipeline](https://guides.rubyonrails.org/asset_pipeline.html)
 - [x] **CDN asset host** (R): config.asset_host serves assets from a CDN. *Ocre: Cloudflare's edge serves `public/`.* [asset_pipeline](https://guides.rubyonrails.org/asset_pipeline.html)
-- [x] **jsbundling-rails** (R): Integrate a JS bundler build into assets:precompile. *Ocre: the bundler in wrangler's `[build] command`, documented.* [asset_pipeline](https://guides.rubyonrails.org/asset_pipeline.html)
+- [x] **jsbundling-rails** (R): Integrate a JS bundler build into assets:precompile. *Ocre: the bundler in `build.command` of wrangler.config.ts, documented.* [asset_pipeline](https://guides.rubyonrails.org/asset_pipeline.html)
 - [x] **cssbundling-rails** (R): Build CSS with Bootstrap/Bulma/PostCSS/Sass via a Node tool. *Ocre: the CSS tool in `[build] command`, documented.* [asset_pipeline](https://guides.rubyonrails.org/asset_pipeline.html)
 - [x] **tailwindcss-rails** (R): Standalone Tailwind CSS build and watcher without Node. *Ocre: Tailwind's standalone CLI, documented.* [asset_pipeline](https://guides.rubyonrails.org/asset_pipeline.html)
 - [-] **Sprockets to Propshaft migration** (R): Steps for moving an app from Sprockets to Propshaft. *Not applicable: no asset pipeline to migrate.* [asset_pipeline](https://guides.rubyonrails.org/asset_pipeline.html)
@@ -539,7 +540,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [x] **compression** (L): Compresses response bodies. *Ocre: Cloudflare compresses responses at the edge (Brotli, gzip).* [loco/reference/middleware](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/middleware.md)
 - [-] **timeout_request** (L): Aborts requests that run longer than a configured number of milliseconds with 408 Request Timeout. *Not applicable: Cloudflare ends requests over the CPU limit and when the client leaves; subrequests have their own timeouts.* [loco/reference/middleware](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/middleware.md)
 - [x] **secure_headers** (L): Adds a preset bundle of security headers (github, owasp or empty) that can be overridden header by header. *Ocre: set by `ocre::serve`; a handler's own value wins.* [loco/reference/middleware](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/middleware.md)
-- [x] **logger (request logging)** (L): Logs each request's method, URI, version, user agent, request id and environment through tracing (on by default). *Ocre: Workers Logs, on in the generated `wrangler.toml` (`[observability]`), records every request.* [loco/reference/middleware](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/middleware.md)
+- [x] **logger (request logging)** (L): Logs each request's method, URI, version, user agent, request id and environment through tracing (on by default). *Ocre: Workers Logs, on in the generated `cloudflare.config.ts` (`observability`), records every request.* [loco/reference/middleware](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/middleware.md)
 - [x] **request_id** (L): Makes sure every request has a sanitized or generated x-request-id and exposes it to handlers as LocoRequestId. *Ocre: `ocre::RequestId` (`CF-Ray`, else a valid `X-Request-Id`, else random).* [loco/reference/middleware](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/middleware.md)
 - [x] **fallback (unmatched routes)** (L): Answers unmatched routes with a file, a plain message, or the bundled welcome page, using a configurable status (on by default outside production). *Ocre: `.fallback(not_found)` in the generated `src/lib.rs` (the error page, JSON in API apps).* [loco/reference/middleware](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/middleware.md)
 - [x] **powered_by / server.ident** (L): Sets the X-Powered-By header to loco.rs or a custom string, and turns it off when server.ident is an empty string. *Ocre: no `X-Powered-By` is sent; add one with a layer.* [loco/reference/middleware](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/middleware.md)
@@ -644,7 +645,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [~] **Job continuations** (R): `ActiveJob::Continuable` splits jobs into resumable `step`s with cursors so interrupted jobs resume where they left off. *Ocre: documented pattern, a job enqueues its next step with a cursor field; no step API.* [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
 - [-] **Solid Queue backend** (R): Database-backed default queue with workers, dispatchers and supervisors configured via `queue.yml`. *Not applicable: Cloudflare Queues replaces it; there are no worker processes.* [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
 - [-] **Queue ordering and polling** (R): Workers process queues in configured order (including wildcards), with numeric priorities and a polling interval. *Not applicable: Queues push batches to the consumer (`max_batch_timeout`); each queue has its own consumer.* [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
-- [~] **Concurrency controls** (R): `limits_concurrency to:, key:, duration:` restricts how many jobs sharing a key run simultaneously. *Ocre: `max_concurrency` per queue in wrangler.toml, and a documented D1 lock row per key; no helper.* [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
+- [~] **Concurrency controls** (R): `limits_concurrency to:, key:, duration:` restricts how many jobs sharing a key run simultaneously. *Ocre: `maxConcurrency` per queue trigger in cloudflare.config.ts, and a documented D1 lock row per key; no helper.* [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
 - [-] **Enqueue after transaction commit** (R): `enqueue_after_transaction_commit` defers enqueuing until the surrounding DB transaction commits. *Not applicable: D1 keeps no transaction open across awaits; a `db.batch()` has committed when it returns, so enqueuing after it gives the same guarantee.* [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
 - [x] **Recurring tasks** (R): `recurring.yml` schedules jobs or commands on cron-like schedules. *Ocre: `ocre g schedule <name> "<when>"` (Cron Triggers), listed by `ocre schedules`.* [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
 - [-] **Pluggable queue adapters** (R): Swap backends (Sidekiq, GoodJob, async, inline, test, etc.) via `queue_adapter`. *Not applicable: Ocre uses Cloudflare Queues only.* [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
@@ -658,7 +659,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 ### Scheduler
 
-- [x] **Scheduler configuration** (L): Recurring jobs are defined either in a dedicated config/scheduler.yaml or in a scheduler: block of the environment config, with a global stdout/silent output setting. *Ocre: `[triggers] crons` in wrangler.toml plus the dispatch `match` of `src/schedules/mod.rs`, both written by `ocre g schedule`; results logged as `[ocre cron]` lines.* [loco/how-to/schedule-jobs](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/schedule-jobs.md)
+- [x] **Scheduler configuration** (L): Recurring jobs are defined either in a dedicated config/scheduler.yaml or in a scheduler: block of the environment config, with a global stdout/silent output setting. *Ocre: `triggers.scheduled` entries in cloudflare.config.ts plus the dispatch `match` of `src/schedules/mod.rs`, both written by `ocre g schedule`; results logged as `[ocre cron]` lines.* [loco/how-to/schedule-jobs](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/schedule-jobs.md)
 - [x] **Scheduled job definitions** (L): Each job has run (a task name with key:value args, or a shell command when shell: true), schedule, run_on_start, tags, and a per-job output override. *Ocre: one Rust task per cron (`src/schedules/<name>.rs`); no shell commands, tags or run_on_start.* [loco/how-to/schedule-jobs](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/schedule-jobs.md)
 - [x] **English schedule syntax** (L): Schedules can be written as plain-English phrases such as 'every 15 seconds', 'every day at 4:00 pm' or 'midnight on Tuesdays', which are converted to cron. *Ocre: `ocre g schedule nightly "every day at 3am"` ("every 15 minutes", "every weekday at 6pm", "midnight on tuesdays"...); seconds are refused, Cron Triggers run at most once a minute.* [loco/how-to/schedule-jobs](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/schedule-jobs.md)
 - [x] **Cron schedule syntax** (L): Accepts 7-field UTC cron expressions (seconds through year). *Ocre: Cloudflare's 5-field UTC expressions (no seconds or year fields).* [loco/how-to/schedule-jobs](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/schedule-jobs.md)
@@ -716,7 +717,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [x] **Mailbox classes** (R): Mailboxes implement `process` with access to the parsed `mail` object to handle incoming emails. *Ocre: `InboundEmail` gives the decoded headers, text, HTML, attachments and raw bytes.* [action_mailbox_basics](https://guides.rubyonrails.org/action_mailbox_basics.html)
 - [~] **Mailbox callbacks and bouncing** (R): `before_processing`/`after_processing`/`around_processing` callbacks and `bounce_with` to reject email with a reply. *Ocre: `email.reject(reason)` bounces, an `Err` bounces with a generic reason; callbacks are code around the `match`.* [action_mailbox_basics](https://guides.rubyonrails.org/action_mailbox_basics.html)
 - [~] **Inbound email status tracking** (R): InboundEmail records track status (pending, processing, delivered, failed, bounced) through processing. *Ocre: documented pattern, an `inbound_emails` table written by the mailbox; not generated.* [action_mailbox_basics](https://guides.rubyonrails.org/action_mailbox_basics.html)
-- [x] **Conductor for local development** (R): A local web UI at `/rails/conductor/action_mailbox/inbound_emails` lets developers compose and submit test inbound emails. *Ocre: the form at `/ocre/dev/mailbox` in `ocre dev`, posting to wrangler's local email endpoint.* [action_mailbox_basics](https://guides.rubyonrails.org/action_mailbox_basics.html)
+- [x] **Conductor for local development** (R): A local web UI at `/rails/conductor/action_mailbox/inbound_emails` lets developers compose and submit test inbound emails. *Ocre: the form at `/ocre/dev/mailbox` in `ocre dev`, posting to the dev server's local email endpoint.* [action_mailbox_basics](https://guides.rubyonrails.org/action_mailbox_basics.html)
 - [ ] **Mailbox testing helpers** (R): `receive_inbound_email_from_mail` and related helpers exercise mailboxes in tests. *Ocre: none; `InboundEmail` only exists in workerd, so mailboxes are tested through `ocre dev`.* [action_mailbox_basics](https://guides.rubyonrails.org/action_mailbox_basics.html)
 - [~] **InboundEmail incineration** (R): Processed inbound emails are automatically destroyed after a configurable `incinerate_after` period. *Ocre: documented pattern, a schedule that deletes old `inbound_emails` rows.* [action_mailbox_basics](https://guides.rubyonrails.org/action_mailbox_basics.html)
 
@@ -870,7 +871,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 ## Errors, logging and debugging
 
-**On Workers:** Error pages and JSON errors exist. Logs through console output, `wrangler tail` and Workers Logs. No interactive debugger on Workers; local debugging with `wrangler dev`.
+**On Workers:** Error pages and JSON errors exist. Logs through console output and Workers Logs. No interactive debugger on Workers; local debugging with `ocre dev` (`cf dev`).
 
 44 features: 0 done, 0 partial, 41 to do, 3 not applicable.
 
@@ -929,7 +930,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 ## Configuration and architecture
 
-**On Workers:** Configuration in wrangler.toml vars and environments, secrets with `wrangler secret`. App context is `Ctx` (bindings per request).
+**On Workers:** Configuration in cloudflare.config.ts (`bindings.text` variables), secrets with `ocre secrets push`. App context is `Ctx` (bindings per request).
 
 25 features: 0 done, 0 partial, 23 to do, 2 not applicable.
 
@@ -966,7 +967,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 ## CLI and generators
 
-**On Workers:** `ocre` CLI: non-interactive with `--json`, wizard in a terminal. D1 commands wrap wrangler.
+**On Workers:** `ocre` CLI: non-interactive with `--json`, wizard in a terminal. Cloudflare commands wrap Cloudflare's `cf` CLI; local D1 commands still run the app's wrangler (see the last section).
 
 118 features: 49 done, 16 partial, 34 to do, 19 not applicable.
 
@@ -985,7 +986,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [-] **cargo loco start with start modes** (L): Boots the app as server only (default), --worker[=tags], --server-and-worker, --scheduler, or --all, with --binding, --port and --no-banner overrides. *Not applicable: one Worker handles requests, queue batches and crons; `ocre dev --port N` runs them all together.* [loco/reference/cli](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/cli.md)
 - [ ] **Global --environment flag** (L): Every cargo loco command accepts -e/--environment (default development) to choose which config/<env>.yaml is loaded. [loco/reference/cli](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/cli.md)
 - [x] **cargo loco db create** (L): Creates the configured database or schema. *Ocre: `ocre db create` (local file, or the D1 database with `--remote`).* [loco/reference/cli](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/cli.md)
-- [-] **cargo loco db down [steps]** (L): Rolls back the given number of migrations (default 1). *Not applicable: D1 migrations are forward-only (wrangler has no rollback); undo with a new migration, or D1 Time Travel in production.* [loco/reference/cli](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/cli.md)
+- [-] **cargo loco db down [steps]** (L): Rolls back the given number of migrations (default 1). *Not applicable: D1 migrations are forward-only (D1 has no rollback); undo with a new migration, or D1 Time Travel in production.* [loco/reference/cli](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/cli.md)
 - [x] **cargo loco db reset** (L): Drops all tables and then reapplies every migration. [loco/reference/cli](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/cli.md)
 - [x] **cargo loco db status** (L): Shows which migrations have been applied and which are pending. [loco/reference/cli](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/cli.md)
 - [-] **cargo loco db entities** (L): Regenerates the Sea-ORM entity files in src/models/_entities from the live database schema (debug builds only). *Not applicable: no ORM entity layer; models are generated code the app owns, and `ocre db schema` dumps the live schema.* [loco/reference/cli](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/cli.md)
@@ -1001,10 +1002,10 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [-] **cargo loco jobs requeue** (L): Moves jobs stuck in processing for longer than --from-age minutes back to queued, for example after a worker crash. *Not applicable: Queues redelivers unacknowledged messages itself.* [loco/reference/cli](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/cli.md)
 - [ ] **cargo loco jobs retry** (L): Moves failed jobs (all of them, or one chosen with --id) back to queued, because no queue driver retries automatically. [loco/reference/cli](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/cli.md)
 - [~] **cargo loco scheduler** (L): Runs the scheduler as its own process from embedded or file-based config, with --name, --tag, --config and --list options. *Ocre: Cron Triggers run the tasks (no process); `ocre schedules` lists them, `ocre schedules run <task>` fires one on `ocre dev`.* [loco/how-to/schedule-jobs](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/schedule-jobs.md)
-- [x] **cargo loco doctor** (L): Checks the DB connection, the queue connection and initializer health, plus (outside production) dependency minimum versions, sea-orm-cli and the published Loco version; exits non-zero if any check fails, so it can gate CI. *Ocre: `ocre doctor` checks the wasm target, Node.js, the login, bindings for what the code uses, pending migrations and secrets.* [loco/how-to/run-doctor](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/run-doctor.md)
-- [~] **cargo loco doctor --config** (L): Skips the checks and prints the fully resolved config as YAML (after file merging, environment resolution and templating) plus the active environment. *Ocre: `ocre about` prints bindings, crons, variable names and features from wrangler.toml and Cargo.toml; no environments.* [loco/how-to/run-doctor](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/run-doctor.md)
+- [x] **cargo loco doctor** (L): Checks the DB connection, the queue connection and initializer health, plus (outside production) dependency minimum versions, sea-orm-cli and the published Loco version; exits non-zero if any check fails, so it can gate CI. *Ocre: `ocre doctor` checks the wasm target, Node.js, the pinned npm packages, the login, cloudflare.config.ts, bindings for what the code uses, pending migrations and secrets.* [loco/how-to/run-doctor](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/run-doctor.md)
+- [~] **cargo loco doctor --config** (L): Skips the checks and prints the fully resolved config as YAML (after file merging, environment resolution and templating) plus the active environment. *Ocre: `ocre about` prints bindings, crons, variable names and features from cloudflare.config.ts and Cargo.toml; no environments.* [loco/how-to/run-doctor](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/run-doctor.md)
 - [x] **cargo loco version** (L): Prints the app version string returned by Hooks::app_version. *Ocre: `ocre version` (CLI, app and `ocre` dependency).* [loco/reference/cli](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/cli.md)
-- [~] **cargo loco watch** (L): Rebuilds and restarts the app on file changes (a wrapper around cargo-watch), with --worker, --server-and-worker and --scheduler modes. *Ocre: `ocre dev` (wrangler dev) rebuilds on changes in `src/`, wrangler's default watch directory, not `templates/`.* [loco/reference/cli](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/cli.md)
+- [~] **cargo loco watch** (L): Rebuilds and restarts the app on file changes (a wrapper around cargo-watch), with --worker, --server-and-worker and --scheduler modes. *Ocre: `ocre dev` (`cf dev`, which delegates the build to wrangler) rebuilds on changes in `src/`, wrangler's default watch directory, not `templates/`.* [loco/reference/cli](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/cli.md)
 - [ ] **rails new --skip-* options** (R): Leaves out frameworks and defaults (for example --skip-active-storage, --skip-action-mailbox, --skip-test, --skip-git, --skip-docker, --skip-kamal, --skip-solid, --skip-thruster, --skip-ci); skipping one framework also skips the ones that depend on it. [command_line](https://guides.rubyonrails.org/command_line.html)
 - [ ] **rails new --css / --javascript** (R): Picks the CSS setup (tailwind, bootstrap, bulma, postcss, sass) and the JavaScript setup (importmap, bun, esbuild, rollup, webpack). [command_line](https://guides.rubyonrails.org/command_line.html)
 - [~] **bin/rails server** (R): Starts the Puma web server, with options for port, binding address and environment. *Ocre: `ocre dev --port N`; no binding address or environment option.* [command_line](https://guides.rubyonrails.org/command_line.html)
@@ -1096,7 +1097,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 ## Testing
 
-**On Workers:** Native unit tests for pure code; request tests need workerd (`wrangler dev`/Miniflare), which is slow, so Ocre should offer a harness that starts one server for a whole test run.
+**On Workers:** Native unit tests for pure code; request tests need workerd (`cf dev`/Miniflare), which is slow, so Ocre should offer a harness that starts one server for a whole test run.
 
 78 features: 0 done, 0 partial, 78 to do, 0 not applicable.
 
@@ -1228,3 +1229,24 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [ ] **Alphabetized schema.rb columns** (R): Columns in schema.rb are sorted alphabetically so diffs stay stable. [8_1_release_notes](https://guides.rubyonrails.org/8_1_release_notes.html)
 - [ ] **Signed ID verifier via message_verifiers** (R): Signed IDs use Rails.application.message_verifiers, or a model-specific signed_id_verifier. [8_1_release_notes](https://guides.rubyonrails.org/8_1_release_notes.html)
 - [-] **Registry-free Kamal deployments** (R): Kamal 2.8 uses a local registry by default, so simple deploys don't need a remote container registry. *Not applicable: deployment is `ocre deploy` to Workers.* [8_1_release_notes](https://guides.rubyonrails.org/8_1_release_notes.html)
+
+## Ocre platform work
+
+Ocre's own tooling items, not Rails or Loco features (not counted above).
+
+- [ ] **Local D1 through `cf` instead of the wrangler fallback**: `ocre migrate`, `ocre migrate --status`, `ocre db create/seed/reset/prepare/truncate/version/schema`, `ocre sql`, `ocre test --e2e` and doctor's migration check run the app's own wrangler (`node_modules/.bin/wrangler`) with a derived `.wrangler/ocre-d1.json` on the local database, because `cf` 1.0.0-beta.5 cannot do it. Switch them to `cf d1 migrations apply <id> --local --persist-to .wrangler/state` (and `cf d1 query`), and delete the fallback, once all of these hold: (1) cf accepts the local key (the binding name `DB`), or `cf dev` keys local D1 by a stable id Ocre can pass; (2) local writes exit; (3) `--sql` values starting with `--` are accepted, or a `--file` option exists. Report upstream at github.com/cloudflare/cf. Reproduction, local, no account:
+
+  ```sh
+  mkdir /tmp/cfr && cd /tmp/cfr && npm init -y && npm i cf@1.0.0-beta.5
+  export CF_SEND_TELEMETRY=false
+  # 1. UUID-only D1 ids: "Expected a D1 database ID … names and binding names are not accepted"
+  node node_modules/cf/bin/cf d1 migrations list DB --local
+  # 2. a local write prints its result, then never exits
+  node node_modules/cf/bin/cf d1 raw aaaaaaaa-2222-4333-8444-555555555555 --local --persist-to /tmp/cfr/st --sql="CREATE TABLE IF NOT EXISTS t(x); INSERT INTO t VALUES(1)" </dev/null
+  #    a read exits in about 2 s
+  node node_modules/cf/bin/cf d1 raw aaaaaaaa-2222-4333-8444-555555555555 --local --persist-to /tmp/cfr/st --sql="SELECT count(*) FROM t" </dev/null
+  # 3. a `--sql` value starting with `--` is parsed as a flag: prints help, exit 1
+  node node_modules/cf/bin/cf d1 raw DB --local --sql "-- comment
+  SELECT 1" </dev/null
+  ```
+- [ ] **Durable Object exports on Workers first deployed with wrangler**: check how `cf deploy` maps `exports: { OcreChannel: exports.durableObject({ storage: "sqlite" }) }` for a realtime app whose Worker was created by wrangler's `[[migrations]]` tag `ocre-realtime-v1`, and document the step in the upgrading guide if one is needed.

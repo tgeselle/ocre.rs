@@ -4,8 +4,8 @@ This page documents every `ocre g` generator: its arguments and flags, the namin
 
 ## Before you start
 
-- An Ocre app created with [`ocre new`](cli.md#ocre-new). Run generators from its root or any directory below it (the CLI looks for the nearest `wrangler.toml`).
-- Generators only write files: they need no network, no wrangler and no Cloudflare account. Run [`ocre migrate`](cli.md#ocre-migrate) after the ones that add migrations, and `cargo check --target wasm32-unknown-unknown` (or [`ocre test`](cli.md#ocre-test)) to type-check the result.
+- An Ocre app created with [`ocre new`](cli.md#ocre-new). Run generators from its root or any directory below it (the CLI looks for the nearest `cloudflare.config.ts`).
+- Generators only write files: they need no network, no cf and no Cloudflare account. Run [`ocre migrate`](cli.md#ocre-migrate) after the ones that add migrations, and `cargo check --target wasm32-unknown-unknown` (or [`ocre test`](cli.md#ocre-test)) to type-check the result.
 - Keep the `// ocre:...` marker comments of generated files (`// ocre:modules` and `// ocre:routes` in `src/lib.rs`, `// ocre:models` in `src/models/mod.rs`...): generators insert lines right after them.
 
 The examples below were run with `ocre 0.1.0` on an app created by `ocre new blog --starter blog`, in the order of this page.
@@ -13,7 +13,7 @@ The examples below were run with `ocre 0.1.0` on an app created by `ocre new blo
 ## How generators behave
 
 - **All or nothing.** A generator computes every change first and writes nothing until the whole generation succeeded, so a failure never leaves half a resource.
-- **Never overwrite by default.** A generator creates new files and only edits existing ones by inserting lines at markers (or appending blocks to `wrangler.toml`). When a file it would create exists, it stops with `<path> already exists` and the hint ``generators create new files only: pass --skip to keep the existing file, --force to overwrite it, or edit it (`ocre g migration` for tables)``. Lines already present after a marker are not inserted twice. To change a table after its migration was applied, add a migration with [`ocre g migration`](#ocre-g-migration).
+- **Never overwrite by default.** A generator creates new files and only edits existing ones by inserting lines at markers (in `cloudflare.config.ts`, after `// ocre:env`, `// ocre:triggers` and `// ocre:exports`; see [Configuration](configuration.md#canonical-entries)). When a file it would create exists, it stops with `<path> already exists` and the hint ``generators create new files only: pass --skip to keep the existing file, --force to overwrite it, or edit it (`ocre g migration` for tables)``. Lines already present after a marker are not inserted twice. To change a table after its migration was applied, add a migration with [`ocre g migration`](#ocre-g-migration).
 - **Report.** The human output lists `  create  <path>`, `  update  <path>` and `  skip    <path>` lines, then `Next:` steps. With `--json` it is one object with `command` (`generate <generator>`), `created`, `updated`, `skipped`, `pretend` and `next` (see [the --json contract](cli.md#global-flag-json)).
 - **Recorded.** Every run that writes something saves what it changed in `.ocre/generated/NNNN_<generator>_<name>.json` (see [Generation records and ocre destroy](#generation-records-and-ocre-destroy)). Commit the directory with the code.
 - **Full-stack or API-only.** An app created with `ocre new --api` has `[package.metadata.ocre] mode = "api"` in `Cargo.toml`. There, `ocre g scaffold` generates a JSON API (like `ocre g api`), and `auth` and `mailer` generate no HTML.
@@ -91,7 +91,7 @@ Next:
 
 ## Generation records and ocre destroy
 
-Each generator run that changes files writes a JSON record in `.ocre/generated/`, numbered like migrations (`0003_controller_pages.json`): the command as typed, the generator, its first argument, each file created with a SHA-256 of its contents, and for each file updated the lines added and removed around a context line. [`ocre destroy <generator> [NAME]`](cli.md#ocre-destroy) reads the latest matching record and undoes the run: it deletes the files created and takes out the lines added (Cargo.toml and wrangler.toml changes stay). It refuses when a created file changed since, unless `--force`.
+Each generator run that changes files writes a JSON record in `.ocre/generated/`, numbered like migrations (`0003_controller_pages.json`): the command as typed, the generator, its first argument, each file created with a SHA-256 of its contents, and for each file updated the lines added and removed around a context line. [`ocre destroy <generator> [NAME]`](cli.md#ocre-destroy) reads the latest matching record and undoes the run: it deletes the files created and takes out the lines added (Cargo.toml, cloudflare.config.ts and package.json changes stay). It refuses when a created file changed since, unless `--force`.
 
 ```sh
 ocre g scaffold Temp name:string
@@ -134,7 +134,7 @@ Apps created before records existed have none for their earlier runs: `ocre dest
 | `datetime` (`date_time`) | `TEXT` | `String` | Validated as a date and time |
 | `uuid` | `TEXT` | `String` | Validated as a hyphenated UUID |
 | `references` | `<name>_id INTEGER REFERENCES <plural>(id) ON DELETE CASCADE` (`SET NULL` when `?`), indexed | `i64` | `author:references` adds `author_id`, `author:references:writer_id` names the column; `src/models/author.rs` must exist; validated as "must exist" |
-| `attachment` | four columns: `<name>_key`, `<name>_filename`, `<name>_content_type` (`TEXT`), `<name>_size` (`INTEGER`) | `ocre::storage::Upload` when received, `Attachment` when stored | A file in R2; cannot be `^`; cannot be named `edit`, `delete` or `new`; must be `?` in JSON APIs; adds the `STORAGE` R2 bucket to `wrangler.toml` |
+| `attachment` | four columns: `<name>_key`, `<name>_filename`, `<name>_content_type` (`TEXT`), `<name>_size` (`INTEGER`) | `ocre::storage::Upload` when received, `Attachment` when stored | A file in R2; cannot be `^`; cannot be named `edit`, `delete` or `new`; must be `?` in JSON APIs; adds the `STORAGE` R2 binding to `cloudflare.config.ts` |
 | `json` (`jsonb`) | `TEXT CHECK (json_valid(<name>))` | `ocre::serde_json::Value` | Any JSON value; cannot be `^` |
 | `enum:<a>,<b>...` | `TEXT CHECK (<name> IN ('a', 'b'))` | a Rust enum generated in the model (`status` gives `Status`) | A `<select>` in forms; cannot be `^`; not with `--graphql` |
 
@@ -213,7 +213,7 @@ Files:
 - `src/models/<model>.rs`: the row struct (`Author`, deriving `Deserialize` and `Serialize`), `NewAuthor` (values for a new row), `AuthorChanges` (every field an `Option`; for optional fields `Some(None)` clears the value), `validate()` on both (presence of required text, dates, safe integers, files), and the functions `all(ctx, page)` (newest first), `count`, `find`, `find_many` (100 ids per query), `create`, `update` and `delete`. `create` and `update` add the checks that need the database: uniqueness and existing references.
 - `src/models/mod.rs`: `pub mod <model>;` after `// ocre:models`. The first model creates the file and adds `mod models;` to `src/lib.rs`.
 
-A `references` field also updates the referenced model: `ocre g scaffold Comment ... post:references` adds `pub async fn comments(&self, ctx, page)` (has many, newest first) to `src/models/post.rs` after its `// ocre:associations` marker, and gives `Comment` a `post(&self, ctx)` method (belongs to). An `attachment` field adds a `Rules` constant per file (`pub const IMAGE: Rules`, 10 MB and common image, PDF and text types until you edit it), a method returning its `Attachment`, `create`/`update` that store files in R2 and delete replaced ones, and the `STORAGE` bucket to `wrangler.toml` (`bucket_name = "<app>-storage"`) unless it is there.
+A `references` field also updates the referenced model: `ocre g scaffold Comment ... post:references` adds `pub async fn comments(&self, ctx, page)` (has many, newest first) to `src/models/post.rs` after its `// ocre:associations` marker, and gives `Comment` a `post(&self, ctx)` method (belongs to). An `attachment` field adds a `Rules` constant per file (`pub const IMAGE: Rules`, 10 MB and common image, PDF and text types until you edit it), a method returning its `Attachment`, `create`/`update` that store files in R2 and delete replaced ones, and the `STORAGE` binding to `cloudflare.config.ts` (`STORAGE: bindings.r2({ name: "<app>-storage" }),`) unless it is there.
 
 This is the migration of the fixture's `Setting` model with a JSON field:
 
@@ -290,17 +290,17 @@ Next:
 
 The handlers parse the form into a `CommentForm` whose fields are all text (numbers are validated, so a typo shows a field error instead of a failed request), then call the model. The templates extend `layout.html`; `_form.html` holds the fields shared by `new.html` and `edit.html`.
 
-With `--realtime`, the scaffold also creates `templates/<plural>/_row.html` (one row, rendered for the page and for broadcasts), makes the handlers broadcast each change on the `<plural>` channel, and on first use creates `src/realtime.rs` (the `GET /realtime/{channel}` route and the list of channels anyone may listen to), turns on Ocre's `realtime` feature in `Cargo.toml` and declares the `CHANNELS` Durable Object (class `OcreChannel`, SQLite-backed, as the free plan requires) in `wrangler.toml`. Later `--realtime` scaffolds add their channel after `// ocre:channels` in `src/realtime.rs`:
+With `--realtime`, the scaffold also creates `templates/<plural>/_row.html` (one row, rendered for the page and for broadcasts), makes the handlers broadcast each change on the `<plural>` channel, and on first use creates `src/realtime.rs` (the `GET /realtime/{channel}` route and the list of channels anyone may listen to), turns on Ocre's `realtime` feature in `Cargo.toml` and declares the `CHANNELS` Durable Object binding and the `OcreChannel` export (`exports.durableObject({ storage: "sqlite" })`, SQLite-backed, as the free plan requires) in `cloudflare.config.ts`. Later `--realtime` scaffolds add their channel after `// ocre:channels` in `src/realtime.rs`:
 
 ```sh
 ocre g scaffold Message body:text --realtime --json
 ```
 
 ```json
-{"command":"generate scaffold","created":["migrations/0008_create_messages.sql","src/models/message.rs","src/messages.rs","templates/messages/index.html","templates/messages/show.html","templates/messages/new.html","templates/messages/edit.html","templates/messages/_form.html","templates/messages/_row.html","src/realtime.rs"],"next":["ocre migrate","ocre dev","open http://localhost:8787/messages","open http://localhost:8787/messages in a second window, then create a message"],"ok":true,"updated":["src/models/mod.rs","src/lib.rs","Cargo.toml","wrangler.toml"]}
+{"command":"generate scaffold","created":["migrations/0008_create_messages.sql","src/models/message.rs","src/messages.rs","templates/messages/index.html","templates/messages/show.html","templates/messages/new.html","templates/messages/edit.html","templates/messages/_form.html","templates/messages/_row.html","src/realtime.rs"],"next":["ocre migrate","ocre dev","open http://localhost:8787/messages","open http://localhost:8787/messages in a second window, then create a message"],"ok":true,"updated":["src/models/mod.rs","src/lib.rs","Cargo.toml","cloudflare.config.ts"]}
 ```
 
-With attachments, the form becomes a file upload and `wrangler.toml` gets the `STORAGE` bucket:
+With attachments, the form becomes a file upload and `cloudflare.config.ts` gets the `STORAGE` bucket:
 
 ```sh
 ocre g scaffold Photo title:string image:attachment notes:attachment?
@@ -316,7 +316,7 @@ ocre g scaffold Photo title:string image:attachment notes:attachment?
   create  templates/photos/edit.html
   create  templates/photos/_form.html
   update  src/models/mod.rs
-  update  wrangler.toml
+  update  cloudflare.config.ts
   update  src/lib.rs
 
 Next:
@@ -524,7 +524,7 @@ ocre g auth
   create  templates/auth/password_edit.html
   create  templates/auth/confirmation_show.html
   update  src/lib.rs
-  update  wrangler.toml
+  update  cloudflare.config.ts
 
 Next:
   ocre migrate
@@ -533,7 +533,7 @@ Next:
 ```
 
 ```json
-{"command":"generate auth","created":["migrations/0001_create_users.sql","migrations/0002_create_auth_tokens.sql","migrations/0003_create_api_keys.sql","src/models/mod.rs","src/models/user.rs","src/models/api_key.rs","src/models/auth_token.rs","src/auth_api.rs","src/auth.rs","src/registrations.rs","src/sessions.rs","src/passwords.rs","src/confirmations.rs","templates/auth/signup.html","templates/auth/login.html","templates/auth/account.html","templates/auth/magic_link_new.html","templates/auth/magic_link_show.html","templates/auth/password_new.html","templates/auth/password_edit.html","templates/auth/confirmation_show.html"],"next":["ocre migrate","ocre dev","open http://localhost:8787/signup"],"ok":true,"updated":["src/lib.rs","wrangler.toml"]}
+{"command":"generate auth","created":["migrations/0001_create_users.sql","migrations/0002_create_auth_tokens.sql","migrations/0003_create_api_keys.sql","src/models/mod.rs","src/models/user.rs","src/models/api_key.rs","src/models/auth_token.rs","src/auth_api.rs","src/auth.rs","src/registrations.rs","src/sessions.rs","src/passwords.rs","src/confirmations.rs","templates/auth/signup.html","templates/auth/login.html","templates/auth/account.html","templates/auth/magic_link_new.html","templates/auth/magic_link_show.html","templates/auth/password_new.html","templates/auth/password_edit.html","templates/auth/confirmation_show.html"],"next":["ocre migrate","ocre dev","open http://localhost:8787/signup"],"ok":true,"updated":["src/lib.rs","cloudflare.config.ts"]}
 ```
 
 In an app that already has models, `src/models/mod.rs` is updated instead of created, and the migrations take the next numbers.
@@ -548,15 +548,15 @@ In an app that already has models, `src/models/mod.rs` is updated instead of cre
 | `src/confirmations.rs` | Email confirmation: `POST /confirmations` (send a new link), `/confirmations/{token}` |
 | `src/auth_api.rs` | In every app: the `BearerUser` extractor, `throttle`, `POST /api/auth/signup`, `POST /api/auth/token` (JWT), `GET`/`DELETE /api/auth/me`, and API keys (`GET`/`POST /api/auth/keys`, `DELETE /api/auth/keys/{id}`) |
 | `templates/auth/*.html` | The pages (full-stack only) |
-| `wrangler.toml` | The `AUTH_RATE_LIMITER` `[[ratelimits]]` binding (10 requests a minute, `namespace_id` derived from the app name), used by `throttle` on every route that checks a password or sends an email; not added again when present |
+| `cloudflare.config.ts` | The `AUTH_RATE_LIMITER: bindings.rateLimit(...)` binding (10 requests a minute, `namespace` derived from the app name), used by `throttle` on every route that checks a password or sends an email; not added again when present |
 
 `ocre g auth --db-sessions --oauth github,google` also creates `migrations/*_create_user_sessions.sql`, `migrations/*_create_identities.sql`, `src/models/user_session.rs`, `src/models/identity.rs`, `src/user_sessions.rs` (`GET /account/sessions`, `POST /account/sessions/{id}/delete`, `POST /account/sessions/others/delete`), `src/oauth.rs` (`POST /auth/{provider}`, `GET /auth/{provider}/callback`) and `templates/auth/user_sessions.html`, links the sessions page from `account.html`, and appends commented `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET` (and `GOOGLE_...`) lines to `.dev.vars`. One extra next step per provider:
 
 ```text
-  register an OAuth app with github (callback https://<your host>/auth/github/callback), put GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET in .dev.vars, then `npx wrangler secret put GITHUB_CLIENT_ID` and `npx wrangler secret put GITHUB_CLIENT_SECRET`
+  register an OAuth app with github (callback https://<your host>/auth/github/callback), put GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET in .dev.vars and their production values in .prod.vars, then `ocre secrets push GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET --file .prod.vars`
 ```
 
-In an API-only app, only the JSON part is generated: `create_users` and `create_api_keys` migrations, the `user` and `api_key` models, `src/auth_api.rs` and the rate limiter in `wrangler.toml`; the last next step is a `curl -X POST http://localhost:8787/api/auth/signup ...` command.
+In an API-only app, only the JSON part is generated: `create_users` and `create_api_keys` migrations, the `user` and `api_key` models, `src/auth_api.rs` and the rate limiter in `cloudflare.config.ts`; the last next step is a `curl -X POST http://localhost:8787/api/auth/signup ...` command.
 
 Errors:
 
@@ -770,7 +770,7 @@ ocre g job <NAME> [FIELDS]... [--queue <QUEUE>]
 | `FIELDS` | no | The job's arguments as `name:type`; no `attachment`, no `^` |
 | `--queue <QUEUE>` | no | The queue the job is sent to, lowercase letters, digits and `-` (default `default`): its own Cloudflare queue and consumer, for jobs that must not wait behind others |
 
-Creates `src/jobs/<name>.rs`: a struct holding the arguments (serialized as JSON in the queue message, 128 KB at most) with `fn perform_later(self, ctx)`, which sends it to its queue, and an `async fn perform(self, ctx: &Ctx) -> Result<()>` to fill in. It adds a variant to the `Job` enum and an arm to the `perform` match in `src/jobs/mod.rs`. The first job creates `src/jobs/mod.rs`, adds `mod jobs;` and the Worker's `queue` event to `src/lib.rs`, and, unless a `JOBS` producer exists, appends to `wrangler.toml` the `JOBS` producer on the queue `<app>-jobs` and its consumer (batches of up to 10 messages, 5 retries, dead-letter queue `<app>-jobs-failed`). `--queue urgent` also appends, unless a `JOBS_URGENT` producer exists, the producer `JOBS_URGENT` on `<app>-jobs-urgent` and its consumer (`max_batch_timeout = 1`, dead-letter queue `<app>-jobs-urgent-failed`).
+Creates `src/jobs/<name>.rs`: a struct holding the arguments (serialized as JSON in the queue message, 128 KB at most) with `fn perform_later(self, ctx)`, which sends it to its queue, and an `async fn perform(self, ctx: &Ctx) -> Result<()>` to fill in. It adds a variant to the `Job` enum and an arm to the `perform` match in `src/jobs/mod.rs`. The first job creates `src/jobs/mod.rs`, adds `mod jobs;` and the Worker's `queue` event to `src/lib.rs`, and, unless a `JOBS` producer exists, adds to `cloudflare.config.ts` the `JOBS: bindings.queue({ name: "<app>-jobs" })` producer (after `// ocre:env`) and its `triggers.queue(...)` consumer (after `// ocre:triggers`) (batches of up to 10 messages, 5 retries, dead-letter queue `<app>-jobs-failed`). `--queue urgent` also adds, unless a `JOBS_URGENT` binding exists, `JOBS_URGENT: bindings.queue({ name: "<app>-jobs-urgent" })` and its consumer (`maxBatchTimeout: 1`, dead-letter queue `<app>-jobs-urgent-failed`).
 
 ```sh
 ocre g job SendWelcome user_id:integer
@@ -780,7 +780,7 @@ ocre g job SendWelcome user_id:integer
   create  src/jobs/send_welcome.rs
   create  src/jobs/mod.rs
   update  src/lib.rs
-  update  wrangler.toml
+  update  cloudflare.config.ts
 
 Next:
   enqueue it from a handler: jobs::SendWelcome { user_id }.perform_later(&ctx).await?
@@ -789,10 +789,10 @@ Next:
 ```
 
 ```json
-{"command":"generate job","created":["src/jobs/send_welcome.rs","src/jobs/mod.rs"],"next":["enqueue it from a handler: jobs::SendWelcome { user_id }.perform_later(&ctx).await?","ocre dev (jobs run locally; look for `[ocre jobs]` lines in the output)","ocre deploy creates the queue blog-jobs and its dead-letter queue"],"ok":true,"updated":["src/lib.rs","wrangler.toml"]}
+{"command":"generate job","created":["src/jobs/send_welcome.rs","src/jobs/mod.rs"],"next":["enqueue it from a handler: jobs::SendWelcome { user_id }.perform_later(&ctx).await?","ocre dev (jobs run locally; look for `[ocre jobs]` lines in the output)","ocre deploy creates the queue blog-jobs and its dead-letter queue"],"ok":true,"updated":["src/lib.rs","cloudflare.config.ts"]}
 ```
 
-Later jobs only create their file and update `src/jobs/mod.rs`; a `deploy creates the queue` step is printed for each queue a run adds to `wrangler.toml`. Free plan (September 2026): 10,000 Queues operations a day, a job costing 3 (write, read, delete), and 10 ms of CPU per batch ([Queues pricing](https://developers.cloudflare.com/queues/platform/pricing/), [Workers limits](https://developers.cloudflare.com/workers/platform/limits/#cpu-time)).
+Later jobs only create their file and update `src/jobs/mod.rs`; a `deploy creates the queue` step is printed for each queue a run adds to `cloudflare.config.ts`. Free plan (September 2026): 10,000 Queues operations a day, a job costing 3 (write, read, delete), and 10 ms of CPU per batch ([Queues pricing](https://developers.cloudflare.com/queues/platform/pricing/), [Workers limits](https://developers.cloudflare.com/workers/platform/limits/#cpu-time)).
 
 Errors:
 
@@ -818,7 +818,7 @@ ocre g schedule <NAME> <WHEN>
 | `NAME` | yes | Task name in snake_case (`HourlyPing` is accepted and becomes `hourly_ping`); not a reserved word |
 | `WHEN` | yes | When, in UTC, quoted for the shell: plain English (`"every 15 minutes"`, `"every day at 3am"`, `"every monday at 9:30"`, `"midnight on tuesdays"`, `"every weekday at 18:00"`, `"monthly"`) or a cron expression of five fields (minute, hour, day of month, month, day of week): `"0 3 * * *"` |
 
-Creates `src/schedules/<name>.rs` with `pub async fn run(ctx: &Ctx) -> Result<()>` to fill in (its comment keeps the English phrase), adds the cron expression to `[triggers] crons` in `wrangler.toml` (creating the table if needed), and adds `"<cron>" => <name>::run(&ctx).await,` to the dispatch `match` of `src/schedules/mod.rs`. The first schedule creates `src/schedules/mod.rs` and adds `mod schedules;` and the Worker's `scheduled` event to `src/lib.rs`. English phrases are converted to cron (the full list is in [When: English or cron](../guides/jobs.md#when-english-or-cron)); for a cron expression the CLI checks its shape (five fields of letters, digits and `*,-/#`), not its values; Cloudflare validates it at deploy ([syntax](https://developers.cloudflare.com/workers/configuration/cron-triggers/#supported-cron-expressions)).
+Creates `src/schedules/<name>.rs` with `pub async fn run(ctx: &Ctx) -> Result<()>` to fill in (its comment keeps the English phrase), adds `triggers.scheduled({ schedule: "<cron>" }),` after the `// ocre:triggers` marker of `cloudflare.config.ts`, and adds `"<cron>" => <name>::run(&ctx).await,` to the dispatch `match` of `src/schedules/mod.rs`. The first schedule creates `src/schedules/mod.rs` and adds `mod schedules;` and the Worker's `scheduled` event to `src/lib.rs`. English phrases are converted to cron (the full list is in [When: English or cron](../guides/jobs.md#when-english-or-cron)); for a cron expression the CLI checks its shape (five fields of letters, digits and `*,-/#`), not its values; Cloudflare validates it at deploy ([syntax](https://developers.cloudflare.com/workers/configuration/cron-triggers/#supported-cron-expressions)).
 
 ```sh
 ocre g schedule nightly_cleanup "every day at 3am"
@@ -827,7 +827,7 @@ ocre g schedule nightly_cleanup "every day at 3am"
 ```text
   create  src/schedules/nightly_cleanup.rs
   create  src/schedules/mod.rs
-  update  wrangler.toml
+  update  cloudflare.config.ts
   update  src/lib.rs
 
 Next:
@@ -836,7 +836,7 @@ Next:
 ```
 
 ```json
-{"command":"generate schedule","created":["src/schedules/nightly_cleanup.rs","src/schedules/mod.rs"],"next":["ocre dev, then: ocre schedules run nightly_cleanup","ocre deploy (Cron Triggers only fire on the deployed Worker; this one runs at `0 3 * * *`, UTC)"],"ok":true,"updated":["wrangler.toml","src/lib.rs"]}
+{"command":"generate schedule","created":["src/schedules/nightly_cleanup.rs","src/schedules/mod.rs"],"next":["ocre dev, then: ocre schedules run nightly_cleanup","ocre deploy (Cron Triggers only fire on the deployed Worker; this one runs at `0 3 * * *`, UTC)"],"ok":true,"updated":["cloudflare.config.ts","src/lib.rs"]}
 ```
 
 Free plan (September 2026): 5 Cron Triggers per account and 10 ms of CPU per run ([Workers limits](https://developers.cloudflare.com/workers/platform/limits/)). When the app's `[triggers] crons` holds more than 5 expressions, the generator adds a next step: `this app now has 6 crons; the free plan allows 5 per account: run several tasks from one cron`.
@@ -848,7 +848,8 @@ Errors:
 | ``invalid schedule name `<name>` `` | ``use snake_case starting with a letter, not a Rust keyword, e.g. `nightly_cleanup` `` |
 | ``invalid schedule `every 15 seconds` `` | The accepted English phrases and the cron form, and that Cron Triggers run at most once a minute |
 | ``cron `0 3 * * *` is already in [triggers] crons`` | `one task per cron: call the new work from the existing task in src/schedules/, or pick another time (e.g. one minute later)` |
-| ``wrangler.toml defines `triggers` in a form Ocre cannot edit`` | ``write it as a table: `[triggers]` on its own line, then `crons = ["0 3 * * *"]` `` |
+| ``cron `0 3 * * *` is already scheduled in cloudflare.config.ts`` | `one task per cron: call the new work from the existing task in src/schedules/, or pick another time (e.g. one minute later)` |
+| ``cloudflare.config.ts is missing the `// ocre:triggers` marker`` | ``put `// ocre:triggers` on its own line inside `worker.triggers`: Ocre adds its entries after it`` |
 | ``src/lib.rs already handles the `scheduled` event`` (first schedule only) | ``a Worker has one scheduled entry point: call `ocre::jobs::cron(event, env, schedules::run)` from it and create src/schedules/mod.rs by hand`` |
 
 See [Background jobs and schedules](../guides/jobs.md).
@@ -859,14 +860,14 @@ See [Background jobs and schedules](../guides/jobs.md).
 ocre g cache
 ```
 
-No arguments. Appends a `[[kv_namespaces]]` entry with `binding = "CACHE"` and no `id` to `wrangler.toml`, for `ocre::cache::fetch` (a read-through cache of JSON values). `ocre dev` uses a local namespace; the first [`ocre deploy`](cli.md#ocre-deploy) creates the real one (titled `<app>-cache`) and writes its `id` into `wrangler.toml`. The binding is opt-in because Workers KV allows 1,000 writes a day on the free plan (September 2026; 100,000 reads a day, 1 GB stored, [KV limits](https://developers.cloudflare.com/kv/platform/limits/)).
+No arguments. Adds `CACHE: bindings.kv(),` (no `id`) after the `// ocre:env` marker of `cloudflare.config.ts`, for `ocre::cache::fetch` (a read-through cache of JSON values). `ocre dev` uses a local namespace; the first [`ocre deploy`](cli.md#ocre-deploy) creates the real one (titled `<app>-cache`) and writes its `id` into the entry (`CACHE: bindings.kv({ id: "<id>" }),`). The binding is opt-in because Workers KV allows 1,000 writes a day on the free plan (September 2026; 100,000 reads a day, 1 GB stored, [KV limits](https://developers.cloudflare.com/kv/platform/limits/)).
 
 ```sh
 ocre g cache
 ```
 
 ```text
-  update  wrangler.toml
+  update  cloudflare.config.ts
 
 Next:
   use it: ocre::cache::fetch(&ctx, "key:v1", Duration::from_secs(3600), || async { ... }).await?
@@ -875,10 +876,10 @@ Next:
 ```
 
 ```json
-{"command":"generate cache","next":["use it: ocre::cache::fetch(&ctx, \"key:v1\", Duration::from_secs(3600), || async { ... }).await?","ocre dev","ocre deploy (creates the KV namespace)"],"ok":true,"updated":["wrangler.toml"]}
+{"command":"generate cache","next":["use it: ocre::cache::fetch(&ctx, \"key:v1\", Duration::from_secs(3600), || async { ... }).await?","ocre dev","ocre deploy (creates the KV namespace)"],"ok":true,"updated":["cloudflare.config.ts"]}
 ```
 
-Error: ``wrangler.toml already has the `CACHE` KV binding`` with the hint ``nothing to generate: call `ocre::cache::fetch(&ctx, key, ttl, || async { ... })` in a handler``. See [Caching](../guides/caching.md).
+Error: ``cloudflare.config.ts already has the `CACHE` binding`` with the hint ``nothing to generate: call `ocre::cache::fetch(&ctx, key, ttl, || async { ... })` in a handler``. See [Caching](../guides/caching.md).
 
 ## ocre g locale
 

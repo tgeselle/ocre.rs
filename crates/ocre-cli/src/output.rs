@@ -52,7 +52,7 @@ pub struct Report {
     /// Steps a database command performed, in order.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ran: Vec<String>,
-    /// `ocre sql`: wrangler's JSON, one object with `results` per statement.
+    /// `ocre sql`: the D1 query result, one object with `results` per statement.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rows: Option<serde_json::Value>,
     /// `ocre routes`: the app's routes, sorted by path then method.
@@ -218,6 +218,9 @@ fn print_human(report: &Report) {
     }
     for step in &report.ran {
         println!("  {step}");
+    }
+    for name in &report.pending {
+        println!("  pending  {name}");
     }
     if let Some(routes) = &report.routes {
         print!("{}", crate::routes::table(routes));

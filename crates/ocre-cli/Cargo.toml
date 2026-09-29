@@ -13,7 +13,7 @@ autotests = false
 name = "ocre"
 path = "src/main.rs"
 
-# Commands against a fake wrangler (tests/support/fake_npx.sh).
+# Commands against fake cf, wrangler, npm and node (tests/support/fake_cf.sh).
 [[test]]
 name = "cli"
 path = "tests/integration/cli.rs"
@@ -63,8 +63,6 @@ path = "tests/integration/models.rs"
 name = "wizard"
 path = "tests/integration/wizard.rs"
 
-# Generated apps on workerd (`wrangler dev`); ignored by default, run locally with
-# `cargo test -p ocre-cli --test e2e -- --ignored`.
 [[test]]
 name = "generators"
 path = "tests/integration/generators.rs"
@@ -77,6 +75,8 @@ path = "tests/integration/commands.rs"
 name = "secrets"
 path = "tests/integration/secrets.rs"
 
+# Generated apps on workerd (the real `cf dev`); ignored by default, run locally with
+# `cargo test -p ocre-cli --test e2e -- --ignored`.
 [[test]]
 name = "e2e"
 path = "tests/system/e2e.rs"
@@ -85,6 +85,7 @@ path = "tests/system/e2e.rs"
 clap = { version = "4.6.7", features = ["derive"] }
 cliclack = "0.5.6"
 getrandom = "0.4.3"
+json5 = "1.3.1"
 minijinja = { version = "2.24.0", default-features = false, features = ["builtins", "custom_syntax", "serde"] }
 # Locale files are checked with the parser the Worker uses (`ocre::i18n::check`).
 ocre = { path = "../ocre", default-features = false }

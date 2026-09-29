@@ -3,18 +3,16 @@ use crate::{Ctx, Error, Result};
 /// Counts one request for `key` against the Workers Rate Limiting binding `binding`; 429 when over the limit.
 ///
 /// Rails' `rate_limit to: 10, within: 1.minute, by: ...`: the limit and the
-/// period are set on the binding in `wrangler.toml` (`period` is 10 or 60
+/// period are set on the binding in `cloudflare.config.ts` (`period` is 10 or 60
 /// seconds), the key is chosen per call, e.g. `login:<client ip>` or
 /// `api:<user id>`. `ocre g auth` adds an `AUTH_RATE_LIMITER` binding and
 /// calls this (through the generated `throttle`) in every route that checks
 /// a password or sends an email: login, sign-up, magic link, password reset,
 /// email confirmation, token and account deletion.
 ///
-/// ```toml
-/// [[ratelimits]]
-/// name = "AUTH_RATE_LIMITER"
-/// namespace_id = "1001"   # any integer unique in your account
-/// simple = { limit = 10, period = 60 }
+/// ```ts
+/// // worker.env; `namespace`: any integer unique in your account
+/// AUTH_RATE_LIMITER: bindings.rateLimit({ namespace: "1001", simple: { limit: 10, period: 60 } }),
 /// ```
 ///
 /// Counters are per Cloudflare location and eventually consistent: a limit,
@@ -29,7 +27,7 @@ use crate::{Ctx, Error, Result};
 /// # Errors
 ///
 /// - [`Error::TooManyRequests`] (429) when `key` is over the limit.
-/// - [`Error::Internal`] when the binding is missing from `wrangler.toml`
+/// - [`Error::Internal`] when the binding is missing from `cloudflare.config.ts`
 ///   (message names the fix) or the call fails.
 ///
 /// # Examples
@@ -48,8 +46,8 @@ use crate::{Ctx, Error, Result};
 pub async fn rate_limit(ctx: &Ctx, binding: &str, key: &str) -> Result<()> {
     let limiter = ctx.env().rate_limiter(binding).map_err(|err| {
         Error::internal(format!(
-            "rate limiting binding `{binding}` is missing ({err}). Fix: add to wrangler.toml\n\
-             [[ratelimits]]\nname = \"{binding}\"\nnamespace_id = \"1001\"\nsimple = {{ limit = 10, period = 60 }}"
+            "rate limiting binding `{binding}` is missing ({err}). Fix: add to worker.env in cloudflare.config.ts\n\
+             {binding}: bindings.rateLimit({{ namespace: \"1001\", simple: {{ limit: 10, period: 60 }} }}),"
         ))
     })?;
     let outcome = limiter.limit(key.to_owned()).await?;

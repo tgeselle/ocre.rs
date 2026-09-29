@@ -4,7 +4,7 @@ Rails-like Rust web framework for Cloudflare Workers, designed to run on the
 Workers **free plan** and to be written by **AI agents**.
 
 Status: early. The core crate, the `ocre` CLI and an example app run with
-`wrangler dev` and in production on the free plan, including auth, background
+`ocre dev` (Cloudflare's `cf dev`) and in production on the free plan, including auth, background
 jobs, email and realtime; [ROADMAP.md](ROADMAP.md) lists what is missing.
 
 ## Quick start
@@ -22,7 +22,7 @@ ocre new my-app --starter blog --git --deploy --json
 cd my-app
 ocre g scaffold Comment author:string body:text
 ocre dev       # applies local migrations, serves http://localhost:8787
-ocre deploy    # deploys, creates the D1 database if needed, applies remote migrations
+ocre deploy    # creates the D1 database if needed, applies remote migrations, deploys
 ```
 
 Each generated app has an `AGENTS.md` with the conventions, commands and
@@ -48,31 +48,31 @@ explanations, each page also as Markdown (`<page>.md`), with
 | `ocre g mailer <Name> action...` | `src/mailers/<name>.rs`, one function per action returning an `ocre::mail::Email`, with `templates/mailers/<name>/<action>.{txt,html}` extending shared layouts (text built with `format!` in API-only apps); `src/mailers/mod.rs` holds app-wide `defaults` and the `PREVIEWS` served at `/ocre/dev/mailers` |
 | `ocre g mailbox` | `src/mailbox.rs` for incoming email, wired to the Worker's `email` event in `src/lib.rs` |
 | `ocre g job <Name> [field:type...] [--queue <name>]` | `src/jobs/<name>.rs` (arguments + `perform`), added to the `Job` enum and `perform` match in `src/jobs/mod.rs`; the first job wires the `JOBS` queue and the `queue` event; `--queue urgent` sends it to its own queue `<app>-jobs-urgent` (see [Background jobs](#background-jobs-and-scheduled-tasks)) |
-| `ocre g schedule <name> "<when>"` | `src/schedules/<name>.rs`, run by a Cron Trigger added to `[triggers] crons`, dispatched by cron in `src/schedules/mod.rs`; `<when>` is plain English (`"every day at 3am"`, `"every 15 minutes"`) or a cron expression; the first one wires the `scheduled` event |
-| `ocre g cache` | Adds the `CACHE` Workers KV binding to `wrangler.toml` for `ocre::cache::fetch` (see [Caching](#caching)) |
+| `ocre g schedule <name> "<when>"` | `src/schedules/<name>.rs`, run by a Cron Trigger added to `cloudflare.config.ts` (`triggers.scheduled`), dispatched by cron in `src/schedules/mod.rs`; `<when>` is plain English (`"every day at 3am"`, `"every 15 minutes"`) or a cron expression; the first one wires the `scheduled` event |
+| `ocre g cache` | Adds the `CACHE` Workers KV binding to `cloudflare.config.ts` for `ocre::cache::fetch` (see [Caching](#caching)) |
 | `ocre g locale <code>...` | `locales/<code>.yml` per code, declared in `ocre::locales!(...)` in `src/lib.rs`; the first run makes its first code the default locale and adds the `I18n` layer to `routes()` (see [Translations](#translations)) |
 | `ocre g override [path...]` | Copies generator templates (`controller/view.html`, or all of `controller`) into `.ocre/templates/`, which replace the built-in ones until deleted; without paths, lists them |
 | `ocre g generator <name>` / `ocre g <name> <Name> [args...]` | An app generator in `.ocre/generators/<name>/` (templated files and marker insertions), then runs it |
 | `ocre g ... --pretend` / `--force` / `--skip` | Every generator: show without writing / overwrite existing files / keep them. Runs are recorded in `.ocre/generated/` |
-| `ocre destroy <generator> [Name]` (`ocre d`) | Undoes a recorded generator run: deletes its files, removes the lines it added (Cargo.toml and wrangler.toml stay); `--pretend`, `--force` |
+| `ocre destroy <generator> [Name]` (`ocre d`) | Undoes a recorded generator run: deletes its files, removes the lines it added (Cargo.toml, cloudflare.config.ts and package.json stay); `--pretend`, `--force` |
 | `ocre template <file or URL>` | Applies an application template: one ocre command per line (generators, `migrate`, `cargo add`...), local commands only |
 | `ocre migrate [--remote]` | Apply D1 migrations |
-| `ocre migrate --status [--remote]` | Show wrangler's pending-migrations table; `--json` lists them in `pending` |
+| `ocre migrate --status [--remote]` | Show the pending migrations; `--json` lists them in `pending` |
 | `ocre db seed [--remote] [--replant]` | Run `db/seeds.sql`; `--replant` (local) empties the tables first |
 | `ocre db reset` | Local only: delete `.wrangler/state/v3/d1`, apply migrations, run `db/seeds.sql` if present |
 | `ocre db create [--remote]` / `db prepare` | Create the database (remote: the D1 database when missing) / local, safe to repeat: migrate, seed a new database |
 | `ocre db drop` / `db truncate` | Local only: delete the local database / delete every row, keep tables and migrations |
 | `ocre db version [--remote]` / `db schema [--remote]` | Last applied migration / write the `CREATE` statements to `db/schema.sql` |
-| `ocre sql "<query>" [--remote]` | Run SQL and print the rows as a table; `--json` returns wrangler's results in `rows` |
-| `ocre dev [--port N]` | Checks locale files, applies local migrations, then `wrangler dev` |
-| `ocre test [--e2e] [-- args]` | `cargo test`, then the wasm32 check; `--e2e` also runs `tests/e2e.sh` against a `wrangler dev` started for the run (`BASE_URL`) |
-| `ocre deploy` | Existing database: migrate, then deploy. New database: deploy (creates it), then migrate. Uploads a new `SECRET_KEY_BASE` only when the Worker has none (an existing one is never rotated). Creates the queues `wrangler.toml` names when missing, the KV namespaces without an `id` (then writes the id into `wrangler.toml`), and the R2 buckets of `[[r2_buckets]]` when missing. Refuses locale files the Worker could not load |
+| `ocre sql "<query>" [--remote]` | Run SQL and print the rows as a table; `--json` returns D1's results in `rows` |
+| `ocre dev [--port N]` | Checks locale files, applies local migrations, then `cf dev` |
+| `ocre test [--e2e] [-- args]` | `cargo test`, then the wasm32 check; `--e2e` also runs `tests/e2e.sh` against a `cf dev` started for the run (`BASE_URL`) |
+| `ocre deploy` | Creates what `cloudflare.config.ts` names and Cloudflare lacks (the D1 database, queues, KV namespaces without an `id`, whose id it then writes into the file, R2 buckets), uploads a new `SECRET_KEY_BASE` only when the Worker has none (an existing one is never rotated), applies remote migrations, then runs `cf deploy`. Refuses locale files the Worker could not load |
 | `ocre i18n missing` | Keys of the default locale missing from other locales (with the plural forms each language needs), undeclared or invalid locale files; fails when there is any |
 | `ocre routes [filter]` | The app's routes (method, path, handler), read from `src/lib.rs` and the modules it merges; `--json` returns `routes` |
-| `ocre schedules` / `ocre schedules run <task> [--port N]` | The crons of `wrangler.toml` and their tasks (`--json` returns `schedules`); `run` fires one task on the running `ocre dev` through wrangler's local scheduled endpoint |
+| `ocre schedules` / `ocre schedules run <task> [--port N]` | The crons of `cloudflare.config.ts` and their tasks (`--json` returns `schedules`); `run` fires one task on the running `ocre dev` through the dev server's local scheduled endpoint |
 | `ocre secret` | New random `SECRET_KEY_BASE` value (128 hex characters), like `rails secret` |
-| `ocre secrets list` / `ocre secrets push NAME... [--file F]` | Secret names in `.dev.vars` and on the deployed Worker / upload values from a git-ignored file in one `wrangler secret bulk` |
-| `ocre doctor` | Checks the wasm target, Node.js, the login, bindings for what the code uses, pending migrations and secrets; fails on a failed check |
+| `ocre secrets list` / `ocre secrets push NAME... [--file F]` | Secret names in `.dev.vars` and on the deployed Worker / upload values from a git-ignored file (`.prod.vars`) in one `cf workers secrets bulk` |
+| `ocre doctor` | Checks the wasm target, Node.js 22+, the pinned npm packages, the login, `cloudflare.config.ts` (cf's loader and `tsc`), bindings for what the code uses, pending migrations and secrets; fails on a failed check |
 | `ocre about` / `ocre version` | Versions, mode, bindings, variable names and Ocre features / CLI and app versions |
 | `ocre stats [dir...]` / `ocre notes [--annotations T,U]` | Lines of code per part of the app / TODO, FIXME, OPTIMIZE comments |
 
@@ -88,6 +88,7 @@ explanations, each page also as Markdown (`<page>.md`), with
 | `--deploy` / `--no-deploy` | Deploy right away (implies `--login`) | no deploy |
 | `--yes`, `-y` | Never prompt, even in a terminal | |
 | `--ocre-path <dir>` | Use a local `crates/ocre` instead of the git dependency | git |
+| `--no-install` | Skip the `npm install` of the app's pinned `cf`, `wrangler` and `typescript` (run it yourself before `ocre dev`) | install |
 | `--template <file or URL>`, `-m` | Apply an application template to the new app (see `ocre template`) | none |
 
 Field types: `string`, `text`, `integer`, `float`, `decimal` (exact, as
@@ -176,7 +177,7 @@ scaffold` generates JSON APIs there. The mode is stored in `Cargo.toml` as
 Contract for agents: with `--json` (or without a terminal) commands never
 prompt, and stdout carries exactly one JSON object, `{"ok": true, "command",
 "created", "updated", "url", "email", "next"}` or `{"ok": false, "error",
-"hint"}`; wrangler output goes to stderr. Exit code is 0 on success, 1 on
+"hint"}`; the output of cf, wrangler and cargo goes to stderr. Exit code is 0 on success, 1 on
 failure. Generators never overwrite files.
 
 ## Web
@@ -227,16 +228,16 @@ and forms with htmx (`hx-boost`), and the index pages paginate with
 
 `ocre::mail::send(&ctx, Email::new(to, subject, text).html(html)).await?`
 sends from the `MAIL_FROM` variable (`noreply@yourdomain.com` or
-`Name <noreply@yourdomain.com>`; `ocre new` puts a placeholder under `[vars]`
-in `wrangler.toml`). The `MAIL_ADAPTER` variable names the adapter; nothing is
+`Name <noreply@yourdomain.com>`; `ocre new` puts a placeholder,
+`MAIL_FROM: bindings.text(...)` in `cloudflare.config.ts`). The `MAIL_ADAPTER` variable names the adapter; nothing is
 guessed from which keys happen to be set, so a development machine holding a
 real API key still never sends by accident:
 
 | `MAIL_ADAPTER` | Delivery | Configuration | Free-plan limits (September 2026) |
 |---|---|---|---|
-| `log` | Prints the whole email (headers, text, HTML, one line per attachment) to the Worker console between `[ocre mail]` lines, like Rails' letter_opener; in `ocre dev` it keeps the last 20 for `/ocre/dev/mailers`. `ocre new` writes `MAIL_ADAPTER=log` to `.dev.vars`, which overrides `[vars]` in `ocre dev` | none | none |
-| `resend` | `POST https://api.resend.com/emails` | `RESEND_API_KEY` secret (`npx wrangler secret put RESEND_API_KEY`), `MAIL_FROM` on a domain verified in Resend | [Resend free plan](https://resend.com/docs/knowledge-base/account-quotas-and-limits): 100 emails a day, 3,000 a month, one domain; any recipient |
-| `cloudflare` | Cloudflare Email Service through the `EMAIL` [send_email binding](https://developers.cloudflare.com/email-service/api/send-emails/workers-api/) (uncomment `[[send_email]]` in `wrangler.toml`; `ocre dev` simulates it) | `MAIL_FROM` on a domain onboarded to Email Service | [Workers Free](https://developers.cloudflare.com/email-service/platform/pricing/): only verified destination addresses of the account (fine for mail to yourself); any recipient needs Workers Paid (3,000 a month included, then $0.35 per 1,000) |
+| `log` | Prints the whole email (headers, text, HTML, one line per attachment) to the Worker console between `[ocre mail]` lines, like Rails' letter_opener; in `ocre dev` it keeps the last 20 for `/ocre/dev/mailers`. `ocre new` writes `MAIL_ADAPTER=log` to `.dev.vars`, which overrides the `cloudflare.config.ts` value in `ocre dev` | none | none |
+| `resend` | `POST https://api.resend.com/emails` | `RESEND_API_KEY` secret (`ocre secrets push RESEND_API_KEY --file .prod.vars`), `MAIL_FROM` on a domain verified in Resend | [Resend free plan](https://resend.com/docs/knowledge-base/account-quotas-and-limits): 100 emails a day, 3,000 a month, one domain; any recipient |
+| `cloudflare` | Cloudflare Email Service through the `EMAIL` [send_email binding](https://developers.cloudflare.com/email-service/api/send-emails/workers-api/) (uncomment `EMAIL: bindings.sendEmail()` in `cloudflare.config.ts`; `ocre dev` simulates it) | `MAIL_FROM` on a domain onboarded to Email Service | [Workers Free](https://developers.cloudflare.com/email-service/platform/pricing/): only verified destination addresses of the account (fine for mail to yourself); any recipient needs Workers Paid (3,000 a month included, then $0.35 per 1,000) |
 
 With `MAIL_ADAPTER` unset, `send` fails with an internal error that names the
 fix, so a production Worker never drops mail silently. For signup and
@@ -306,7 +307,7 @@ notes:attachment?` generates:
 | `create` / `update` / `delete` | Store new files under `photos/image/<random>`, then write the row; files are deleted again if the write fails, replaced or removed files after it succeeds, and a deleted record's files with it |
 | HTML forms | `enctype="multipart/form-data"`, a file input per attachment, "Remove notes" on the edit page for optional files; the form's request limit is the sum of its files' limits plus 1 MB (larger: 413) |
 | `GET /photos/{id}/image` | Streams the file: `Content-Type`, `Content-Length`, `Content-Disposition` with the original name, `ETag` and 304, `Range` (206/416), `Cache-Control: private, no-cache` |
-| `wrangler.toml` | `[[r2_buckets]] binding = "STORAGE"`, `bucket_name = "<app>-storage"`, added by the first generator that needs it |
+| `cloudflare.config.ts` | `STORAGE: bindings.r2({ name: "<app>-storage" })`, added by the first generator that needs it |
 
 `ocre g api Document name:string file:attachment?` adds `GET`, `PUT`
 (multipart, `curl -X PUT -F file=@spec.pdf`) and `DELETE` on
@@ -345,7 +346,7 @@ Choices, for the free plan:
   `application/octet-stream`. The content type comes from the browser: the
   allowlist limits it, nothing sniffs file contents. Serving routes are as
   protected as the handler you put around them.
-- **Local development**: `ocre dev` keeps objects in `.wrangler/state` (wrangler's R2 simulation).
+- **Local development**: `ocre dev` keeps objects in `.wrangler/state` (the local R2 simulation).
 
 Not included: presigned URLs and direct browser-to-R2 uploads (they need R2
 S3 API credentials and SigV4 signing), public buckets and custom domains
@@ -363,7 +364,7 @@ The app's Worker is both the producer and the consumer of its queues:
 (a serde struct with the arguments and `async fn perform(self, ctx: &Ctx)`)
 and adds it to `src/jobs/mod.rs`: a `Job` enum and a `perform` function that
 matches on it, so dispatch is plain code, not a registry. The first job also
-adds the queue to `wrangler.toml` and this entry point to `src/lib.rs`:
+adds the queue to `cloudflare.config.ts` and this entry point to `src/lib.rs`:
 
 ```rust
 #[worker::event(queue)]
@@ -413,7 +414,7 @@ queue that the first `ocre g job` wires.
 
 `ocre g schedule nightly_cleanup "every day at 3am"` writes
 `src/schedules/nightly_cleanup.rs` (`async fn run(ctx: &Ctx)`), adds the
-expression (`0 3 * * *`) to `[triggers] crons` in `wrangler.toml` and a match arm to
+expression (`0 3 * * *`) as `triggers.scheduled` in `cloudflare.config.ts` and a match arm to
 `src/schedules/mod.rs`; the first schedule adds the `scheduled` entry point,
 which calls `ocre::jobs::cron(event, env, schedules::run)`. The schedule is
 plain English (`"every 15 minutes"`, `"every weekday at 6pm"`, `"midnight on
@@ -421,7 +422,7 @@ tuesdays"`, `"monthly"`) or a cron expression
 ([syntax](https://developers.cloudflare.com/workers/configuration/cron-triggers/#supported-cron-expressions));
 times are UTC. A failed run is logged (`[ocre cron] ... failed`) and not
 retried. `ocre schedules` lists the crons and their tasks. Locally,
-`wrangler dev` runs the queue in-process, and a cron fires on request, from
+`ocre dev` runs the queue in-process, and a cron fires on request, from
 another terminal while `ocre dev` runs:
 
 ```sh
@@ -429,8 +430,8 @@ ocre schedules run nightly_cleanup
 curl 'http://localhost:8787/cdn-cgi/local/scheduled?cron=0+3+*+*+*'   # the same
 ```
 
-`ocre deploy` runs `wrangler queues info` for every queue named in
-`wrangler.toml` and `wrangler queues create` for the missing ones, before
+`ocre deploy` lists the account's queues (`cf queues list`) and creates every
+queue named in `cloudflare.config.ts` that is missing, before
 deploying (a consumer of a missing queue fails the deploy); `--json` lists them
 in `provisioned`.
 
@@ -467,7 +468,7 @@ and change, and the framework only provides small primitives.
 | `src/confirmations.rs` | yes | | email confirmation: `POST /confirmations`, `GET/POST /confirmations/{token}` |
 | `templates/auth/*.html` | yes | | the pages |
 | `src/auth_api.rs` | yes | yes | `BearerUser`, `throttle`; `POST /api/auth/signup`, `POST /api/auth/token` (JWT, 1 hour), `GET/DELETE /api/auth/me`, `GET/POST /api/auth/keys`, `DELETE /api/auth/keys/{id}` |
-| `wrangler.toml` | yes | yes | the `AUTH_RATE_LIMITER` binding: 10 attempts a minute per IP address on every route that checks a password or sends an email |
+| `cloudflare.config.ts` | yes | yes | the `AUTH_RATE_LIMITER` binding: 10 attempts a minute per IP address on every route that checks a password or sends an email |
 
 Options (full-stack apps): `--db-sessions` keeps each session in D1
 (`user_sessions`: IP, browser, last activity) with `/account/sessions` to see
@@ -569,20 +570,17 @@ POST /posts ──> create ──> ocre::realtime::broadcast(&ctx, "posts", html
   with `id="post_12"`, shared by the index and broadcasts), the index wrapped
   in `ws-connect`, a broadcast after create (`prepend`), update (the row) and
   delete (`remove`) in the controller, and on first use Ocre's `realtime`
-  feature in `Cargo.toml`, `src/realtime.rs` and this in `wrangler.toml`:
+  feature in `Cargo.toml`, `src/realtime.rs` and this in `cloudflare.config.ts`:
 
-```toml
-[[durable_objects.bindings]]
-name = "CHANNELS"
-class_name = "OcreChannel"
-
-[[migrations]]
-tag = "ocre-realtime-v1"
-new_sqlite_classes = ["OcreChannel"]
+```ts
+// worker.env
+CHANNELS: bindings.durableObject({ worker: "blog", exportName: "OcreChannel" }),
+// worker.exports
+OcreChannel: exports.durableObject({ storage: "sqlite" }),
 ```
 
-`ocre deploy` needs no extra step: `wrangler deploy` creates the Durable
-Object namespace from the migration. `ocre dev` runs it locally (workerd
+`ocre deploy` needs no extra step: `cf deploy` creates the Durable
+Object namespace from the export. `ocre dev` runs it locally (workerd
 supports Durable Objects and WebSocket Hibernation).
 
 How it runs, and why it fits the free plan (limits of September 2026):
@@ -597,14 +595,14 @@ connected. It stores nothing.
 | [Durable Object requests](https://developers.cloudflare.com/durable-objects/platform/pricing/) | 100,000 a day | 1 per connection (and reconnection), 1 per broadcast; incoming messages count 1/20 (subscribers send none); messages to browsers are free |
 | Duration | 13,000 GB-s a day (128 MB objects: about 28 hours awake) | only while handling a connection or broadcast, a few milliseconds; hibernated sockets cost nothing |
 | Worker requests | 100,000 a day | 1 per connection; broadcasts are subrequests of the request that sends them |
-| [Durable Object limits](https://developers.cloudflare.com/durable-objects/platform/limits/) | SQLite-backed classes only; 32,768 WebSockets per object | `new_sqlite_classes`; one object per channel |
+| [Durable Object limits](https://developers.cloudflare.com/durable-objects/platform/limits/) | SQLite-backed classes only; 32,768 WebSockets per object | `storage: "sqlite"`; one object per channel |
 
 Broadcasts wait for the channel object (one subrequest, little CPU). The
 generated controller treats them as best effort: a failure is logged
 (`[ocre realtime] broadcast to posts failed: ...`) and the request still
 succeeds. Clients only listen; what they send is ignored. API-only apps can
 use the same pieces by hand: turn on the `realtime` feature, add the
-`wrangler.toml` entries above and a `connect` route, and broadcast JSON.
+`cloudflare.config.ts` entries above and a `connect` route, and broadcast JSON.
 
 ## Caching
 
@@ -627,10 +625,10 @@ let stats: Stats = ocre::cache::fetch(&ctx, "stats:v1", Duration::from_secs(3600
 ocre::cache::delete(&ctx, "stats:v1").await?; // after a change; also a write
 ```
 
-`ocre g cache` adds `[[kv_namespaces]] binding = "CACHE"` to
-`wrangler.toml`; `ocre dev` uses a local namespace and `ocre deploy` creates
+`ocre g cache` adds `CACHE: bindings.kv(),` to
+`cloudflare.config.ts`; `ocre dev` uses a local namespace and `ocre deploy` creates
 `<app>-cache` (or links an existing one with that title) and writes its `id`
-into `wrangler.toml`. The binding is not in `ocre new` apps because KV writes
+into `cloudflare.config.ts`. The binding is not in `ocre new` apps because KV writes
 are the scarcest free resource: a key refreshed every `ttl` seconds costs up to
 `86,400 / ttl` writes a day (a one-hour TTL is 24 writes per key, so about 40
 hot keys fit), and KV accepts TTLs of 60 seconds or more. Values are JSON; put a
@@ -661,7 +659,7 @@ this, and Ocre wraps neither:
   Ocre apps deploy by default, `put` does nothing. It is also local to one data
   center and the Worker still runs for every request.
 - [Workers Cache](https://developers.cloudflare.com/workers/cache/)
-  (`[cache] enabled = true` in `wrangler.toml`, Wrangler 4.69+) works on
+  (`cache: { enabled: true }` in `worker` of `cloudflare.config.ts`) works on
   `workers.dev` too and serves `CacheControl::public(..)` responses from
   Cloudflare's tiered cache: hits use no CPU. But on the free plan every hit
   still counts toward the 100,000 requests a day, and turning it on also counts
@@ -739,7 +737,7 @@ async fn index(i18n: I18n, session: Session) -> Result<Html<String>> {
 - One way to do each thing: SQL with `?N` placeholders and `params![...]`,
   askama templates compiled at build time, htmx for interactivity.
 - Errors name the fix (for example a missing `DB` binding says which
-  `wrangler.toml` entry to add). Internal errors are logged, never shown to users.
+  `cloudflare.config.ts` entry to add). Internal errors are logged, never shown to users.
 
 ## Layout
 
@@ -751,14 +749,14 @@ crates/ocre-cli/             `ocre` command-line tool
   src/                       commands and generators
   templates/                 files `ocre new` and the generators write
   tests/                     unit tests mirroring src/ (tests/generate/model.rs, ...)
-  tests/integration/         the `ocre` binary against a fake wrangler, and the terminal wizard
-  tests/system/              generated apps running on workerd (`wrangler dev`)
-  tests/support/             shared test helpers and the fake wrangler script
+  tests/integration/         the `ocre` binary against fake cf/wrangler/npm, and the terminal wizard
+  tests/system/              generated apps running on workerd (`cf dev`)
+  tests/support/             shared test helpers and the fake cf script
 docs/                        documentation site (mdBook), built by `cargo docs-site`
   src/                       pages: SUMMARY.md (order), getting-started/, guides/, reference/, explanations/
   api-index.md               one-page API index, generated from rustdoc
   tool/                      build/check/deploy tool (standalone crate, outside the workspace)
-  wrangler.toml              hosting: assets-only Worker (Workers Static Assets)
+  wrangler.toml              docs-site hosting: assets-only Worker (Workers Static Assets)
 ```
 
 Unit tests sit in `tests/` at the same path as the code they test, like
@@ -830,7 +828,11 @@ can reach private items while living apart from the code. Both crates set
 - Rust via **rustup** with the `wasm32-unknown-unknown` target
   (`rust-toolchain.toml` installs it). A Homebrew `rust` without rustup has no
   wasm target and the build fails.
-- Node.js (for `npx wrangler`).
+- Node.js 22 or newer with npm: each app pins Cloudflare's `cf` CLI (plus
+  `wrangler`, which cf delegates the build to, and `typescript`) in its
+  `package.json`, installed by `ocre new`. Apps made by an older Ocre (with a
+  `wrangler.toml`) convert with the
+  [upgrading guide](https://ocre-docs.raitomm.workers.dev/guides/upgrading.html).
 
 ## Try it
 
@@ -844,7 +846,7 @@ cd blog && ocre dev
 
 ```sh
 cargo test --workspace --all-features             # unit, CLI and terminal tests: ~5 s
-cargo test -p ocre-cli --test e2e -- --ignored   # real `wrangler dev`: ~20 s warm
+cargo test -p ocre-cli --test e2e -- --ignored   # real `cf dev`: ~20 s warm
 cargo llvm-cov --workspace --all-features \
   --ignore-filename-regex 'crates/ocre/src/runtime/' --fail-under-lines 100
 ```
@@ -852,8 +854,8 @@ cargo llvm-cov --workspace --all-features \
 | Suite | What it runs |
 |---|---|
 | Unit (`crates/*/tests/**`, mirroring `src/`) | Pure logic: params, errors, sessions, crypto formats, MIME, extractors, generators |
-| `crates/ocre-cli/tests/integration/` | The `ocre` binary with a fake wrangler (`tests/support/fake_npx.sh`): every command, `--json` contract, every error hint; `ocre new` in a pseudo-terminal |
-| `crates/ocre-cli/tests/system/e2e.rs` | Generated apps built to WebAssembly (dev build, shared `target/e2e-app`), served by `wrangler dev`: CRUD, sessions, CSRF, auth, email over HTTP, realtime broadcasts to WebSocket clients, background jobs and cron runs, translations by `Accept-Language`/cookie/path, KV read-through cache, 304 responses |
+| `crates/ocre-cli/tests/integration/` | The `ocre` binary with a fake cf and wrangler (`tests/support/fake_cf.sh`): every command, `--json` contract, every error hint; `ocre new` in a pseudo-terminal |
+| `crates/ocre-cli/tests/system/e2e.rs` | Generated apps built to WebAssembly (dev build, shared `target/e2e-app`), served by `cf dev`: CRUD, sessions, CSRF, auth, email over HTTP, realtime broadcasts to WebSocket clients, background jobs and cron runs, translations by `Accept-Language`/cookie/path, KV read-through cache, 304 responses |
 
 CI (manual trigger for now) runs lint, docs, coverage and a generated-app build as parallel jobs, and requires
 100% line coverage. The generated-app job runs `ocre new` and every generator,

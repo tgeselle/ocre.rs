@@ -1,0 +1,5 @@
+
+┌ APIError
+│ [11005] Cannot delete queue 'ocre-cfcheck-demo-jobs-failed' that serves as dead letter queue for consumers. Unbind queue 'ocre-cfcheck-demo-jobs-failed' from the consumers '3030f312-929e-4521-8d12-5522af0c5ac8'; then try again.
+│ 400 Bad Request · HTTP /accounts/0123456789abcdef0123456789abcdef/queues/6d31ae5d12b6463ca19d65ea2cb2e83a
+└

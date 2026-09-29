@@ -18,7 +18,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// Handler error: an HTTP status plus, for client errors, a message the user may see.
 ///
-/// Internal details are logged to the Worker logs (`wrangler tail`), never
+/// Internal details are logged to the Worker logs (Workers Logs), never
 /// sent to the client. With the `html` feature it renders as an HTML error
 /// page (validation errors listed as full messages); JSON endpoints return
 /// [`ApiError`](crate::ApiError), which converts from it with `?`:
@@ -179,7 +179,7 @@ impl From<worker::Error> for Error {
     }
 }
 
-/// Worker logs (visible in `wrangler tail`); stderr in native unit tests.
+/// Worker logs (Workers Logs in the dashboard); stderr in native unit tests.
 pub(crate) fn log_internal(message: &str) {
     #[cfg(target_arch = "wasm32")]
     worker::console_error!("[ocre] {message}");

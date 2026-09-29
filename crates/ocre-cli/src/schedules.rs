@@ -1,5 +1,5 @@
 //! `ocre schedules`: the app's Cron Triggers and the task each one runs,
-//! read from wrangler.toml and src/schedules/mod.rs; `ocre schedules run
+//! read from cloudflare.config.ts and src/schedules/mod.rs; `ocre schedules run
 //! <task>` fires one on the running `ocre dev`, like Loco's
 //! `cargo loco scheduler --name`.
 
@@ -19,20 +19,20 @@ use crate::{
 
 #[derive(Serialize, Debug, PartialEq)]
 pub struct Schedule {
-    /// The expression in `[triggers] crons`, UTC.
+    /// The `triggers.scheduled` expression, UTC.
     pub cron: String,
     /// The task module in src/schedules/, `None` when no task handles the cron.
     pub task: Option<String>,
 }
 
-/// Lists every cron of wrangler.toml with the task that handles it.
+/// Lists every cron of cloudflare.config.ts with the task that handles it.
 pub fn list(project: &Project) -> CliResult {
     let schedules = read(project)?;
     let mut report = Report::new("schedules");
     if schedules.iter().any(|s| s.task.is_none()) {
         report.next.push(
-            "a cron without a task fails when it fires: add it to the match in src/schedules/mod.rs, or remove it \
-             from [triggers] crons in wrangler.toml"
+            "a cron without a task fails when it fires: add it to the match in src/schedules/mod.rs, or remove \
+             its `triggers.scheduled(...)` entry from cloudflare.config.ts"
                 .to_owned(),
         );
     }
@@ -40,7 +40,7 @@ pub fn list(project: &Project) -> CliResult {
     Ok(report)
 }
 
-/// Fires the cron of `task` on `ocre dev` (wrangler's local scheduled endpoint).
+/// Fires the cron of `task` on `ocre dev` (the dev server's local scheduled endpoint).
 pub fn run(project: &Project, task: &str, port: u16) -> CliResult {
     let schedules = read(project)?;
     let schedule = schedules.iter().find(|s| s.task.as_deref() == Some(task)).ok_or_else(|| {
@@ -83,19 +83,10 @@ pub fn table(schedules: &[Schedule]) -> String {
     out
 }
 
-/// Crons from wrangler.toml, matched with the `"<cron>" => <task>::run(...)`
+/// Crons from cloudflare.config.ts, matched with the `"<cron>" => <task>::run(...)`
 /// arms of src/schedules/mod.rs.
 fn read(project: &Project) -> Result<Vec<Schedule>, CliError> {
-    let wrangler = std::fs::read_to_string(project.root.join("wrangler.toml"))?;
-    let config: toml::Table = wrangler.parse().expect("Project::find parsed it");
-    let crons: Vec<String> = config
-        .get("triggers")
-        .and_then(|triggers| triggers.get("crons"))
-        .and_then(|crons| crons.as_array())
-        .into_iter()
-        .flatten()
-        .filter_map(|cron| cron.as_str().map(str::to_owned))
-        .collect();
+    let crons = project.config()?.crons()?;
     let registry = std::fs::read_to_string(project.root.join("src/schedules/mod.rs")).unwrap_or_default();
     let arms: Vec<(String, String)> = registry
         .lines()

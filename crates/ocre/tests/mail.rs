@@ -24,7 +24,7 @@ fn resend_needs_its_key() {
     assert_eq!(resend_key(Some("re_123".into())).unwrap(), "re_123");
     for missing in [None, Some(" ".to_owned())] {
         let message = internal(resend_key(missing).unwrap_err());
-        assert!(message.contains("`npx wrangler secret put RESEND_API_KEY`"), "{message}");
+        assert!(message.contains("`ocre secrets push RESEND_API_KEY --file .prod.vars`"), "{message}");
     }
 }
 
@@ -54,7 +54,7 @@ fn outgoing(email: Email) -> Result<Outgoing> {
 fn outgoing_checks_sender_recipient_and_subject() {
     let email = Email::new("ada@example.com", "Hi", "Hello");
     let missing = internal(Outgoing::new(None, email.clone()).unwrap_err());
-    assert!(missing.contains("MAIL_FROM is not set. Fix: add MAIL_FROM = "), "{missing}");
+    assert!(missing.contains("MAIL_FROM is not set. Fix: add MAIL_FROM: bindings.text("), "{missing}");
     let bad_from = internal(Outgoing::new(Some("nobody".into()), email.clone()).unwrap_err());
     assert!(bad_from.contains("MAIL_FROM \"nobody\" is not an address"), "{bad_from}");
 

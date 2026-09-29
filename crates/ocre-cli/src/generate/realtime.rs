@@ -1,29 +1,23 @@
 //! The app side of `ocre::realtime`, set up by `ocre g scaffold ... --realtime`.
-//! The first use turns on Ocre's `realtime` feature, declares the
-//! `OcreChannel` Durable Object in wrangler.toml and writes `src/realtime.rs`
-//! (the `/realtime/{channel}` route and who may listen); later uses add their
-//! channel to it.
+//! The first use turns on Ocre's `realtime` feature, binds and exports the
+//! `OcreChannel` Durable Object in cloudflare.config.ts and writes
+//! `src/realtime.rs` (the `/realtime/{channel}` route and who may listen);
+//! later uses add their channel to it.
 
-use super::{Edits, insert_after_marker, register_routes, with_ocre_feature};
-use crate::output::CliError;
+use super::{Edits, insert_after_marker, read_config, register_routes, with_ocre_feature};
+use crate::{
+    config::{self, ENV_MARKER, EXPORTS_MARKER},
+    output::CliError,
+};
 
 const CHANNELS_MARKER: &str = "// ocre:channels";
 
-/// Appended to wrangler.toml once. `wrangler deploy` creates the namespace
-/// from the migration, so `ocre deploy` has nothing to create beforehand.
-const WRANGLER_CHANNELS: &str = r#"
-# Realtime channels (`ocre::realtime`): one Durable Object per channel holds the
-# browsers' WebSockets, hibernated between broadcasts so idle connections cost
-# no duration. Deploying creates the namespace from the migration below; the
-# free plan only accepts SQLite-backed classes (`new_sqlite_classes`).
-[[durable_objects.bindings]]
-name = "CHANNELS"
-class_name = "OcreChannel"
-
-[[migrations]]
-tag = "ocre-realtime-v1"
-new_sqlite_classes = ["OcreChannel"]
-"#;
+/// Exported once. Deploying creates the namespace from the export, so
+/// `ocre deploy` has nothing to create beforehand.
+const CHANNELS_EXPORT: &str = "// Realtime channels (`ocre::realtime`): one Durable Object per channel holds the
+// browsers' WebSockets, hibernated between broadcasts so idle connections cost
+// no duration. The free plan only accepts SQLite-backed classes.
+OcreChannel: exports.durableObject({ storage: \"sqlite\" }),";
 
 /// Lets browsers listen to `channel`: feature, Durable Object and route.
 pub(crate) fn add_channel(edits: &mut Edits, channel: &str, command: &str) -> Result<(), CliError> {
@@ -32,10 +26,17 @@ pub(crate) fn add_channel(edits: &mut Edits, channel: &str, command: &str) -> Re
     if with_feature != cargo {
         edits.update("Cargo.toml", with_feature);
     }
-    let wrangler = edits.read("wrangler.toml")?.unwrap_or_default();
-    if !wrangler.contains("class_name = \"OcreChannel\"") {
-        let separator = if wrangler.is_empty() || wrangler.ends_with('\n') { "" } else { "\n" };
-        edits.update("wrangler.toml", format!("{wrangler}{separator}{WRANGLER_CHANNELS}"));
+    let config = read_config(edits)?;
+    if config.export("OcreChannel").is_none() {
+        edits.update(config::FILE, config.insert(EXPORTS_MARKER, CHANNELS_EXPORT)?);
+    }
+    let config = read_config(edits)?;
+    if config.binding("CHANNELS").is_none() {
+        let binding = format!(
+            "// The realtime channels' Durable Objects (`ocre::realtime`).\nCHANNELS: bindings.durableObject({{ worker: \"{}\", exportName: \"OcreChannel\" }}),",
+            config.worker_name()?
+        );
+        edits.update(config::FILE, config.insert(ENV_MARKER, &binding)?);
     }
     let arm = format!("\"{channel}\" => {{}}");
     match edits.read("src/realtime.rs")? {

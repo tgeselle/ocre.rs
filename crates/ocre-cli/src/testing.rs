@@ -2,7 +2,7 @@
 //!
 //! 1. `cargo test` (native unit tests; extra arguments are passed on),
 //! 2. `cargo check --target wasm32-unknown-unknown` (the real build),
-//! 3. with `--e2e`: local migrations, one `wrangler dev` for the whole run,
+//! 3. with `--e2e`: local migrations, one `cf dev` for the whole run,
 //!    then `tests/e2e.sh` with `BASE_URL` pointing at it; the server stops
 //!    when the script ends.
 //!
@@ -17,15 +17,15 @@ use std::{
 
 use crate::{
     CliResult,
+    cloudflare::{Cloudflare, Echo, LocalD1},
     output::{CliError, Report},
     project::{Project, check_wasm_target},
-    wrangler::{Echo, Wrangler},
 };
 
 /// End-to-end script, relative to the app root.
 pub const E2E_SCRIPT: &str = "tests/e2e.sh";
 
-/// How long the first `wrangler dev` build may take.
+/// How long the first `cf dev` build may take.
 const READY_TIMEOUT: Duration = Duration::from_secs(600);
 
 pub fn run(project: &Project, e2e: bool, port: u16, cargo_args: &[String], json: bool) -> CliResult {
@@ -66,7 +66,7 @@ pub fn run(project: &Project, e2e: bool, port: u16, cargo_args: &[String], json:
     }
     if e2e {
         match end_to_end(project, port, json) {
-            Ok(()) => report.ran.push(format!("{E2E_SCRIPT} against wrangler dev on port {port}: ok")),
+            Ok(()) => report.ran.push(format!("{E2E_SCRIPT} against cf dev on port {port}: ok")),
             Err(err) => report.failure = Some(err),
         }
     }
@@ -79,9 +79,8 @@ fn output(json: bool) -> Stdio {
 }
 
 fn end_to_end(project: &Project, port: u16, json: bool) -> Result<(), CliError> {
-    let wrangler = Wrangler::new(&project.root, Echo::for_json(json)).dev_build();
-    wrangler.migrate(&project.database_name, false)?;
-    let mut server = wrangler.spawn(&["dev", "--port", &port.to_string()])?;
+    LocalD1::new(project, Echo::for_json(json)).migrate()?;
+    let mut server = Cloudflare::new(&project.root, Echo::for_json(json)).dev_build().spawn_dev(port)?;
     let stdout = server.stdout.take().expect("stdout is piped");
     let (ready, ready_rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -107,9 +106,9 @@ fn end_to_end(project: &Project, port: u16, json: bool) -> Result<(), CliError> 
                     .hint("its output above shows the failing request"))
             }
         }
-        Err(_) => Err(CliError::new("wrangler dev stopped or did not get ready")
+        Err(_) => Err(CliError::new("cf dev stopped or did not get ready")
             .hint("run `ocre dev` to see the build or startup error")),
     };
-    crate::wrangler::stop(server);
+    crate::cloudflare::stop(server);
     result
 }

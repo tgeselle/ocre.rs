@@ -1,6 +1,6 @@
 //! `ocre version|about|doctor|stats|notes|test|template` and the whole-database
 //! tasks (`ocre db create|drop|version|truncate|prepare|seed --replant`),
-//! against a fake wrangler, cargo and rustc.
+//! against fake cf, wrangler, node, cargo and rustc.
 
 #[path = "../support/mod.rs"]
 mod support;
@@ -13,7 +13,7 @@ use std::{
 };
 
 use serde_json::{Value, json};
-use support::{Sandbox, text};
+use support::{Sandbox, local_d1, text};
 
 fn ok(sandbox: &Sandbox, args: &[&str], root: &Path) -> Value {
     let (report, ok) = sandbox.json(args, root);
@@ -38,11 +38,11 @@ fn fake_rustc(sandbox: &Sandbox, wasm: bool) {
 }
 
 /// A `cargo` that logs its arguments and fails for subcommands listed in
-/// `$FAKE_WRANGLER_STATE/cargo_fails_<subcommand>`.
+/// `$FAKE_CF_STATE/cargo_fails_<subcommand>`.
 fn fake_cargo(sandbox: &Sandbox) {
     sandbox.script(
         "cargo",
-        "#!/bin/sh\necho \"$*\" >> \"$FAKE_WRANGLER_STATE/cargo.log\"\necho \"cargo $1 output\"\nif [ -e \"$FAKE_WRANGLER_STATE/cargo_fails_$1\" ]; then exit 101; fi\n",
+        "#!/bin/sh\necho \"$*\" >> \"$FAKE_CF_STATE/cargo.log\"\necho \"cargo $1 output\"\nif [ -e \"$FAKE_CF_STATE/cargo_fails_$1\" ]; then exit 101; fi\n",
     );
 }
 
@@ -65,15 +65,30 @@ fn version_outside_and_inside_an_app() {
     assert!(stdout.contains("App version         0.1.0\n"), "{stdout}");
 }
 
+/// `entries` inserted right after the `marker` line of cloudflare.config.ts.
+fn add_to_config(root: &Path, marker: &str, entries: &str) {
+    let path = root.join("cloudflare.config.ts");
+    let config = fs::read_to_string(&path).unwrap();
+    assert!(config.contains(marker), "{config}");
+    fs::write(&path, config.replacen(marker, &format!("{marker}\n{entries}"), 1)).unwrap();
+}
+
 #[test]
 fn about_lists_configuration() {
     let sandbox = Sandbox::new();
     let root = sandbox.new_app("shop", &["--api"]);
-    let mut wrangler = fs::read_to_string(root.join("wrangler.toml")).unwrap();
-    wrangler.push_str(
-        "\n[[kv_namespaces]]\nbinding = \"CACHE\"\n\n[[r2_buckets]]\nbinding = \"STORAGE\"\nbucket_name = \"shop-files\"\n\n[[queues.producers]]\nbinding = \"JOBS\"\nqueue = \"shop-jobs\"\n\n[[queues.consumers]]\nqueue = \"shop-jobs\"\n\n[[durable_objects.bindings]]\nname = \"CHANNELS\"\nclass_name = \"OcreChannel\"\n\n[[send_email]]\nname = \"EMAIL\"\n\n[triggers]\ncrons = [\"0 3 * * *\"]\n",
+    add_to_config(
+        &root,
+        "// ocre:env",
+        "CACHE: bindings.kv(),\nSTORAGE: bindings.r2({ name: \"shop-files\" }),\nJOBS: bindings.queue({ name: \"shop-jobs\" }),\n\
+         CHANNELS: bindings.durableObject({ worker: \"shop\", exportName: \"OcreChannel\" }),\nEMAIL: bindings.sendEmail(),\n\
+         LIMITER: bindings.rateLimit({ limit: 10, period: 60 }),\nMAIL_ADAPTER: bindings.text(\"resend\"),",
     );
-    fs::write(root.join("wrangler.toml"), wrangler).unwrap();
+    add_to_config(
+        &root,
+        "// ocre:triggers",
+        "triggers.queue({ name: \"shop-jobs\" }),\ntriggers.scheduled({ schedule: \"0 3 * * *\" }),",
+    );
     let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
     let cargo = cargo
         .lines()
@@ -84,7 +99,7 @@ fn about_lists_configuration() {
     assert_eq!(about["mode"], "api (JSON only)");
     assert_eq!(about["rust_toolchain"], "stable");
     assert_eq!(about["compatibility_date"], "2026-09-01");
-    assert_eq!(about["vars"], json!(["MAIL_FROM"]));
+    assert_eq!(about["vars"], json!(["MAIL_FROM", "MAIL_ADAPTER"]), "commented-out entries are not read");
     assert_eq!(about["features"], json!(["cache"]));
     assert_eq!(
         about["bindings"],
@@ -96,6 +111,7 @@ fn about_lists_configuration() {
             "Queue consumer (shop-jobs)",
             "Durable Object CHANNELS (OcreChannel)",
             "Email EMAIL",
+            "Rate limit LIMITER",
             "cron 0 3 * * *",
             "Assets (public)"
         ])
@@ -105,111 +121,285 @@ fn about_lists_configuration() {
         stdout.contains("Mode                api (JSON only)\n") && stdout.contains("Ocre features       cache\n"),
         "{stdout}"
     );
+
+    // No assets directory in wrangler.config.ts: no Assets line.
+    fs::write(root.join("wrangler.config.ts"), "export default {};\n").unwrap();
+    let bindings = ok(&sandbox, &["about"], &root)["about"]["bindings"].clone();
+    assert_eq!(bindings.as_array().unwrap().last().unwrap(), "cron 0 3 * * *");
+
     let outside = fails(&sandbox, &["about"], &sandbox.work);
-    assert_eq!(outside["error"], "no wrangler.toml found in this directory or its parents");
+    assert_eq!(outside["error"], "no cloudflare.config.ts found in this directory or its parents");
 }
 
 // ---------- doctor ----------
 
+/// (name, status) of each check.
+fn statuses(report: &Value) -> Vec<(String, String)> {
+    report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| (c["name"].as_str().unwrap().to_owned(), c["status"].as_str().unwrap().to_owned()))
+        .collect()
+}
+
+fn check(report: &Value, name: &str) -> Value {
+    let found = report["checks"].as_array().unwrap().iter().find(|c| c["name"] == name);
+    found.unwrap_or_else(|| panic!("no {name} check: {report}")).clone()
+}
+
+fn has_check(report: &Value, name: &str) -> bool {
+    report["checks"].as_array().unwrap().iter().any(|c| c["name"] == name)
+}
+
+fn state(sandbox: &Sandbox, name: &str) -> std::path::PathBuf {
+    sandbox.work.join("../state").join(name)
+}
+
+fn unset(sandbox: &Sandbox, marker: &str) {
+    fs::remove_file(state(sandbox, marker)).unwrap();
+}
+
 #[test]
 fn doctor_passes_warns_and_fails() {
-    let mut sandbox = Sandbox::new();
+    let sandbox = Sandbox::new();
     let root = sandbox.new_app("shop", &[]);
     fake_rustc(&sandbox, true);
     sandbox.login_as(&[("acc", "Me")]);
     sandbox.set("has_secret");
     let report = ok(&sandbox, &["doctor"], &root);
-    let names: Vec<(&str, &str)> = report["checks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|c| (c["name"].as_str().unwrap(), c["status"].as_str().unwrap()))
-        .collect();
-    assert_eq!(
-        names,
-        [
-            ("rust", "ok"),
-            ("node", "ok"),
-            ("cloudflare login", "ok"),
-            ("migrations", "ok"),
-            ("local secrets", "ok"),
-            ("production secrets", "ok")
-        ]
-    );
-    assert_eq!(report["checks"][2]["detail"], "logged in as dev@example.com");
+    let expected = [
+        ("rust", "ok"),
+        ("node", "ok"),
+        ("cloudflare login", "ok"),
+        ("npm packages", "ok"),
+        ("config", "ok"),
+        ("migrations", "ok"),
+        ("local secrets", "ok"),
+        ("production secrets", "ok"),
+    ];
+    assert_eq!(statuses(&report), expected.map(|(n, s)| (n.to_owned(), s.to_owned())));
+    assert_eq!(check(&report, "cloudflare login")["detail"], "logged in as dev@example.com");
+    assert_eq!(check(&report, "npm packages")["detail"], "cf 1.0.0-beta.5, wrangler 4.144.0");
+    assert_eq!(check(&report, "config")["detail"], "cloudflare.config.ts is valid");
+    assert_eq!(check(&report, "production secrets")["detail"], "set on the deployed Worker");
+    assert!(sandbox.calls().contains(&"cf workers secrets list --worker shop".to_owned()), "{:?}", sandbox.calls());
+    assert!(sandbox.calls().contains(&local_d1("d1 migrations list DB --local")), "{:?}", sandbox.calls());
 
     // Warnings keep it passing.
     sandbox.write_state("pending_migrations", "0001_create_posts.sql\n");
     sandbox.write_state("secret_list.json", "[]");
     let report = ok(&sandbox, &["doctor"], &root);
-    assert_eq!(report["checks"][3]["detail"], "pending locally: 0001_create_posts.sql");
-    assert_eq!(report["checks"][5]["detail"], "missing on the deployed Worker: SECRET_KEY_BASE");
+    assert_eq!(check(&report, "migrations")["detail"], "pending locally: 0001_create_posts.sql");
+    assert_eq!(check(&report, "migrations")["hint"], "run `ocre migrate`");
+    assert_eq!(check(&report, "production secrets")["detail"], "missing on the deployed Worker: SECRET_KEY_BASE");
+    unset(&sandbox, "pending_migrations");
 
-    // Failures: code using a binding wrangler.toml lacks, no local secret.
+    // Failures: code using a binding cloudflare.config.ts lacks, no local secret.
     fs::write(root.join("src/cached.rs"), "fn f() { ocre::cache::fetch }\n#[event(scheduled)]\n").unwrap();
     fs::write(root.join(".dev.vars"), "MAIL_ADAPTER=log\n").unwrap();
     fake_rustc(&sandbox, false);
     let report = fails(&sandbox, &["doctor"], &root);
     assert_eq!(report["error"], "4 check(s) failed: rust, cache binding, cron triggers, local secrets");
-    assert_eq!(report["checks"][3]["hint"], "run `ocre g cache` (adds the CACHE KV binding)");
+    assert_eq!(
+        check(&report, "cache binding")["hint"],
+        "run `ocre g cache` (adds `CACHE: bindings.kv(),` to cloudflare.config.ts)"
+    );
     let output = sandbox.ocre(&["doctor"], &root);
     let (stdout, stderr) = text(&output);
     assert!(
-        stdout.contains("  FAIL  cache binding       the code uses it but wrangler.toml does not declare it\n"),
+        stdout.contains("  FAIL  cache binding       the code uses it but cloudflare.config.ts does not declare it\n"),
         "{stdout}"
     );
-    assert!(stdout.contains("  ok    node                npx 10.9.0\n"), "{stdout}");
+    assert!(stdout.contains("  ok    node                node v22.23.2\n"), "{stdout}");
     assert!(stderr.starts_with("error: 4 check(s) failed"), "{stderr}");
     assert!(!output.status.success());
 
-    // Bindings present: ok.
-    let wrangler = fs::read_to_string(root.join("wrangler.toml"))
-        .unwrap()
-        .replace("[vars]\n", "[vars]\nMAIL_ADAPTER = \"resend\"\n")
-        + "\n[[kv_namespaces]]\nbinding = \"CACHE\"\n\n[triggers]\ncrons = [\"0 3 * * *\"]\n";
-    fs::write(root.join("wrangler.toml"), wrangler).unwrap();
+    // Bindings present: ok. MAIL_ADAPTER "resend" needs RESEND_API_KEY in production.
+    add_to_config(&root, "// ocre:env", "CACHE: bindings.kv(),\nMAIL_ADAPTER: bindings.text(\"resend\"),");
+    add_to_config(&root, "// ocre:triggers", "triggers.scheduled({ schedule: \"0 3 * * *\" }),");
     fs::write(root.join(".dev.vars"), "SECRET_KEY_BASE=x\n").unwrap();
     fake_rustc(&sandbox, true);
     sandbox.set("migrations_list_fails");
-    fs::remove_file(root.join("../../state/secret_list.json")).ok();
+    unset(&sandbox, "secret_list.json");
     let report = ok(&sandbox, &["doctor"], &root);
-    let by_name = |name: &str| report["checks"].as_array().unwrap().iter().find(|c| c["name"] == name).unwrap().clone();
-    assert_eq!(by_name("cache binding")["status"], "ok");
-    assert_eq!(by_name("cron triggers")["status"], "ok");
-    assert_eq!(by_name("migrations")["status"], "warn");
-    assert!(by_name("production secrets")["detail"].as_str().unwrap().contains("RESEND_API_KEY"), "{report}");
+    assert_eq!(check(&report, "cache binding")["status"], "ok");
+    assert_eq!(check(&report, "cache binding")["detail"], "configured in cloudflare.config.ts");
+    assert_eq!(check(&report, "cron triggers")["status"], "ok");
+    let migrations = check(&report, "migrations");
+    assert_eq!(migrations["status"], "warn");
+    assert!(migrations["detail"].as_str().unwrap().starts_with("`wrangler d1 migrations list DB --local` failed"));
+    assert_eq!(migrations["hint"], "run `ocre migrate --status` to see the error");
+    assert_eq!(check(&report, "production secrets")["detail"], "missing on the deployed Worker: RESEND_API_KEY");
+    sandbox.write_state(
+        "secret_list.json",
+        r#"[{"name":"SECRET_KEY_BASE","type":"secret_text"},{"name":"RESEND_API_KEY","type":"secret_text"}]"#,
+    );
+    assert_eq!(check(&ok(&sandbox, &["doctor"], &root), "production secrets")["status"], "ok");
+    unset(&sandbox, "secret_list.json");
 
     // Undeployed Worker, then a failing secret list.
     sandbox.set("secret_list_fails");
     let report = ok(&sandbox, &["doctor"], &root);
-    assert_eq!(report["checks"].as_array().unwrap().last().unwrap()["detail"], "not deployed yet");
-    fs::remove_file(root.join("../../state/secret_list_fails")).ok();
+    assert_eq!(
+        check(&report, "production secrets"),
+        json!({ "name": "production secrets", "status": "ok", "detail": "not deployed yet" })
+    );
+    unset(&sandbox, "secret_list_fails");
     sandbox.set("secret_list_errors");
     let report = ok(&sandbox, &["doctor"], &root);
-    assert_eq!(report["checks"].as_array().unwrap().last().unwrap()["status"], "warn");
+    let secrets = check(&report, "production secrets");
+    assert_eq!(secrets["status"], "warn");
+    assert!(secrets["detail"].as_str().unwrap().contains("Authentication error"), "{secrets}");
+    assert_eq!(secrets["hint"], "run `ocre secrets list` to see the error");
 
-    // Not logged in, then an unreadable session.
+    // An unreadable session fails.
     sandbox.write_state("whoami.json", "not json");
     let report = fails(&sandbox, &["doctor"], &root);
-    assert_eq!(report["checks"][2]["status"], "fail");
-    fs::remove_file(root.join("../../state/logged_in")).ok();
-    let report = ok(&sandbox, &["doctor"], &root);
-    assert_eq!(report["checks"][2]["status"], "warn");
-    assert_eq!(report["checks"].as_array().unwrap().len(), 7, "no production check when logged out");
+    assert_eq!(check(&report, "cloudflare login")["status"], "fail");
+    assert!(
+        check(&report, "cloudflare login")["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("unexpected `cf auth whoami` output")
+    );
+    assert!(!has_check(&report, "production secrets"));
+}
 
-    // Without Node.js inside an app: no migrations check (it needs wrangler).
-    sandbox.isolate_path();
+/// `ocre doctor --json` with HOME set to `home`.
+fn doctor_at_home(sandbox: &Sandbox, root: &Path, home: &Path) -> Value {
+    let output = sandbox.command(&["doctor", "--json"], root).env("HOME", home).output().unwrap();
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn doctor_warns_when_logged_out_and_names_the_separate_cf_login() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
     fake_rustc(&sandbox, true);
-    fs::remove_file(sandbox.work.join("../bin/npx")).unwrap();
-    let report = fails(&sandbox, &["doctor"], &root);
-    let names: Vec<&str> = report["checks"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["rust", "node", "cache binding", "cron triggers", "local secrets"]);
-    assert_eq!(report["error"], "1 check(s) failed: node");
+    let home = sandbox.work.join("home");
+    fs::create_dir_all(&home).unwrap();
+    let report = doctor_at_home(&sandbox, &root, &home);
+    assert_eq!(report["ok"], true, "{report}");
+    let login = check(&report, "cloudflare login");
+    assert_eq!(
+        login,
+        json!({ "name": "cloudflare login", "status": "warn", "detail": "not logged in (needed by ocre deploy)", "hint": "run `ocre login`" })
+    );
+    assert!(!has_check(&report, "production secrets"), "no production check when logged out");
+    assert!(!sandbox.calls().iter().any(|call| call.starts_with("cf workers")), "{:?}", sandbox.calls());
 
-    // Outside an app, without Node.js: tool checks only.
-    let report = fails(&sandbox, &["doctor"], &sandbox.work);
-    assert_eq!(report["checks"].as_array().unwrap().len(), 2);
+    // Logged in with wrangler: cf needs its own login.
+    fs::create_dir_all(home.join(".wrangler/config")).unwrap();
+    fs::write(home.join(".wrangler/config/default.toml"), "oauth_token = \"x\"\n").unwrap();
+    let report = doctor_at_home(&sandbox, &root, &home);
+    assert_eq!(
+        check(&report, "cloudflare login")["hint"],
+        "run `ocre login`: cf keeps its own login, separate from wrangler's, so log in once more"
+    );
+}
+
+#[test]
+fn doctor_checks_node() {
+    let mut sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    fake_rustc(&sandbox, true);
+    sandbox.login_as(&[("acc", "Me")]);
+
+    sandbox.write_state("node_version", "v20.1.0\n");
+    let report = fails(&sandbox, &["doctor"], &root);
     assert_eq!(report["error"], "1 check(s) failed: node");
+    let node = check(&report, "node");
+    assert_eq!(node["detail"], "node v20.1.0 is too old");
+    assert_eq!(node["hint"], "install Node.js 22 or newer (cf needs it; it provides npm)");
+    let names: Vec<String> = statuses(&report).into_iter().map(|(name, _)| name).collect();
+    assert_eq!(
+        names,
+        ["rust", "node", "npm packages", "local secrets"],
+        "no cf, config or wrangler checks without node"
+    );
+    sandbox.write_state("node_version", "garbage\n");
+    assert_eq!(check(&fails(&sandbox, &["doctor"], &root), "node")["detail"], "node garbage is too old");
+
+    // Without Node.js at all (nor any real one further on PATH), inside and outside an app.
+    unset(&sandbox, "node_version");
+    sandbox.remove_tool("node");
+    sandbox.isolate_path();
+    let report = fails(&sandbox, &["doctor"], &root);
+    assert_eq!(check(&report, "node")["detail"], "node not found");
+    assert_eq!(report["error"], "1 check(s) failed: node");
+    let report = fails(&sandbox, &["doctor"], &sandbox.work);
+    let names: Vec<String> = statuses(&report).into_iter().map(|(name, _)| name).collect();
+    assert_eq!(names, ["rust", "node"]);
+}
+
+#[test]
+fn doctor_checks_the_npm_packages() {
+    let sandbox = Sandbox::new();
+    fake_rustc(&sandbox, true);
+    sandbox.write_state("installed_cf", "1.0.0-beta.4");
+    let root = sandbox.new_app("shop", &[]);
+    let report = ok(&sandbox, &["doctor"], &root);
+    let packages = check(&report, "npm packages");
+    assert_eq!(packages["status"], "warn");
+    assert_eq!(
+        packages["detail"],
+        "cf 1.0.0-beta.4, wrangler 4.144.0; this Ocre CLI is tested with cf 1.0.0-beta.5, wrangler 4.144.0"
+    );
+    assert_eq!(packages["hint"], "run `npm install --save-dev --save-exact cf@1.0.0-beta.5 wrangler@4.144.0`");
+
+    // A wrangler older than cf's `cf-wrangler` entry point fails.
+    unset(&sandbox, "installed_cf");
+    sandbox.write_state("installed_wrangler", "4.100.0");
+    let old = sandbox.new_app("old", &[]);
+    let report = fails(&sandbox, &["doctor"], &old);
+    assert_eq!(report["error"], "1 check(s) failed: npm packages");
+    let packages = check(&report, "npm packages");
+    assert_eq!(packages["detail"], "wrangler 4.100.0 is older than 4.136, which cf delegates builds to");
+    assert_eq!(packages["hint"], "run `npm install --save-dev --save-exact wrangler@4.144.0`");
+    fs::write(old.join("node_modules/wrangler/package.json"), r#"{"version":"next"}"#).unwrap();
+    let report = fails(&sandbox, &["doctor"], &old);
+    assert_eq!(
+        check(&report, "npm packages")["detail"],
+        "wrangler next is older than 4.136, which cf delegates builds to"
+    );
+
+    // Not installed: no config or migrations check (they need the packages).
+    fs::remove_dir_all(old.join("node_modules")).unwrap();
+    let report = fails(&sandbox, &["doctor"], &old);
+    let packages = check(&report, "npm packages");
+    assert_eq!(packages["detail"], "cf and wrangler are not installed in the app");
+    assert_eq!(packages["hint"], "run `npm install` in the app");
+    assert!(!has_check(&report, "config") && !has_check(&report, "migrations"), "{report}");
+}
+
+#[test]
+fn doctor_validates_the_config_with_cf_loader_and_tsc() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    fake_rustc(&sandbox, true);
+    sandbox.set("config_invalid");
+    let report = fails(&sandbox, &["doctor"], &root);
+    assert_eq!(report["error"], "1 check(s) failed: config");
+    let config = check(&report, "config");
+    assert_eq!(
+        config["detail"],
+        r#"cloudflare.config.ts is invalid: [{"path":["worker","env","CACHE"],"message":"Invalid input"}]"#
+    );
+    assert!(config["hint"].as_str().unwrap().contains("npx tsc -p ."), "{config}");
+
+    unset(&sandbox, "config_invalid");
+    sandbox.set("tsc_fails");
+    let config = check(&fails(&sandbox, &["doctor"], &root), "config");
+    assert_eq!(
+        config["detail"],
+        "`tsc -p .` failed:\ncloudflare.config.ts(12,4): error TS2322: Type '30' is not assignable to type '10 | 60'."
+    );
+    assert_eq!(config["hint"], "fix the type errors in cloudflare.config.ts or wrangler.config.ts");
+
+    // Without the app's TypeScript, cf's loader is the whole check.
+    fs::remove_file(root.join("node_modules/.bin/tsc")).unwrap();
+    assert_eq!(check(&ok(&sandbox, &["doctor"], &root), "config")["status"], "ok");
 }
 
 #[test]
@@ -218,38 +408,33 @@ fn doctor_checks_the_bindings_the_generated_code_uses() {
     let root = sandbox.new_app("shop", &[]);
     fake_rustc(&sandbox, true);
     fs::write(root.join(".dev.vars"), "SECRET_KEY_BASE=x\n").unwrap();
-    let bare = fs::read_to_string(root.join("wrangler.toml")).unwrap();
+    let bare = fs::read_to_string(root.join("cloudflare.config.ts")).unwrap();
     ok(&sandbox, &["g", "job", "SendWelcome", "user_id:integer"], &root);
     ok(&sandbox, &["g", "schedule", "nightly_cleanup", "every day at 3am"], &root);
     ok(&sandbox, &["g", "scaffold", "Post", "title:string", "cover:attachment?", "--realtime"], &root);
     fs::write(root.join("src/notes.txt"), "ocre::cache::fetch\n").unwrap();
-    let binding_checks = |report: &Value| -> Vec<(String, String)> {
-        report["checks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|c| {
-                c["name"].as_str().unwrap().contains("binding")
-                    || ["jobs queue", "cron triggers"].contains(&c["name"].as_str().unwrap())
-            })
-            .map(|c| (c["name"].as_str().unwrap().to_owned(), c["status"].as_str().unwrap().to_owned()))
-            .collect()
-    };
-    let report = ok(&sandbox, &["doctor"], &root);
     let names = ["storage binding", "jobs queue", "cron triggers", "realtime binding"];
+    let binding_checks = |report: &Value| -> Vec<(String, String)> {
+        statuses(report).into_iter().filter(|(name, _)| names.contains(&name.as_str())).collect()
+    };
     let all = |status: &str| names.map(|name| (name.to_owned(), status.to_owned())).to_vec();
-    assert_eq!(binding_checks(&report), all("ok"), "only .rs files are code, so no cache check: {report}");
+    let report = ok(&sandbox, &["doctor"], &root);
+    assert_eq!(binding_checks(&report), all("ok"), "{report}");
+    assert!(!has_check(&report, "cache binding"), "only .rs files are code");
 
-    let generated = fs::read_to_string(root.join("wrangler.toml")).unwrap();
-    fs::write(root.join("wrangler.toml"), &bare).unwrap();
+    let generated = fs::read_to_string(root.join("cloudflare.config.ts")).unwrap();
+    fs::write(root.join("cloudflare.config.ts"), &bare).unwrap();
     let report = fails(&sandbox, &["doctor"], &root);
     assert_eq!(report["error"], "4 check(s) failed: storage binding, jobs queue, cron triggers, realtime binding");
     assert_eq!(binding_checks(&report), all("fail"));
 
     // A queue producer without its consumer is still a broken jobs setup.
-    let producer_only = generated.replace("[[queues.consumers]]", "[[queues.unused]]");
-    fs::write(root.join("wrangler.toml"), producer_only).unwrap();
+    fs::write(root.join("cloudflare.config.ts"), generated.replace("triggers.queue(", "triggers.unused(")).unwrap();
     assert_eq!(fails(&sandbox, &["doctor"], &root)["error"], "1 check(s) failed: jobs queue");
+    // So is a realtime binding without its exported class.
+    let unexported = generated.replace("OcreChannel: exports.", "Other: exports.");
+    fs::write(root.join("cloudflare.config.ts"), unexported).unwrap();
+    assert_eq!(fails(&sandbox, &["doctor"], &root)["error"], "1 check(s) failed: realtime binding");
 }
 
 // ---------- stats, notes ----------
@@ -327,13 +512,26 @@ fn db_create_locally_and_on_cloudflare() {
     let root = sandbox.new_app("shop", &[]);
     let report = ok(&sandbox, &["db", "create"], &root);
     assert_eq!(report["ran"], json!(["created local database shop"]));
+    assert_eq!(sandbox.calls(), [local_d1("d1 execute DB --local --command SELECT 1")]);
     fs::create_dir_all(root.join(LOCAL_STATE)).unwrap();
     assert_eq!(ok(&sandbox, &["db", "create"], &root)["ran"], json!(["local database shop already exists"]));
+
+    sandbox.clear_calls();
     let report = ok(&sandbox, &["db", "create", "--remote"], &root);
     assert_eq!(report["provisioned"], json!(["D1 database shop"]));
-    sandbox.write_state("d1_list.json", r#"[{"name":"shop"}]"#);
-    assert_eq!(ok(&sandbox, &["db", "create", "--remote"], &root)["ran"], json!(["D1 database shop already exists"]));
-    assert!(sandbox.calls().contains(&"d1 create shop".to_owned()));
+    assert_eq!(sandbox.calls(), ["cf d1 list --name shop", "cf d1 create --name shop"]);
+    let (stdout, _) = text(&sandbox.ocre(&["db", "create", "--remote"], &root));
+    assert_eq!(stdout, "  D1 database shop already exists\nTarget: remote D1 database on Cloudflare\n");
+    assert_eq!(sandbox.calls().len(), 3, "an existing database is not created again");
+
+    let other = sandbox.new_app("other", &[]);
+    sandbox.set("d1_create_no_uuid");
+    let report = fails(&sandbox, &["db", "create", "--remote"], &other);
+    let error = report["error"].as_str().unwrap();
+    assert!(error.starts_with("`cf d1 create --name other` returned no uuid: {\"created_at\""), "{error}");
+    sandbox.set("d1_create_fails");
+    let report = fails(&sandbox, &["db", "create", "--remote"], &sandbox.new_app("third", &[]));
+    assert_eq!(report["error"], "`cf d1 create --name third` failed: ┌ Error\n│ d1_create_fails\n└");
 }
 
 #[test]
@@ -352,12 +550,27 @@ fn db_drop_is_local_only() {
 fn db_version_reads_the_last_migration() {
     let sandbox = Sandbox::new();
     let root = sandbox.new_app("shop", &[]);
+    sandbox.remote_database("shop");
     sandbox.write_state("execute.json", r#"[{"results":[{"name":"0002_add_slug.sql"}],"success":true}]"#);
     let report = ok(&sandbox, &["db", "version", "--remote"], &root);
     assert_eq!(report, json!({ "ok": true, "command": "db version", "version": "0002_add_slug.sql", "remote": true }));
+    let sql = "SELECT name FROM d1_migrations ORDER BY id DESC LIMIT 1";
+    assert_eq!(
+        sandbox.calls(),
+        [
+            "cf d1 list --name shop".to_owned(),
+            "cf d1 query uuid-shop --batch @.wrangler/ocre-batch.json".to_owned(),
+            format!("batch {}", json!([{ "sql": sql }])),
+        ]
+    );
     let (stdout, _) = text(&sandbox.ocre(&["db", "version", "--remote"], &root));
     assert_eq!(stdout, "0002_add_slug.sql\nTarget: remote D1 database on Cloudflare\n");
+    assert_eq!(ok(&sandbox, &["db", "version"], &root)["version"], "0002_add_slug.sql");
+    assert!(sandbox.calls().contains(&local_d1(&format!("d1 execute DB --local --command {sql} --json"))));
+
+    // No migrations table yet, locally or remotely: no version.
     sandbox.set("execute_no_table");
+    assert_eq!(ok(&sandbox, &["db", "version", "--remote"], &root)["version"], Value::Null);
     assert_eq!(ok(&sandbox, &["db", "version"], &root)["version"], Value::Null);
     assert_eq!(text(&sandbox.ocre(&["db", "version"], &root)).0, "no migration applied\n");
     sandbox.set("execute_fails");
@@ -366,10 +579,7 @@ fn db_version_reads_the_last_migration() {
     fs::remove_file(sandbox.work.join("../state/execute_fails")).unwrap();
     fs::remove_file(sandbox.work.join("../state/execute_no_table")).unwrap();
     assert!(
-        fails(&sandbox, &["db", "version"], &root)["error"]
-            .as_str()
-            .unwrap()
-            .starts_with("unexpected `wrangler d1 execute --json` output")
+        fails(&sandbox, &["db", "version"], &root)["error"].as_str().unwrap().starts_with("unexpected D1 query output")
     );
 }
 
@@ -456,16 +666,18 @@ fn test_e2e_runs_the_script_against_one_server() {
     fs::create_dir_all(root.join("tests")).unwrap();
     fs::write(root.join("tests/e2e.sh"), "echo \"checking $BASE_URL\"\n").unwrap();
     let report = ok(&sandbox, &["test", "--e2e", "--port", "9123"], &root);
-    assert_eq!(report["ran"][2], "tests/e2e.sh against wrangler dev on port 9123: ok");
-    let calls = sandbox.calls();
-    assert!(calls.contains(&"dev --port 9123".to_owned()) && calls.contains(&"build --dev".to_owned()), "{calls:?}");
+    assert_eq!(report["ran"][2], "tests/e2e.sh against cf dev on port 9123: ok");
+    assert_eq!(
+        sandbox.calls(),
+        [local_d1("d1 migrations apply DB --local"), "cf dev --port 9123".to_owned(), "build --dev".to_owned()]
+    );
     let output = sandbox.ocre(&["test", "--e2e", "--json"], &root);
     assert!(text(&output).1.contains("checking http://localhost:8788"), "{}", text(&output).1);
 
     fs::write(root.join("tests/e2e.sh"), "exit 3\n").unwrap();
     assert_eq!(fails(&sandbox, &["test", "--e2e"], &root)["error"], "tests/e2e.sh failed (exit status: 3)");
     sandbox.set("dev_fails");
-    assert_eq!(fails(&sandbox, &["test", "--e2e"], &root)["error"], "wrangler dev stopped or did not get ready");
+    assert_eq!(fails(&sandbox, &["test", "--e2e"], &root)["error"], "cf dev stopped or did not get ready");
 }
 
 #[test]
@@ -498,7 +710,12 @@ fn new_applies_a_template_file() {
     );
     assert_eq!(
         report["ran"],
-        json!(["ocre g scaffold Post title:string body:text", "ocre g controller Pages about", "cargo add slug"])
+        json!([
+            "ocre g scaffold Post title:string body:text",
+            "ocre g controller Pages about",
+            "cargo add slug",
+            "npm install (cf 1.0.0-beta.5, wrangler 4.144.0)"
+        ])
     );
     assert!(report["created"].as_array().unwrap().contains(&json!("blog2/src/pages.rs")));
 }

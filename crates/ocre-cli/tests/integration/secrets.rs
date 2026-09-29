@@ -1,4 +1,4 @@
-//! `ocre secrets list` and `ocre secrets push`, against the fake wrangler.
+//! `ocre secrets list` and `ocre secrets push`, against the fake cf.
 
 #[path = "../support/mod.rs"]
 mod support;
@@ -28,6 +28,7 @@ fn list_merges_local_and_deployed_names() {
         ])
     );
     assert_eq!(report["next"], serde_json::json!(["ocre secrets push GITHUB_CLIENT_ID --file <production values>"]));
+    assert_eq!(sandbox.calls(), ["cf workers secrets list --worker shop"]);
 
     let (stdout, _) = text(&sandbox.ocre(&["secrets", "list"], &root));
     assert!(stdout.contains("  OTHER                                       deployed\n"), "{stdout}");
@@ -55,16 +56,39 @@ fn push_uploads_named_values_and_deletes_the_file() {
         sandbox.json(&["secrets", "push", "GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET", "--file", ".prod.vars"], &root);
     assert!(ok, "{report}");
     assert_eq!(report["ran"], serde_json::json!(["uploaded GITHUB_CLIENT_ID", "uploaded GITHUB_CLIENT_SECRET"]));
+    // One bulk call; the body wraps self-named secret_text entries in `secrets` (tests/support/cf_fixtures).
+    let calls = sandbox.calls();
+    assert_eq!(calls[0], "cf workers secrets bulk --worker shop --file .wrangler/ocre-secrets-push.json");
+    let body: serde_json::Value = serde_json::from_str(calls[1].strip_prefix("uploaded ").unwrap()).unwrap();
     assert_eq!(
-        sandbox.calls().last().unwrap(),
-        r#"uploaded {"GITHUB_CLIENT_ID":"id-1","GITHUB_CLIENT_SECRET":"s3cret"}"#
+        body,
+        serde_json::json!({"secrets": {
+            "GITHUB_CLIENT_ID": {"name": "GITHUB_CLIENT_ID", "type": "secret_text", "text": "id-1"},
+            "GITHUB_CLIENT_SECRET": {"name": "GITHUB_CLIENT_SECRET", "type": "secret_text", "text": "s3cret"},
+        }})
     );
+    assert_eq!(calls.len(), 2);
     assert!(!root.join(".wrangler/ocre-secrets-push.json").exists(), "values do not stay on disk");
+    // The fake creates secrets only for the body the real API accepts: the
+    // uploaded secrets are now deployed.
+    let (report, _) = sandbox.json(&["secrets", "list"], &root);
+    let deployed: Vec<&str> = report["secrets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|secret| secret["deployed"] == true)
+        .map(|secret| secret["name"].as_str().unwrap())
+        .collect();
+    assert!(deployed.contains(&"GITHUB_CLIENT_ID") && deployed.contains(&"GITHUB_CLIENT_SECRET"), "{report}");
 
     sandbox.set("secret_bulk_fails");
     let (report, ok) = sandbox.json(&["secrets", "push", "UNUSED", "--file", ".prod.vars"], &root);
     assert!(!ok);
-    assert!(report["error"].as_str().unwrap().contains("secret bulk"), "{report}");
+    let error = report["error"].as_str().unwrap();
+    assert!(
+        error.starts_with("`cf workers secrets bulk --worker shop --file .wrangler/ocre-secrets-push.json` failed"),
+        "{report}"
+    );
     assert!(!root.join(".wrangler/ocre-secrets-push.json").exists(), "deleted after a failure too");
 }
 

@@ -40,7 +40,7 @@ In a full-stack app:
   create  templates/auth/confirmation_show.html
   update  src/models/mod.rs
   update  src/lib.rs
-  update  wrangler.toml
+  update  cloudflare.config.ts
 
 Next:
   ocre migrate
@@ -48,19 +48,16 @@ Next:
   open http://localhost:8787/signup
 ```
 
-`wrangler.toml` gets the rate limiter used by every route that checks a password or sends an email (see [Rate limiting](#rate-limiting)):
+`cloudflare.config.ts` gets the rate limiter used by every route that checks a password or sends an email (see [Rate limiting](#rate-limiting)), after the `// ocre:env` marker:
 
-```toml
-# `ocre g auth`: login, sign-up, token and emailed-link routes allow 10 attempts
-# a minute per IP address and Cloudflare location (Workers Rate Limiting,
-# free plan, no storage used). `period` is 10 or 60 seconds.
-[[ratelimits]]
-name = "AUTH_RATE_LIMITER"
-namespace_id = "3530462"
-simple = { limit = 10, period = 60 }
+```ts
+// `ocre g auth`: login, sign-up, token and emailed-link routes allow 10 attempts
+// a minute per IP address and Cloudflare location (Workers Rate Limiting,
+// free plan, no storage used). `period` is 10 or 60 seconds.
+AUTH_RATE_LIMITER: bindings.rateLimit({ namespace: "3530462", simple: { limit: 10, period: 60 } }),
 ```
 
-The `namespace_id` is derived from the app name; two Workers of an account with the same id share counters.
+The `namespace` is derived from the app name; two Workers of an account with the same id share counters.
 
 Then apply the migrations and start the app:
 
@@ -86,7 +83,7 @@ What each file holds, and which ones an API-only app (`ocre new --api`) gets:
 | `src/confirmations.rs` | yes | | `send_confirmation`; `POST /confirmations` (a new link), `GET/POST /confirmations/{token}` |
 | `templates/auth/*.html` | yes | | The pages |
 | `src/auth_api.rs` | yes | yes | `BearerUser`, `throttle`, `TOKEN_LOCATIONS`; `POST /api/auth/signup`, `POST /api/auth/token`, `GET/DELETE /api/auth/me`, `GET/POST /api/auth/keys`, `DELETE /api/auth/keys/{id}` |
-| `wrangler.toml` | yes | yes | The `AUTH_RATE_LIMITER` binding |
+| `cloudflare.config.ts` | yes | yes | The `AUTH_RATE_LIMITER` binding |
 
 Two options add more, in full-stack apps only:
 
@@ -105,7 +102,7 @@ In an API-only app the output is:
   create  src/models/api_key.rs
   create  src/auth_api.rs
   update  src/lib.rs
-  update  wrangler.toml
+  update  cloudflare.config.ts
 
 Next:
   ocre migrate
@@ -699,7 +696,7 @@ curl -s -X POST http://localhost:8787/api/auth/signup -H 'content-type: applicat
 
 ## Rate limiting
 
-Every route that checks a password or sends an email calls `throttle(&ctx, &headers, "login")` (in `src/auth_api.rs`), which counts one attempt per action and client IP address (`ocre::remote_ip`) with `ocre::security::rate_limit` against the `AUTH_RATE_LIMITER` [Workers Rate Limiting binding](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/). Over 10 a minute the answer is `429 Too Many Requests` (JSON: `{"error":{"status":429,"message":"Too many requests. Try again later."}}`). The binding is on the free plan, uses no D1 or KV operation, and `ocre dev` simulates it; counters are per Cloudflare location and approximate. Change `limit` and `period` (10 or 60 seconds) in `wrangler.toml`.
+Every route that checks a password or sends an email calls `throttle(&ctx, &headers, "login")` (in `src/auth_api.rs`), which counts one attempt per action and client IP address (`ocre::remote_ip`) with `ocre::security::rate_limit` against the `AUTH_RATE_LIMITER` [Workers Rate Limiting binding](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/). Over 10 a minute the answer is `429 Too Many Requests` (JSON: `{"error":{"status":429,"message":"Too many requests. Try again later."}}`). The binding is on the free plan, uses no D1 or KV operation, and `ocre dev` simulates it; counters are per Cloudflare location and approximate. Change `limit` and `period` (10 or 60 seconds) in `cloudflare.config.ts`.
 
 ## Sessions tracked in D1
 
@@ -707,7 +704,7 @@ With `ocre g auth --db-sessions`, each sign-in is a row of `user_sessions` (IP a
 
 ## Continue with GitHub or Google
 
-With `ocre g auth --oauth github,google`, the login page gets one button per provider. `src/oauth.rs` runs the OAuth 2.0 code flow with PKCE through `ocre::oauth`: `POST /auth/{provider}` stores a random `state` and PKCE verifier in the session and redirects to the provider; `GET /auth/{provider}/callback` checks the state, trades the code for a token, reads the profile, and signs in the user linked to that account (`identities` table), else the user with the same verified email (then linked), else a new confirmed user without a password. Register an OAuth app with the callback URL `https://<your host>/auth/<provider>/callback` (and one for `http://localhost:8787`), put `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` (or `GOOGLE_...`) in `.dev.vars`, and upload them with `ocre secrets push GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET --file <production values>`. A sign-in costs 2 or 3 subrequests of the 50 a free-plan request may make.
+With `ocre g auth --oauth github,google`, the login page gets one button per provider. `src/oauth.rs` runs the OAuth 2.0 code flow with PKCE through `ocre::oauth`: `POST /auth/{provider}` stores a random `state` and PKCE verifier in the session and redirects to the provider; `GET /auth/{provider}/callback` checks the state, trades the code for a token, reads the profile, and signs in the user linked to that account (`identities` table), else the user with the same verified email (then linked), else a new confirmed user without a password. Register an OAuth app with the callback URL `https://<your host>/auth/<provider>/callback` (and one for `http://localhost:8787`), put `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` (or `GOOGLE_...`) in `.dev.vars`, and upload them with `ocre secrets push GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET --file .prod.vars` (a git-ignored file of `NAME=value` lines). A sign-in costs 2 or 3 subrequests of the 50 a free-plan request may make.
 
 ## Framework primitives
 
@@ -732,8 +729,8 @@ Store only `token::digest(&token)` for secrets you email or show once, and look 
 ## Before going public
 
 - **Mail.** Magic links and password resets call `ocre::mail::send`. Without `MAIL_ADAPTER` in production, `POST /magic_link` and `POST /passwords` answer 500 and the log says `cannot send email: MAIL_ADAPTER is not set. Fix: ...`. For sign-up and reset mail to any address on the free plan, use Resend (100 emails a day, 3,000 a month, September 2026); see [Email](email.md#choose-an-adapter).
-- **Rate limiting.** Keep the `AUTH_RATE_LIMITER` entry in `wrangler.toml` (see [Rate limiting](#rate-limiting)): each password check costs about 5.5 ms of CPU, and every emailed link costs a send from your mail quota. Its counters are per Cloudflare location and approximate; with a custom domain, a [Cloudflare WAF rate limiting rule](https://developers.cloudflare.com/waf/rate-limiting-rules/) on `/login`, `/signup`, `/magic_link`, `/passwords` and `/api/auth/*` adds a limit before the Worker runs (see [Deployment](deployment.md#before-going-public-rate-limiting)).
-- **OAuth.** With `--oauth`, upload the provider's `..._CLIENT_ID` and `..._CLIENT_SECRET` with `npx wrangler secret put`, and register the production callback URL with the provider.
+- **Rate limiting.** Keep the `AUTH_RATE_LIMITER` entry in `cloudflare.config.ts` (see [Rate limiting](#rate-limiting)): each password check costs about 5.5 ms of CPU, and every emailed link costs a send from your mail quota. Its counters are per Cloudflare location and approximate; with a custom domain, a [Cloudflare WAF rate limiting rule](https://developers.cloudflare.com/waf/rate-limiting-rules/) on `/login`, `/signup`, `/magic_link`, `/passwords` and `/api/auth/*` adds a limit before the Worker runs (see [Deployment](deployment.md#before-going-public-rate-limiting)).
+- **OAuth.** With `--oauth`, put the provider's `..._CLIENT_ID` and `..._CLIENT_SECRET` in `.prod.vars` and upload them with `ocre secrets push GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET --file .prod.vars`, and register the production callback URL with the provider.
 - **Secret.** `ocre deploy` creates `SECRET_KEY_BASE` on the first deploy; never commit `.dev.vars`.
 
 ## Security choices

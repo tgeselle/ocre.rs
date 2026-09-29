@@ -84,8 +84,8 @@ const PERSISTENT_KEY: &str = "_persistent";
 /// still verify until they expire. Rails' `cookies_rotations`. Remove it once
 /// the longest session you care about has been re-encrypted (or after your
 /// JWT lifetime). Worker secrets cannot be read back: keep the value you
-/// replace, and upload it with `npx wrangler secret put
-/// SECRET_KEY_BASE_PREVIOUS` before the new `SECRET_KEY_BASE`. Read once per
+/// replace, and upload it as `SECRET_KEY_BASE_PREVIOUS` with the new
+/// `SECRET_KEY_BASE` (`ocre secrets push SECRET_KEY_BASE_PREVIOUS SECRET_KEY_BASE --file .prod.vars`). Read once per
 /// request; no binding call.
 ///
 /// # Examples

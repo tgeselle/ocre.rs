@@ -48,7 +48,7 @@ fn stub(env: &Env, channel: &str) -> Result<Stub> {
 ///   [`MAX_CHANNEL_LEN`](crate::realtime::MAX_CHANNEL_LEN) ASCII letters,
 ///   digits, `_`, `-`, `.` or `:`).
 /// - [`Error::Internal`] when the `CHANNELS` Durable Object binding is
-///   missing; the message names the wrangler.toml entries to add.
+///   missing; the message names the cloudflare.config.ts entries to add.
 /// - [`Error::Internal`] when the channel object cannot be reached (e.g. the
 ///   free-plan quota is exhausted) or answers with a non-200 status.
 ///
@@ -107,7 +107,7 @@ impl WebSocketUpgrade {
     ///   [`MAX_CHANNEL_LEN`](crate::realtime::MAX_CHANNEL_LEN) ASCII letters,
     ///   digits, `_`, `-`, `.` or `:`).
     /// - [`Error::Internal`] (500) when the `CHANNELS` Durable Object binding
-    ///   is missing (the message names the wrangler.toml entries to add) or
+    ///   is missing (the message names the cloudflare.config.ts entries to add) or
     ///   the channel object cannot be reached.
     ///
     /// # Examples

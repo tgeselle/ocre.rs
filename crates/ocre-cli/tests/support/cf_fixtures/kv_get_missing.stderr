@@ -1,0 +1,5 @@
+
+┌ APIError
+│ [10013] get namespace: 'namespace not found'
+│ 404 Not Found · HTTP /accounts/0123456789abcdef0123456789abcdef/storage/kv/namespaces/00000000000000000000000000000000
+└

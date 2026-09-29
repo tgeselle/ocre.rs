@@ -16,19 +16,17 @@ fn realtime_scaffold_sets_up_the_channel_once() {
     assert!(ok, "{report}");
     assert_eq!(report["created"][9], "templates/posts/_row.html");
     assert_eq!(report["created"][10], "src/realtime.rs");
-    assert_eq!(report["updated"], json!(["src/lib.rs", "Cargo.toml", "wrangler.toml"]));
+    assert_eq!(report["updated"], json!(["src/lib.rs", "Cargo.toml", "cloudflare.config.ts"]));
     assert_eq!(report["next"][3], "open http://localhost:8787/posts in a second window, then create a post");
 
     let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
     assert!(cargo.contains("features = [\"realtime\"] }"), "{cargo}");
-    let wrangler = fs::read_to_string(root.join("wrangler.toml")).unwrap();
+    let config = fs::read_to_string(root.join("cloudflare.config.ts")).unwrap();
     assert!(
-        wrangler.ends_with(
-            "[[durable_objects.bindings]]\nname = \"CHANNELS\"\nclass_name = \"OcreChannel\"\n\n[[migrations]]\n\
-             tag = \"ocre-realtime-v1\"\nnew_sqlite_classes = [\"OcreChannel\"]\n"
-        ),
-        "{wrangler}"
+        config.contains("CHANNELS: bindings.durableObject({ worker: \"live\", exportName: \"OcreChannel\" }),\n"),
+        "{config}"
     );
+    assert!(config.contains("OcreChannel: exports.durableObject({ storage: \"sqlite\" }),\n"), "{config}");
     let lib = fs::read_to_string(root.join("src/lib.rs")).unwrap();
     assert!(lib.contains("mod realtime;") && lib.contains(".merge(realtime::routes())"), "{lib}");
     let module = fs::read_to_string(root.join("src/realtime.rs")).unwrap();
@@ -68,8 +66,9 @@ fn realtime_scaffold_sets_up_the_channel_once() {
     assert_eq!(report["updated"], json!(["src/models/mod.rs", "src/lib.rs"]));
     let module = fs::read_to_string(root.join("src/realtime.rs")).unwrap();
     assert_eq!(module.matches("\"tags\" => {}").count(), 1, "{module}");
-    let wrangler = fs::read_to_string(root.join("wrangler.toml")).unwrap();
-    assert_eq!(wrangler.matches("class_name = \"OcreChannel\"").count(), 1);
+    let config = fs::read_to_string(root.join("cloudflare.config.ts")).unwrap();
+    assert_eq!(config.matches("bindings.durableObject(").count(), 1, "{config}");
+    assert_eq!(config.matches("exports.durableObject(").count(), 1, "{config}");
     let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
     assert_eq!(cargo.matches("\"realtime\"").count(), 1, "{cargo}");
     let lib = fs::read_to_string(root.join("src/lib.rs")).unwrap();
@@ -87,6 +86,20 @@ fn realtime_scaffold_without_the_channels_marker_writes_nothing() {
     assert!(report["hint"].as_str().unwrap().contains("add `\"posts\" => {}` there yourself"), "{report}");
     assert!(!root.join("src/posts.rs").exists(), "nothing written on failure");
     assert!(!fs::read_to_string(root.join("Cargo.toml")).unwrap().contains("realtime"));
+}
+
+#[test]
+fn realtime_scaffold_without_the_exports_marker_writes_nothing() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("live", &[]);
+    let config = fs::read_to_string(root.join("cloudflare.config.ts")).unwrap().replace("// ocre:exports", "");
+    fs::write(root.join("cloudflare.config.ts"), &config).unwrap();
+    let (report, ok) = sandbox.json(&["g", "scaffold", "Post", "title:string", "--realtime"], &root);
+    assert!(!ok);
+    assert_eq!(report["error"], "cloudflare.config.ts is missing the `// ocre:exports` marker");
+    assert!(report["hint"].as_str().unwrap().contains("inside `worker.exports: { ... }`"), "{report}");
+    assert_eq!(fs::read_to_string(root.join("cloudflare.config.ts")).unwrap(), config);
+    assert!(!root.join("src/posts.rs").exists() && !root.join("src/realtime.rs").exists(), "nothing written");
 }
 
 #[test]

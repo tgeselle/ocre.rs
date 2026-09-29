@@ -194,14 +194,14 @@ Where it comes from:
 | Environment | Source |
 |---|---|
 | `ocre dev` | `.dev.vars` (git-ignored), written by `ocre new` |
-| Production | A Worker secret. `ocre deploy` checks `wrangler secret list` and, when the Worker has no `SECRET_KEY_BASE`, uploads a new random one with the deploy; it never replaces an existing one |
+| Production | A Worker secret. `ocre deploy` checks `cf workers secrets list` and, when the Worker has no `SECRET_KEY_BASE`, uploads a new random one with the deploy; it never replaces an existing one |
 
 Two keys are derived from it: the session cookie key, and (with a fixed label) the HS256 key of `ocre::jwt` (see [Authentication](authentication.md#json-clients-jwts-and-api-keys)). When the secret is missing or shorter than 64 characters, requests that write the session, or read a session cookie they received, answer 500, and the log names the fix: ``the SECRET_KEY_BASE secret is not set. Fix: run `ocre secret`, put the value in .dev.vars as SECRET_KEY_BASE=... for `ocre dev` (`ocre new` does this), and deploy with `ocre deploy`, which uploads it``.
 
-**Replacing the secret alone signs everyone out.** Existing cookies no longer decrypt, so every visitor starts with an empty session, and every JWT fails to verify. This is the way to invalidate all cookie sessions at once, for example after a leak:
+**Replacing the secret alone signs everyone out.** Existing cookies no longer decrypt, so every visitor starts with an empty session, and every JWT fails to verify. This is the way to invalidate all cookie sessions at once, for example after a leak: put a new value from `ocre secret` in `.prod.vars` (git-ignored) as `SECRET_KEY_BASE=...`, then
 
 ```sh
-ocre secret | npx wrangler secret put SECRET_KEY_BASE
+ocre secrets push SECRET_KEY_BASE --file .prod.vars
 ```
 
 Changing the value in `.dev.vars` and restarting `ocre dev` shows the effect: a browser that was signed in is redirected to `/login` by the next `CurrentUser` page, and an old JWT gets `401 {"error":{"message":"Unauthorized","status":401}}`. For a planned rotation that keeps everyone signed in, see [Rotating SECRET_KEY_BASE without signing everyone out](#rotating-secret_key_base-without-signing-everyone-out).
@@ -270,12 +270,11 @@ Consequences for app code:
 
 ## ALLOWED_ORIGINS: another site calling the app
 
-When a separate frontend (another domain, a local dev server on another port) must call the app from the browser, list its origins in the `ALLOWED_ORIGINS` Worker variable, comma-separated, under `[vars]` in `wrangler.toml` (or in `.dev.vars` for `ocre dev`):
+When a separate frontend (another domain, a local dev server on another port) must call the app from the browser, list its origins in the `ALLOWED_ORIGINS` Worker variable, comma-separated, in `worker.env` of `cloudflare.config.ts` (or in `.dev.vars` for `ocre dev`):
 
-```toml
-# wrangler.toml
-[vars]
-ALLOWED_ORIGINS = "https://app.example.com, https://admin.example.com"
+```ts
+// cloudflare.config.ts, in worker.env
+ALLOWED_ORIGINS: bindings.text("https://app.example.com, https://admin.example.com"),
 ```
 
 Spaces and a trailing `/` are ignored; invalid entries are skipped. The listed origins get two things:
@@ -455,14 +454,18 @@ Types do the rest of Rails' parameter checks: a missing field, or text where the
 
 ## Rotating SECRET_KEY_BASE without signing everyone out
 
-List old values (newest first, comma-separated) in the `SECRET_KEY_BASE_PREVIOUS` secret: cookies encrypted with them are still read and re-encrypted with the current key, and JWTs signed with them still verify. Worker secrets cannot be read back, so keep the value you replace:
+List old values (newest first, comma-separated) in the `SECRET_KEY_BASE_PREVIOUS` secret: cookies encrypted with them are still read and re-encrypted with the current key, and JWTs signed with them still verify. Worker secrets cannot be read back, so keep the value you replace. In `.prod.vars` (git-ignored):
 
-```sh
-npx wrangler secret put SECRET_KEY_BASE_PREVIOUS   # paste the current value
-ocre secret | npx wrangler secret put SECRET_KEY_BASE
+```text
+SECRET_KEY_BASE_PREVIOUS=<the current value>
+SECRET_KEY_BASE=<a new value from `ocre secret`>
 ```
 
-Remove `SECRET_KEY_BASE_PREVIOUS` after the longest session lifetime. `ocre secrets list` shows which secrets are set locally and in production; `ocre secrets push NAME... --file <env file>` uploads values.
+```sh
+ocre secrets push SECRET_KEY_BASE_PREVIOUS SECRET_KEY_BASE --file .prod.vars
+```
+
+Remove `SECRET_KEY_BASE_PREVIOUS` after the longest session lifetime. `ocre secrets list` shows which secrets are set locally and in production; `ocre secrets push NAME... --file .prod.vars` uploads values.
 
 ## Content-Security-Policy and Permissions-Policy
 
@@ -472,13 +475,11 @@ Generated apps add both in `src/lib.rs` (`content_security_policy()` and `permis
 
 `ocre::security::rate_limit(&ctx, "BINDING", &key).await?` counts one request for `key` against a [Workers Rate Limiting binding](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/) and returns `Error::TooManyRequests` (429, "Too many requests. Try again later.") when the key is over the binding's limit. Rails' `rate_limit to:, within:, by:` maps onto the binding's `limit`, its `period` (10 or 60 seconds) and the key you build. `ocre g auth` already limits its login, sign-up, emailed-link, token and deletion routes with the `AUTH_RATE_LIMITER` binding (see [Authentication](authentication.md#rate-limiting)).
 
-For your own route, add a binding with its own name and `namespace_id` to `wrangler.toml`:
+For your own route, add a binding with its own name and `namespace` to `worker.env` of `cloudflare.config.ts`:
 
-```toml
-[[ratelimits]]
-name = "FEEDBACK_RATE_LIMITER"
-namespace_id = "4242"   # any integer, unique in your Cloudflare account
-simple = { limit = 3, period = 60 }
+```ts
+// `namespace`: any integer, unique in your Cloudflare account
+FEEDBACK_RATE_LIMITER: bindings.rateLimit({ namespace: "4242", simple: { limit: 3, period: 60 } }),
 ```
 
 and call it before the expensive part of the handler:
@@ -522,7 +523,7 @@ async fn create(
 }
 ```
 
-Past three requests a minute from the same address, `POST /feedback` gets the 429 error page (JSON handlers answer `{"error":{"status":429,"message":"Too many requests. Try again later."}}`). Key by user id (`format!("export:{}", user.id)`) for signed-in actions. The binding is on the free plan, costs no D1, KV or Durable Object operation, and `ocre dev` simulates it. Counters are per Cloudflare location and approximate, so it is a brake, not an exact quota. A missing binding is a 500 whose log names the `[[ratelimits]]` entry to add.
+Past three requests a minute from the same address, `POST /feedback` gets the 429 error page (JSON handlers answer `{"error":{"status":429,"message":"Too many requests. Try again later."}}`). Key by user id (`format!("export:{}", user.id)`) for signed-in actions. The binding is on the free plan, costs no D1, KV or Durable Object operation, and `ocre dev` simulates it. Counters are per Cloudflare location and approximate, so it is a brake, not an exact quota. A missing binding is a 500 whose log names the `bindings.rateLimit(...)` entry to add.
 
 ## HTTPS and HSTS
 
@@ -564,7 +565,7 @@ cargo clippy --target wasm32-unknown-unknown -- -D warnings   # Rust lints on th
 
 | Need | Use |
 |---|---|
-| Only answer on your own host names (Rails' `config.hosts`) | `ALLOWED_HOSTS = "example.com, .example.com"` under `[vars]`; other hosts get 403 (localhost always passes) |
+| Only answer on your own host names (Rails' `config.hosts`) | `ALLOWED_HOSTS: bindings.text("example.com, .example.com")` in `cloudflare.config.ts`; other hosts get 403 (localhost always passes) |
 | Redirect to a URL taken from the request | `ocre::security::url_from(&uri, &target)` returns it only for paths or URLs of this app (no open redirect, no CR/LF) |
 | Show user HTML | `ocre::security::sanitize(&html)` (Rails' safe list) or `sanitize_with`, `strip_tags`; insert with `\|safe` |
 | Data in a `<script>` | `ocre::security::json_escape`, `escape_javascript` |

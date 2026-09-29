@@ -1,7 +1,9 @@
 //! End to end: a generated app built to WebAssembly and served by the real
-//! `wrangler dev` (workerd + local D1). This is the test that exercises the
-//! framework's runtime code (`crates/ocre/src/runtime/`), which only runs
-//! inside workerd. Needs Node.js, the wasm32 target and network access:
+//! `cf dev` (which runs the app's wrangler: workerd + local D1), with the
+//! app's pinned cf and wrangler installed by `ocre new`. This is the test that
+//! exercises the framework's runtime code (`crates/ocre/src/runtime/`), which
+//! only runs inside workerd. Needs Node.js 22+, the wasm32 target and network
+//! access:
 //!
 //!     cargo test -p ocre-cli --test e2e -- --ignored
 
@@ -26,7 +28,7 @@ struct Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        // ocre -> npx -> wrangler -> workerd share one process group.
+        // ocre -> cf -> wrangler -> workerd share one process group.
         let _ = Command::new("kill").args(["-TERM", &format!("-{}", self.child.id())]).status();
         let _ = self.child.wait();
     }
@@ -40,9 +42,16 @@ fn agent() -> Agent {
     Agent::config_builder().http_status_as_error(false).max_redirects(0).build().into()
 }
 
-fn start(sandbox: &Sandbox, root: &Path) -> Server {
-    let port = free_port().to_string();
-    let mut command = sandbox.command(&["dev", "--port", &port], root);
+/// The app's own cf/wrangler/tsc (installed by `ocre new`), with the
+/// environment of an app build.
+fn app_command(root: &Path, program: &str) -> Command {
+    let mut command = Command::new(root.join("node_modules/.bin").join(program));
+    command.current_dir(root).stdin(std::process::Stdio::null());
+    app_build_env(&mut command);
+    command
+}
+
+fn app_build_env(command: &mut Command) {
     // Under `cargo llvm-cov`, keep coverage flags away from the app's own
     // wasm32 build (the profiler runtime is native-only).
     for var in
@@ -52,17 +61,31 @@ fn start(sandbox: &Sandbox, root: &Path) -> Server {
     }
     // One target dir for every run, so the wasm dependencies compile once.
     command.env("CARGO_TARGET_DIR", Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/e2e-app"));
+}
+
+/// cloudflare.config.ts and wrangler.config.ts, as the generators left them,
+/// type-check against the pinned cf and wrangler.
+fn type_checks(root: &Path) {
+    let output = app_command(root, "tsc").args(["-p", "."]).output().unwrap();
+    assert!(output.status.success(), "tsc -p .:\n{}", String::from_utf8_lossy(&output.stdout));
+}
+
+fn start(sandbox: &Sandbox, root: &Path) -> Server {
+    type_checks(root);
+    let port = free_port().to_string();
+    let mut command = sandbox.command(&["dev", "--port", &port], root);
+    app_build_env(&mut command);
     let log = sandbox.work.join("dev.log");
     let output = std::fs::File::create(&log).unwrap();
     let child = command.process_group(0).stdout(output.try_clone().unwrap()).stderr(output).spawn().unwrap();
-    // wrangler dev listens on `localhost`, which is IPv6-only on some Linux hosts.
+    // The dev server listens on `localhost`, which is IPv6-only on some Linux hosts.
     let mut server = Server { child, base: format!("http://localhost:{port}") };
     let deadline = Instant::now() + Duration::from_secs(240);
     while agent().get(&server.base).call().is_err() {
         if let Some(status) = server.child.try_wait().unwrap() {
             panic!("`ocre dev` exited ({status}):\n{}", std::fs::read_to_string(&log).unwrap());
         }
-        assert!(Instant::now() < deadline, "wrangler dev did not start:\n{}", std::fs::read_to_string(&log).unwrap());
+        assert!(Instant::now() < deadline, "cf dev did not start:\n{}", std::fs::read_to_string(&log).unwrap());
         std::thread::sleep(Duration::from_secs(1));
     }
     server
@@ -110,7 +133,7 @@ fn page(mut response: ureq::http::Response<ureq::Body>) -> Page {
         response.headers().get("set-cookie").map_or("", |v| v.to_str().unwrap().split(';').next().unwrap()).to_owned();
     let status = response.status().as_u16();
     let headers = response.headers().clone();
-    // 204 and 304 have no body by definition; wrangler dev still labels them
+    // 204 and 304 have no body by definition; the dev server still labels them
     // gzip, which makes the client's decompressor fail on the empty stream.
     let empty = status == 204 || status == 304;
     let body = if empty { String::new() } else { response.body_mut().read_to_string().unwrap() };
@@ -136,10 +159,10 @@ fn json(server: &Server, method: &str, path: &str, body: &str) -> (u16, serde_js
 }
 
 #[test]
-#[ignore = "builds WebAssembly and runs wrangler dev; run with --ignored"]
+#[ignore = "builds WebAssembly and runs cf dev; run with --ignored"]
 fn api_only_app_serves_rest_and_graphql_on_workerd() {
     let sandbox = Sandbox::new();
-    sandbox.use_real_wrangler();
+    sandbox.use_real_cloudflare();
     let root = sandbox.new_app("e2e-api", &["--api", "--starter", "blog"]);
     let (report, ok) = sandbox.json(
         &["g", "api", "Book", "title:string", "pages:integer", "available:boolean", "meta:json?", "--graphql"],
@@ -228,10 +251,10 @@ fn api_only_app_serves_rest_and_graphql_on_workerd() {
 }
 
 #[test]
-#[ignore = "builds WebAssembly and runs wrangler dev; run with --ignored"]
+#[ignore = "builds WebAssembly and runs cf dev; run with --ignored"]
 fn generated_app_serves_full_crud_on_workerd() {
     let sandbox = Sandbox::new();
-    sandbox.use_real_wrangler();
+    sandbox.use_real_cloudflare();
     let root = sandbox.new_app("e2e", &["--starter", "blog"]);
     let (report, ok) = sandbox.json(
         &["g", "scaffold", "Book", "title:string", "pages:integer", "rating:float", "big:integer", "extras:json?"],
@@ -334,6 +357,14 @@ fn generated_app_serves_full_crud_on_workerd() {
     let deleted = post(&server, "/posts/1/delete", &[]);
     assert_eq!((deleted.status, deleted.location.as_str()), (303, "/posts"));
     assert_eq!(get(&server, "/posts/1").status, 404);
+    drop(server);
+
+    // The build output contract of `cf deploy`: build and checks, no credentials needed.
+    let output =
+        app_command(&root, "cf").args(["deploy", "--dry-run"]).env("CF_SEND_TELEMETRY", "false").output().unwrap();
+    let (stdout, stderr) = (String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(output.status.success(), "cf deploy --dry-run:\n{stdout}\n{stderr}");
+    assert!(stdout.contains("dry-run") || stderr.contains("dry-run"), "{stdout}\n{stderr}");
 }
 
 /// Waits until the `ocre dev` log contains `needle` (workerd logs asynchronously).
@@ -349,7 +380,7 @@ fn wait_for_log(sandbox: &Sandbox, needle: &str) -> String {
     }
 }
 
-/// Delivers a raw email through wrangler dev's local Email Routing endpoint.
+/// Delivers a raw email through the dev server's local Email Routing endpoint.
 fn deliver(server: &Server, from: &str, to: &str, raw: &str) -> (u16, String) {
     let url = format!("{}/cdn-cgi/local/email?from={from}&to={to}", server.base);
     let mut response = agent().post(&url).send(raw).unwrap();
@@ -357,10 +388,10 @@ fn deliver(server: &Server, from: &str, to: &str, raw: &str) -> (u16, String) {
 }
 
 #[test]
-#[ignore = "builds WebAssembly and runs wrangler dev; run with --ignored"]
+#[ignore = "builds WebAssembly and runs cf dev; run with --ignored"]
 fn generated_app_sends_and_receives_email_on_workerd() {
     let sandbox = Sandbox::new();
-    sandbox.use_real_wrangler();
+    sandbox.use_real_cloudflare();
     let root = sandbox.new_app("e2e-mail", &[]);
     for args in [&["g", "mailer", "User", "welcome"][..], &["g", "mailbox"]] {
         let (report, ok) = sandbox.json(args, &root);
@@ -398,8 +429,8 @@ pub async fn receive(_ctx: Ctx, email: InboundEmail) -> Result<()> {
 "#;
     std::fs::write(root.join("src/mailbox.rs"), mailbox).unwrap();
     // Production would use Resend; MAIL_ADAPTER=log from .dev.vars wins in `ocre dev`.
-    let wrangler = std::fs::read_to_string(root.join("wrangler.toml")).unwrap();
-    std::fs::write(root.join("wrangler.toml"), wrangler.replace("# MAIL_ADAPTER = ", "MAIL_ADAPTER = ")).unwrap();
+    let config = std::fs::read_to_string(root.join("cloudflare.config.ts")).unwrap();
+    std::fs::write(root.join("cloudflare.config.ts"), config.replace("// MAIL_ADAPTER: ", "MAIL_ADAPTER: ")).unwrap();
     let server = start(&sandbox, &root);
 
     // Sending, logged.
@@ -439,11 +470,11 @@ pub async fn receive(_ctx: Ctx, email: InboundEmail) -> Result<()> {
     wait_for_log(&sandbox, "[ocre mail] the mailbox failed: internal error: boom");
     drop(server);
 
-    // Cloudflare Email Service: wrangler dev simulates the send_email binding.
-    let wrangler = std::fs::read_to_string(root.join("wrangler.toml"))
+    // Cloudflare Email Service: the dev server simulates the send_email binding.
+    let config = std::fs::read_to_string(root.join("cloudflare.config.ts"))
         .unwrap()
-        .replace("# [[send_email]]\n# name = \"EMAIL\"", "[[send_email]]\nname = \"EMAIL\"");
-    std::fs::write(root.join("wrangler.toml"), wrangler).unwrap();
+        .replace("// EMAIL: bindings.sendEmail(),", "EMAIL: bindings.sendEmail(),");
+    std::fs::write(root.join("cloudflare.config.ts"), config).unwrap();
     let vars = std::fs::read_to_string(root.join(".dev.vars")).unwrap().replace("=log", "=cloudflare");
     std::fs::write(root.join(".dev.vars"), vars).unwrap();
     let server = start(&sandbox, &root);
@@ -529,10 +560,10 @@ fn bearer_json(server: &Server, method: &str, path: &str, token: &str, body: &st
 }
 
 #[test]
-#[ignore = "builds WebAssembly and runs wrangler dev; run with --ignored"]
+#[ignore = "builds WebAssembly and runs cf dev; run with --ignored"]
 fn generated_auth_signs_users_in_on_workerd() {
     let sandbox = Sandbox::new();
-    sandbox.use_real_wrangler();
+    sandbox.use_real_cloudflare();
     let root = sandbox.new_app("e2e-auth", &[]);
     let (report, ok) = sandbox.json(&["g", "auth"], &root);
     assert!(ok, "{report}");
@@ -713,10 +744,10 @@ fn generated_auth_signs_users_in_on_workerd() {
 }
 
 #[test]
-#[ignore = "builds WebAssembly and runs wrangler dev; run with --ignored"]
+#[ignore = "builds WebAssembly and runs cf dev; run with --ignored"]
 fn generated_database_sessions_list_and_revoke_devices_on_workerd() {
     let sandbox = Sandbox::new();
-    sandbox.use_real_wrangler();
+    sandbox.use_real_cloudflare();
     let root = sandbox.new_app("e2e-sessions", &[]);
     let (report, ok) = sandbox.json(&["g", "auth", "--db-sessions", "--oauth", "github"], &root);
     assert!(ok, "{report}");
@@ -774,10 +805,10 @@ fn wait_for_job_log(sandbox: &Sandbox, needle: &str) -> String {
 }
 
 #[test]
-#[ignore = "builds WebAssembly and runs wrangler dev; run with --ignored"]
+#[ignore = "builds WebAssembly and runs cf dev; run with --ignored"]
 fn generated_app_runs_jobs_and_crons_on_workerd() {
     let sandbox = Sandbox::new();
-    sandbox.use_real_wrangler();
+    sandbox.use_real_cloudflare();
     let root = sandbox.new_app("e2e-jobs", &[]);
     for args in [
         &["g", "migration", "create_visits", "name:string"][..],
@@ -875,7 +906,7 @@ async fn visits(axum::extract::State(ctx): axum::extract::State<Ctx>) -> Result<
     let log = wait_for_job_log(&sandbox, "[ocre jobs] mail done");
     assert!(log.contains("To: ada@example.com\nSubject: Later\n\nSent from the jobs queue"), "{log}");
 
-    // Cron Triggers, fired through wrangler dev's local endpoint.
+    // Cron Triggers, fired through the dev server's local endpoint.
     let cron = get(&server, "/cdn-cgi/local/scheduled?cron=0+3+*+*+*");
     assert_eq!(cron.status, 200, "{}", cron.body);
     wait_for_body(&server, "/visits", "cron");
@@ -918,10 +949,10 @@ fn receive(socket: &mut Socket) -> String {
 }
 
 #[test]
-#[ignore = "builds WebAssembly and runs wrangler dev; run with --ignored"]
+#[ignore = "builds WebAssembly and runs cf dev; run with --ignored"]
 fn generated_app_broadcasts_changes_to_websockets_on_workerd() {
     let sandbox = Sandbox::new();
-    sandbox.use_real_wrangler();
+    sandbox.use_real_cloudflare();
     let root = sandbox.new_app("e2e-live", &[]);
     let (report, ok) = sandbox.json(&["g", "scaffold", "Note", "title:string", "--realtime"], &root);
     assert!(ok, "{report}");
@@ -1059,10 +1090,10 @@ async fn fresh(i18n: I18n, conditional: Conditional) -> Result<Response> {
 "#;
 
 #[test]
-#[ignore = "builds WebAssembly and runs wrangler dev; run with --ignored"]
+#[ignore = "builds WebAssembly and runs cf dev; run with --ignored"]
 fn generated_app_translates_and_caches_on_workerd() {
     let sandbox = Sandbox::new();
-    sandbox.use_real_wrangler();
+    sandbox.use_real_cloudflare();
     let root = sandbox.new_app("e2e-i18n", &[]);
     for args in [&["g", "locale", "en", "fr"][..], &["g", "cache"]] {
         let (report, ok) = sandbox.json(args, &root);
@@ -1232,10 +1263,10 @@ fn binary_file(len: usize) -> Vec<u8> {
 }
 
 #[test]
-#[ignore = "builds WebAssembly and runs wrangler dev; run with --ignored"]
+#[ignore = "builds WebAssembly and runs cf dev; run with --ignored"]
 fn generated_app_stores_uploads_in_r2_on_workerd() {
     let sandbox = Sandbox::new();
-    sandbox.use_real_wrangler();
+    sandbox.use_real_cloudflare();
     let root = sandbox.new_app("e2e-files", &[]);
     for args in [
         &["g", "scaffold", "Photo", "title:string", "image:attachment", "notes:attachment?"][..],
@@ -1244,11 +1275,8 @@ fn generated_app_stores_uploads_in_r2_on_workerd() {
         let (report, ok) = sandbox.json(args, &root);
         assert!(ok, "{report}");
     }
-    let wrangler = std::fs::read_to_string(root.join("wrangler.toml")).unwrap();
-    assert!(
-        wrangler.contains("[[r2_buckets]]\nbinding = \"STORAGE\"\nbucket_name = \"e2e-files-storage\""),
-        "{wrangler}"
-    );
+    let config = std::fs::read_to_string(root.join("cloudflare.config.ts")).unwrap();
+    assert!(config.contains("STORAGE: bindings.r2({ name: \"e2e-files-storage\" }),"), "{config}");
     // Small limits, to reach them with small requests.
     for (path, rules) in [("src/models/photo.rs", "IMAGE"), ("src/models/document.rs", "FILE")] {
         let model = std::fs::read_to_string(root.join(path)).unwrap().replacen(

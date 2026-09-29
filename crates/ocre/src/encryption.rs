@@ -302,7 +302,7 @@ pub fn installed() -> Result<Encryptor> {
     INSTALLED.with(|installed| installed.borrow().clone()).ok_or_else(|| {
         Error::internal(
             "no encryption key: SECRET_KEY_BASE is missing or shorter than 64 characters. \
-             Fix: `ocre secret` and put it in .dev.vars (local) or `wrangler secret put SECRET_KEY_BASE`",
+             Fix: `ocre secret` and put it in .dev.vars (local) or let `ocre deploy` create it (production)",
         )
     })
 }

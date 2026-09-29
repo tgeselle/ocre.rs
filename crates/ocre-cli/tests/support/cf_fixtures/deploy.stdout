@@ -1,0 +1,98 @@
+├  Build
+│  Delegating to Wrangler
+[custom build] Running: cargo install -q "worker-build@^0.8" && worker-build ${OCRE_BUILD:---release}
+[custom build] [INFO]: 🎯  Checking for the Wasm target...
+[custom build] 
+[custom build] [INFO]: 🌀  Compiling to Wasm...
+[custom build] 
+[custom build] warning: unused variable: `record`
+[custom build]   --> src/ps.rs:83:20
+[custom build]    |
+[custom build] 83 |     fn from_record(record: &P) -> Self {
+[custom build]    |                    ^^^^^^ help: if this is intentional, prefix it with an underscore: `_record`
+[custom build]    |
+[custom build]    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+[custom build] 
+[custom build] 
+[custom build] warning: field `form` is never read
+[custom build]    --> src/ps.rs:128:5
+[custom build]     |
+[custom build] 127 | struct NewView {
+[custom build]     |        ------- field in this struct
+[custom build] 128 |     form: PForm,
+[custom build]     |     ^^^^
+[custom build]     |
+[custom build]     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+[custom build] 
+[custom build] warning: field `form` is never read
+[custom build]    --> src/ps.rs:136:5
+[custom build]     |
+[custom build] 134 | struct EditView {
+[custom build]     |        -------- field in this struct
+[custom build] 135 |     id: i64,
+[custom build] 136 |     form: PForm,
+[custom build]     |     ^^^^
+[custom build] 
+[custom build] warning: `demo` (lib) generated 3 warnings (run `cargo fix --lib -p demo` to apply 1 suggestion)
+[custom build]     Finished `release` profile [optimized] target(s) in 0.05s
+[custom build] 
+[custom build] [INFO]: Optimizing wasm binaries with `wasm-opt`...
+[custom build] 
+[custom build] [INFO]: ✨  Done in 0.51s
+[custom build] [INFO]: 📦   Your wasm pkg is ready to publish at /private/tmp/cfcheck/run/app/build/.tmp.
+[custom build] 
+[custom build] 
+[custom build]   index.js  33.6kb
+[custom build] 
+[custom build] ⚡ Done in 4ms
+[custom build] 
+◆  Build complete
+│
+├  Deploy
+│  🌀 Building list of assets...
+│  ✨ Read 1 file from the assets directory /private/tmp/cfcheck/run/app/.cloudflare/output/v0/workers/default/assets
+│  🌀 Starting asset upload...
+│  No updated asset files to upload. Proceeding with deployment...
+│  Total Upload: 1616.45 KiB / gzip: 438.42 KiB
+│
+│  The following bindings need to be provisioned:
+│  Binding           Resource          
+│  env.CACHE         KV Namespace      
+│
+│
+│  Provisioning CACHE (KV Namespace)...
+│  🌀 Creating new KV Namespace "ocre-cfcheck-demo-cache"...
+│  ✨ CACHE provisioned 🎉
+│
+│  Your Worker was deployed with provisioned resources. You may add the resource IDs to your config file if you wish, but future deploys will continue to work even without IDs.
+│  🎉 Resources provisioned, continuing with deployment...
+│
+│
+│  Durable Object exports reconciliation:
+│    Created: OcreChannel
+│
+│  Worker Startup Time: 4 ms
+│  Your Worker has access to the following bindings:
+│  Binding                                                                Resource                  
+│  env.CHANNELS (OcreChannel, defined in ocre-cfcheck-demo)               Durable Object            
+│  env.CACHE (d04d78a9f0af47d5b82f16ab737779d9)                           KV Namespace              
+│  env.EMAIL (unrestricted)                                               Send Email                
+│  env.JOBS (ocre-cfcheck-demo-jobs)                                      Queue                     
+│  env.DB (ocre-cfcheck-demo)                                             D1 Database               
+│  env.AUTH_RATE_LIMITER (10 requests/60s)                                Rate Limit                
+│  env.MAIL_FROM ("demo <noreply@example.com>")                           Environment Variable      
+│  env.SECRET_KEY_BASE ("(hidden)")                                       Environment Variable      
+│
+│  Uploaded ocre-cfcheck-demo (4.07 sec)
+▲  Because 'workers_dev' is not in your Wrangler file, it will be enabled for this deployment by default.
+│  To override this setting, you can disable workers.dev by explicitly setting 'workers_dev = false' in your Wrangler file.
+▲  Because your 'workers.dev' route is enabled and your 'preview_urls' setting is not in your Wrangler file, Preview URLs will be enabled for this deployment by default.
+│  To override this setting, you can disable Preview URLs by explicitly setting 'preview_urls = false' in your Wrangler file.
+│  Deployed ocre-cfcheck-demo triggers (1.92 sec)
+│    https://ocre-cfcheck-demo.example.workers.dev
+│    schedule: 0 3 * * *
+│    Producer for ocre-cfcheck-demo-jobs
+│    Consumer for ocre-cfcheck-demo-jobs
+│  Current Version ID: bb8271fe-9e56-49ec-a627-aeca01ee6a46
+│
+◆  Deploy complete

@@ -13,11 +13,12 @@ Nothing to install to read this page. The code shown comes from apps made with `
 | Your app | A Rust crate with `crate-type = ["cdylib"]`: `src/lib.rs` holds the Worker entry points and `routes()`; the generators write models, controllers, templates and migrations next to it | your repository |
 | `ocre` | The framework crate: `serve`, `Ctx`, `Db`, `Error`, sessions, validations, and one module per Cloudflare product (`jobs`, `storage`, `cache`, `mail`, `realtime`...) | `crates/ocre` |
 | `worker` | Cloudflare's [workers-rs](https://github.com/cloudflare/workers-rs) 0.8: Rust bindings to the Workers JavaScript runtime, the `#[event(...)]` entry-point macros, and the axum integration | dependency of both |
-| `worker-build` | Compiles the crate to `wasm32-unknown-unknown`, runs `wasm-bindgen` (and `wasm-opt` in release), and writes `build/index.js` plus `build/index_bg.wasm` | run by the `[build]` command of `wrangler.toml` |
-| wrangler | Cloudflare's CLI: `wrangler dev` runs the Worker locally in workerd, `wrangler deploy` uploads it | `npx wrangler@4` |
-| `ocre` CLI | Generators, plus commands that drive wrangler (`ocre dev`, `ocre deploy`, `ocre migrate`, `ocre sql`...) | `crates/ocre-cli` |
+| `worker-build` | Compiles the crate to `wasm32-unknown-unknown`, runs `wasm-bindgen` (and `wasm-opt` in release), and writes `build/index.js` plus `build/index_bg.wasm` | run by the `build.command` of `wrangler.config.ts` |
+| `cf` | Cloudflare's CLI: `cf dev` runs the Worker locally in workerd, `cf deploy` uploads it, and its API commands create D1 databases, queues, buckets and secrets. It delegates the build and the local server to wrangler | the app's `package.json` (`npm install`) |
+| wrangler | Cloudflare's previous CLI, pinned next to cf: cf runs it for builds, and Ocre for local D1 commands (see [Why wrangler still appears](../guides/deployment.md#why-wrangler-still-appears)) | the app's `package.json` |
+| `ocre` CLI | Generators, plus commands that drive cf (`ocre dev`, `ocre deploy`, `ocre migrate`, `ocre sql`...) | `crates/ocre-cli` |
 
-`ocre dev` and production run the same runtime, workerd: locally, wrangler simulates D1 (SQLite files under `.wrangler/state`), Queues, R2, KV and Durable Objects, and `ocre dev` builds without optimizations (`worker-build --dev`) to compile faster.
+`ocre dev` and production run the same runtime, workerd: locally, `cf dev` (through the app's wrangler) simulates D1 (SQLite files under `.wrangler/state`), Queues, R2, KV and Durable Objects, and `ocre dev` builds without optimizations (`worker-build --dev`) to compile faster.
 
 ## A request, step by step
 
@@ -33,7 +34,7 @@ flowchart TD
     O -->|no| W2[axum response converted to a JavaScript Response]
 ```
 
-1. **Static files first.** `wrangler.toml` declares `[assets] directory = "public"`. Cloudflare serves a request that matches a file in `public/` (`/robots.txt`, images, CSS) from Workers Static Assets, without invoking the Worker: no Worker request counted, no CPU used.
+1. **Static files first.** `wrangler.config.ts` declares `assetsDirectory: "public"`. Cloudflare serves a request that matches a file in `public/` (`/robots.txt`, images, CSS) from Workers Static Assets, without invoking the Worker: no Worker request counted, no CPU used.
 2. **The Worker's `fetch` event.** Every other request runs the entry point `ocre new` writes into `src/lib.rs`:
 
    ```rust
@@ -70,7 +71,7 @@ flowchart TD
        Router::new().route("/stats", get(stats))
    }
 
-   /// `GET /stats`: one D1 query through the `DB` binding, and a `[vars]` value.
+   /// `GET /stats`: one D1 query through the `DB` binding, and a plain-text variable.
    async fn stats(State(ctx): State<Ctx>) -> Result<String> {
        let row: Option<Count> = ctx.db()?.first("SELECT COUNT(*) AS count FROM posts", params![]).await?;
        let sender = ctx.env().var("MAIL_FROM")?.to_string();
@@ -89,19 +90,19 @@ That is why a generated `fetch` returns `worker::Result<worker::web_sys::Respons
 
 ## Cloudflare products behind each feature
 
-One Worker handles every kind of event: HTTP requests, queue batches, cron runs and incoming email. Each invocation has its own CPU budget (10 ms on the free plan). The bindings are declared in `wrangler.toml`; the generator that first needs one adds it.
+One Worker handles every kind of event: HTTP requests, queue batches, cron runs and incoming email. Each invocation has its own CPU budget (10 ms on the free plan). The bindings are declared in `cloudflare.config.ts`; the generator that first needs one adds it.
 
 | Feature | Cloudflare product | Binding or config | Ocre API | Added by |
 |---|---|---|---|---|
 | Static files | Workers Static Assets | `[assets] directory = "public"` | none | `ocre new` |
-| Models, migrations | D1 (SQLite) | `[[d1_databases]] binding = "DB"` | `ctx.db()`, `Db::all` / `first` / `execute` / `batch`, `params!` | `ocre new` |
+| Models, migrations | D1 (SQLite) | `DB: bindings.d1({ name })` | `ctx.db()`, `Db::all` / `first` / `execute` / `batch`, `params!` | `ocre new` |
 | Sessions, flash | none: an encrypted cookie | `SECRET_KEY_BASE` secret | `Session`, `Flash` | `ocre new` (`.dev.vars`), `ocre deploy` |
-| Background jobs | Queues | `[[queues.producers]] binding = "JOBS"`, `[[queues.consumers]]`, a dead-letter queue | `ocre::jobs::enqueue`, `enqueue_in`; entry point `consume` | `ocre g job` |
+| Background jobs | Queues | `JOBS: bindings.queue({ name })`, `triggers.queue(...)`, a dead-letter queue | `ocre::jobs::enqueue`, `enqueue_in`; entry point `consume` | `ocre g job` |
 | Scheduled tasks | Cron Triggers | `[triggers] crons` | entry point `ocre::jobs::cron` | `ocre g schedule` |
-| Files | R2 | `[[r2_buckets]] binding = "STORAGE"` | `ocre::storage` | first `attachment` field |
-| Realtime | Durable Objects (WebSocket Hibernation) | `[[durable_objects.bindings]] name = "CHANNELS"`, `[[migrations]]` | `ocre::realtime`, the `OcreChannel` class (feature `realtime`) | `ocre g scaffold ... --realtime` |
-| Cache | Workers KV | `[[kv_namespaces]] binding = "CACHE"` | `ocre::cache` | `ocre g cache` |
-| Sending email | Resend's HTTP API, or Email Service | `MAIL_ADAPTER`, `MAIL_FROM`; `RESEND_API_KEY` or `[[send_email]] name = "EMAIL"` | `ocre::mail::send`, `deliver_later` | `ocre new` (`[vars]`), `ocre g mailer` |
+| Files | R2 | `STORAGE: bindings.r2({ name })` | `ocre::storage` | first `attachment` field |
+| Realtime | Durable Objects (WebSocket Hibernation) | `CHANNELS: bindings.durableObject(...)`, `OcreChannel: exports.durableObject(...)` | `ocre::realtime`, the `OcreChannel` class (feature `realtime`) | `ocre g scaffold ... --realtime` |
+| Cache | Workers KV | `CACHE: bindings.kv()` | `ocre::cache` | `ocre g cache` |
+| Sending email | Resend's HTTP API, or Email Service | `MAIL_ADAPTER`, `MAIL_FROM`; `RESEND_API_KEY` or `EMAIL: bindings.sendEmail()` | `ocre::mail::send`, `deliver_later` | `ocre new` (`bindings.text`), `ocre g mailer` |
 | Receiving email | Email Routing | a routing rule in the dashboard | entry point `ocre::mail::receive` | `ocre g mailbox` |
 
 The generators add the matching entry point to `src/lib.rs`; each hands the event and the environment to Ocre, which builds a `Ctx` and calls your code (from the fixture app of these docs, after `ocre g mailbox`, `ocre g job` and `ocre g schedule`):
@@ -119,7 +120,7 @@ async fn queue(batch: worker::MessageBatch<String>, env: worker::Env, _ctx: work
     ocre::jobs::consume(batch, env, jobs::perform).await
 }
 
-/// Cron Triggers (`[triggers] crons` in wrangler.toml), run by `schedules::run` (src/schedules/mod.rs).
+/// Cron Triggers (`triggers.scheduled` in cloudflare.config.ts), run by `schedules::run` (src/schedules/mod.rs).
 #[worker::event(scheduled)]
 async fn scheduled(event: worker::ScheduledEvent, env: worker::Env, _ctx: worker::ScheduleContext) {
     ocre::jobs::cron(event, env, schedules::run).await

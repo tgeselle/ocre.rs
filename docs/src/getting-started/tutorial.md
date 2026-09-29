@@ -4,7 +4,7 @@ This tutorial builds a small blog with Ocre, step by step: posts and comments st
 
 ## Before you start
 
-- The tools from [Installation](installation.md): Rust through rustup with the `wasm32-unknown-unknown` target, Node.js 20 or newer, and the `ocre` CLI (`ocre --version` prints `ocre 0.1.0`).
+- The tools from [Installation](installation.md): Rust through rustup with the `wasm32-unknown-unknown` target, Node.js 22 or newer, and the `ocre` CLI (`ocre --version` prints `ocre 0.1.0`).
 - About 20 minutes. Nothing here needs a Cloudflare account until [Deploy](#deploy); the whole app runs locally.
 - `curl`, to follow along from a terminal. A browser works as well: every page below is a normal HTML page at `http://localhost:8787`.
 
@@ -19,7 +19,10 @@ cd blog
 
 ```text
   create  blog/Cargo.toml
-  create  blog/wrangler.toml
+  create  blog/cloudflare.config.ts
+  create  blog/wrangler.config.ts
+  create  blog/package.json
+  create  blog/tsconfig.json
   create  blog/rust-toolchain.toml
   create  blog/.gitignore
   create  blog/AGENTS.md
@@ -30,6 +33,7 @@ cd blog
   create  blog/templates/home.html
   create  blog/templates/error.html
   create  blog/.dev.vars
+  npm install (cf 1.0.0-beta.5, wrangler 4.144.0)
 
 Next:
   cd blog
@@ -37,7 +41,7 @@ Next:
   ocre deploy
 ```
 
-`--yes` skips the guided setup and keeps its defaults: a full-stack app (HTML pages), the empty starter, no Git repository, no Cloudflare login. Without `--yes`, in a terminal, `ocre new blog` asks those questions instead (see [Installation](installation.md#create-an-app-with-the-guided-setup)). Add `--git` to run `git init`.
+`--yes` skips the guided setup and keeps its defaults: a full-stack app (HTML pages), the empty starter, no Git repository, no Cloudflare login. `ocre new` then runs `npm install` in the app, which installs Cloudflare's `cf` CLI (with the `wrangler` it delegates builds to, and `typescript`) at the versions pinned in `package.json`; pass `--no-install` to skip it when offline, and run `npm install` later. Without `--yes`, in a terminal, `ocre new blog` asks those questions instead (see [Installation](installation.md#create-an-app-with-the-guided-setup)). Add `--git` to run `git init`.
 
 The app is a Rust crate compiled to WebAssembly and run as one Cloudflare Worker. `src/lib.rs` is the entry point and the router:
 
@@ -842,7 +846,7 @@ ocre g auth
   create  templates/auth/confirmation_show.html
   update  src/models/mod.rs
   update  src/lib.rs
-  update  wrangler.toml
+  update  cloudflare.config.ts
 
 Next:
   ocre migrate
@@ -930,7 +934,7 @@ Location: /login
 <p class="alert">Please log in to continue.</p>
 ```
 
-A wrong password re-renders the login form with status 422 and `Invalid email or password.`. Login, sign-up and the email forms allow 10 attempts a minute per IP address (the `[[ratelimits]]` binding `ocre g auth` added to `wrangler.toml`, free on Workers); the 11th answers 429. The right password signs in and returns to the page that asked for the login:
+A wrong password re-renders the login form with status 422 and `Invalid email or password.`. Login, sign-up and the email forms allow 10 attempts a minute per IP address (the `AUTH_RATE_LIMITER` binding `ocre g auth` added to `cloudflare.config.ts`, free on Workers); the 11th answers 429. The right password signs in and returns to the page that asked for the login:
 
 ```sh
 curl -si -c cookies.txt -b cookies.txt http://localhost:8787/login -d 'email=ada@example.com&password=correct-horse' | grep -i '^http\|^location'
@@ -1308,7 +1312,7 @@ A filter keeps the routes whose method, path or handler contains it (`ocre route
 
 ## Deploy
 
-Deploying needs a Cloudflare account (the free plan is enough) and the login of wrangler. The commands in this section were not run for this page: the behavior below is described from the CLI's code.
+Deploying needs a Cloudflare account (the free plan is enough) and a login of Cloudflare's `cf` CLI. The commands in this section were not run for this page: the behavior below is described from the CLI's code.
 
 ### Log in
 
@@ -1316,14 +1320,14 @@ Deploying needs a Cloudflare account (the free plan is enough) and the login of 
 ocre login
 ```
 
-If wrangler already has a login (or `CLOUDFLARE_API_TOKEN` is set), nothing opens. Otherwise it runs `wrangler login`, which opens the browser to approve access. The command then prints `Logged in to Cloudflare as <email>`. A login with several accounts needs `account_id = "..."` in `wrangler.toml` (`ocre new --account-id` writes it).
+If cf already has a login (or `CLOUDFLARE_API_TOKEN` is set), nothing opens. Otherwise it runs `cf auth login`, which opens the browser to approve access. The command then prints `Logged in to Cloudflare as <email>`. cf keeps its own login, separate from wrangler's: if you logged in with wrangler for an earlier Ocre, log in once more. A login with several accounts needs `accountId: "...",` at the top of `cloudflare.config.ts` (`ocre new --account-id` writes it). cf also sends anonymous usage telemetry by default; `npx cf cli telemetry disable` turns it off.
 
 ### Email in production
 
 The auth pages send email, and in production `.dev.vars` does not apply: with `MAIL_ADAPTER` unset, the magic-link and password-reset forms answer 500 and the log names the fix (`cannot send email: MAIL_ADAPTER is not set. ...`). Sign-up and password login do not send email and work without it. Before deploying, pick an adapter; on the free plan, [Resend](https://resend.com/docs/knowledge-base/account-quotas-and-limits) sends to any recipient (free: 100 emails a day, 3,000 a month, one domain, September 2026):
 
-1. In `wrangler.toml`, under `[vars]`, uncomment `MAIL_ADAPTER = "resend"` and set `MAIL_FROM` to an address on a domain verified in Resend, for example `MAIL_FROM = "Blog <noreply@yourdomain.com>"`.
-2. Store the API key as a secret: `npx wrangler secret put RESEND_API_KEY` (it prompts for the value). A Worker must exist before it can have secrets, so run this after the first `ocre deploy` if the Worker is new.
+1. In `cloudflare.config.ts`, in `worker.env`, uncomment `MAIL_ADAPTER: bindings.text("resend"),` and set `MAIL_FROM` to an address on a domain verified in Resend, for example `MAIL_FROM: bindings.text("Blog <noreply@yourdomain.com>"),`.
+2. Store the API key as a secret: put `RESEND_API_KEY=<key>` in `.prod.vars` (git-ignored), then run `ocre secrets push RESEND_API_KEY --file .prod.vars`. A Worker must exist before it can have secrets, so run this after the first `ocre deploy` if the Worker is new.
 
 See [Email](../guides/email.md) for the `cloudflare` adapter and [Configuration](../reference/configuration.md#mail_adapter) for every variable.
 
@@ -1336,12 +1340,13 @@ ocre deploy
 In order, `ocre deploy`:
 
 1. Checks the locale files (when the app has translations) and the `wasm32-unknown-unknown` target, as `ocre dev` does.
-2. Creates the Cloudflare resources `wrangler.toml` names that are missing: queues, KV namespaces without an `id`, R2 buckets. This blog uses none of them.
-3. Asks `wrangler secret list` whether the Worker has `SECRET_KEY_BASE`. A new Worker has none, so a fresh random one is uploaded with the deploy (`--secrets-file`). An existing secret is never replaced, since that would sign every user out.
-4. Looks up the D1 database named in `wrangler.toml` (`blog`). When it exists, applies the pending migrations to it (`--remote`), then deploys; the first time, deploys first (wrangler creates the database and binds it), then applies all migrations.
-5. Deploys with `wrangler deploy`, which builds the Worker in release mode (optimized for size, slower to compile than `ocre dev`) and uploads it.
+2. Looks up the D1 database named in `cloudflare.config.ts` (`blog`) with `cf d1 list` and creates it the first time.
+3. Creates the other Cloudflare resources `cloudflare.config.ts` names that are missing: queues, R2 buckets, KV namespaces without an `id`. This blog uses none of them.
+4. Asks `cf workers secrets list` whether the Worker has `SECRET_KEY_BASE`. A new Worker has none, so a fresh random one is uploaded with the deploy (`--secrets-file`). An existing secret is never replaced, since that would sign every user out.
+5. Applies the pending migrations to the production database (`cf d1 migrations apply`), before the new code goes live.
+6. Deploys with `cf deploy`, which builds the Worker in release mode (optimized for size, slower to compile than `ocre dev`) and uploads it.
 
-wrangler's own output is shown as it runs; the command then ends with:
+cf's own output is shown as it runs; the command then ends with:
 
 ```text
 Created the SECRET_KEY_BASE secret on Cloudflare
@@ -1349,7 +1354,7 @@ Created the SECRET_KEY_BASE secret on Cloudflare
 https://blog.<your-subdomain>.workers.dev
 ```
 
-The first line appears only on the deploy that created the secret. With `--json`, the result is `{"command": "deploy", "ok": true, "secret_created": true, "url": "https://blog.<your-subdomain>.workers.dev"}`. Run `ocre deploy` again after each change: later deploys migrate the database first, so the new code never runs against an old schema.
+The first line appears only on the deploy that created the secret. With `--json`, the result is `{"command": "deploy", "ok": true, "secret_created": true, "url": "https://blog.<your-subdomain>.workers.dev"}`. Run `ocre deploy` again after each change: every deploy migrates the database first, so the new code never runs against an old schema.
 
 Free-plan limits that matter for this blog (September 2026, [Workers limits](https://developers.cloudflare.com/workers/platform/limits/)): 100,000 Worker requests a day and 10 ms of CPU per request. Page views cost well under 10 ms; a login or sign-up uses about half of it for the password hash. The login, sign-up, token and email routes are rate limited by the `AUTH_RATE_LIMITER` binding (10 attempts a minute per IP address and Cloudflare location), which needs no storage and is free. [Free-plan limits](../reference/limits.md) lists the rest, including D1.
 

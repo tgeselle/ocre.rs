@@ -38,7 +38,7 @@ pub const TOKEN_TTL_SECONDS: i64 = 3600;
 /// `Location::Cookie("token")` or `Location::Query("token")` to accept
 /// those too.
 pub const TOKEN_LOCATIONS: &[Location] = &[Location::Bearer];
-/// The Workers Rate Limiting binding in wrangler.toml (`[[ratelimits]]`).
+/// The Workers Rate Limiting binding in cloudflare.config.ts (`bindings.rateLimit`).
 pub const RATE_LIMITER: &str = "AUTH_RATE_LIMITER";
 
 pub fn routes() -> Router<Ctx> {
@@ -52,7 +52,7 @@ pub fn routes() -> Router<Ctx> {
 
 /// Counts one `action` attempt from the request's IP address against
 /// `AUTH_RATE_LIMITER` (10 a minute per Cloudflare location, set in
-/// wrangler.toml): 429 when over. Used by every route that checks a
+/// cloudflare.config.ts): 429 when over. Used by every route that checks a
 /// password or sends an email. Free plan: no D1 or KV operation.
 pub async fn throttle(ctx: &Ctx, headers: &HeaderMap, action: &str) -> ocre::Result<()> {
     let ip = ocre::remote_ip(headers).map_or_else(|| "unknown".to_owned(), |ip| ip.to_string());

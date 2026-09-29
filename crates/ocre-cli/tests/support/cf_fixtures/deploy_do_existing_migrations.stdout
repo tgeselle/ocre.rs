@@ -1,0 +1,17 @@
+├  Build
+│  Delegating to Wrangler
+◆  Build complete
+│
+├  Deploy
+│  Total Upload: 1616.45 KiB / gzip: 438.42 KiB
+│  Worker Startup Time: 5 ms
+│  Your Worker has access to the following bindings:
+│  Binding                                                         Resource            
+│  env.CHANNELS (OcreChannel, defined in ocre-cfcheck-legacy)      Durable Object      
+│
+│  Uploaded ocre-cfcheck-legacy (1.47 sec)
+│  Deployed ocre-cfcheck-legacy triggers (0.43 sec)
+│    https://ocre-cfcheck-legacy.example.workers.dev
+│  Current Version ID: 470272d6-88a0-4b9c-8229-dc343f30c728
+│
+◆  Deploy complete

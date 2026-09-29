@@ -1,5 +1,6 @@
 //! Database commands on the app's D1 database: migration status, seeds,
-//! local reset and ad-hoc SQL. All of them go through wrangler.
+//! local reset and ad-hoc SQL: the local database through the app's wrangler
+//! ([`LocalD1`](crate::cloudflare::LocalD1)), the remote one through cf.
 
 use std::fmt;
 
@@ -11,9 +12,9 @@ use serde_json::Value;
 
 use crate::{
     CliResult,
+    cloudflare::{Database, Echo},
     output::{CliError, Report},
     project::Project,
-    wrangler::{Echo, Wrangler, target},
 };
 
 /// Seed data, relative to the app root.
@@ -28,20 +29,13 @@ const SCHEMA_QUERY: &str = "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL 
      AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\' AND name != 'd1_migrations' \
      ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 ELSE 2 END, tbl_name, name";
 
-/// Wrangler's local D1 databases, relative to the app root.
+/// Local D1 databases (shared by `cf dev` and the app's wrangler), relative to the app root.
 pub(crate) const LOCAL_STATE: &str = ".wrangler/state/v3/d1";
 
-/// `ocre migrate --status`: wrangler's table on screen, pending names in the report.
+/// `ocre migrate --status`: the pending migrations.
 pub fn status(remote: bool, json: bool) -> CliResult {
     let project = Project::find()?;
-    let output = Wrangler::new(&project.root, Echo::for_json(json)).run(&[
-        "d1",
-        "migrations",
-        "list",
-        &project.database_name,
-        target(remote),
-    ])?;
-    let pending = pending_migrations(&output);
+    let pending = Database::open(&project, Echo::for_json(json), remote)?.pending()?;
     let next = match (pending.is_empty(), remote) {
         (true, _) => vec![],
         (false, false) => vec!["ocre migrate".to_owned()],
@@ -56,7 +50,7 @@ pub fn seed(remote: bool, json: bool) -> CliResult {
         return Err(CliError::new(format!("{SEEDS} not found in the app"))
             .hint(format!("create {SEEDS} with INSERT statements, then run `ocre db seed`")));
     }
-    let step = load_seeds(&Wrangler::new(&project.root, Echo::for_json(json)), &project.database_name, remote)?;
+    let step = load_seeds(&Database::open(&project, Echo::for_json(json), remote)?)?;
     Ok(Report { ran: vec![step], remote, ..Report::new("db seed") })
 }
 
@@ -64,43 +58,32 @@ pub fn seed(remote: bool, json: bool) -> CliResult {
 /// loads the seeds when the app has them.
 pub fn reset(json: bool) -> CliResult {
     let project = Project::find()?;
-    let wrangler = Wrangler::new(&project.root, Echo::for_json(json));
+    let database = Database::open(&project, Echo::for_json(json), false)?;
     let mut ran = Vec::new();
     let state = project.root.join(LOCAL_STATE);
     if state.exists() {
         std::fs::remove_dir_all(&state)?;
         ran.push(format!("deleted {LOCAL_STATE}"));
     }
-    wrangler.migrate(&project.database_name, false)?;
+    database.migrate()?;
     ran.push("applied migrations (--local)".to_owned());
     if project.root.join(SEEDS).is_file() {
-        ran.push(load_seeds(&wrangler, &project.database_name, false)?);
+        ran.push(load_seeds(&database)?);
     }
     Ok(Report { ran, ..Report::new("db reset") })
 }
 
-/// `--yes` answers wrangler's "database unavailable during import" prompt,
-/// which would otherwise hang agents on remote imports.
-pub(crate) fn load_seeds(wrangler: &Wrangler, database: &str, remote: bool) -> Result<String, CliError> {
-    wrangler.run(&["d1", "execute", database, "--file", SEEDS, target(remote), "--yes"])?;
-    Ok(format!("loaded {SEEDS} ({})", target(remote)))
+pub(crate) fn load_seeds(database: &Database) -> Result<String, CliError> {
+    database.run_file(SEEDS)?;
+    Ok(format!("loaded {SEEDS} ({})", database.target()))
 }
 
 /// Runs `query`; human mode prints each statement's rows as a table.
 pub fn sql(query: &str, remote: bool, json: bool) -> CliResult {
     let project = Project::find()?;
-    // Captured: stdout is wrangler's JSON, rendered below; failures include it.
-    let output = Wrangler::new(&project.root, Echo::Capture).run(&[
-        "d1",
-        "execute",
-        &project.database_name,
-        "--command",
-        query,
-        target(remote),
-        "--json",
-    ])?;
-    let unexpected =
-        |err: serde_json::Error| CliError::new(format!("unexpected `wrangler d1 execute --json` output: {err}"));
+    // Captured: the JSON is rendered below; failures include the tool's output.
+    let output = Database::open(&project, Echo::Capture, remote)?.query(query)?;
+    let unexpected = |err: serde_json::Error| CliError::new(format!("unexpected D1 query output: {err}"));
     let statements: Vec<Statement> = serde_json::from_str(&output).map_err(unexpected)?;
     if !json {
         print!("{}", render(&statements));
@@ -114,17 +97,9 @@ pub fn sql(query: &str, remote: bool, json: bool) -> CliResult {
 /// `ocre g migration rebuild_<table>`. Migrations stay the source of truth.
 pub fn schema(remote: bool, _json: bool) -> CliResult {
     let project = Project::find()?;
-    let output = Wrangler::new(&project.root, Echo::Capture).run(&[
-        "d1",
-        "execute",
-        &project.database_name,
-        "--command",
-        SCHEMA_QUERY,
-        target(remote),
-        "--json",
-    ])?;
-    let statements: Vec<Statement> = serde_json::from_str(&output)
-        .map_err(|err| CliError::new(format!("unexpected `wrangler d1 execute --json` output: {err}")))?;
+    let output = Database::open(&project, Echo::Capture, remote)?.query(SCHEMA_QUERY)?;
+    let statements: Vec<Statement> =
+        serde_json::from_str(&output).map_err(|err| CliError::new(format!("unexpected D1 query output: {err}")))?;
     let path = project.root.join(SCHEMA);
     let existed = path.exists();
     std::fs::create_dir_all(project.root.join("db"))?;
@@ -151,18 +126,7 @@ fn schema_sql(statements: &[Statement], remote: bool) -> String {
     out
 }
 
-/// Names from the "Migrations to be applied" table of `wrangler d1 migrations list`.
-pub(crate) fn pending_migrations(output: &str) -> Vec<String> {
-    output
-        .lines()
-        .filter_map(|line| line.trim().strip_prefix('│')?.strip_suffix('│'))
-        .map(str::trim)
-        .filter(|name| name.ends_with(".sql"))
-        .map(str::to_owned)
-        .collect()
-}
-
-/// One statement's result in `wrangler d1 execute --json`.
+/// One statement's result of a D1 query (`wrangler d1 execute --json`, `cf d1 query`).
 #[derive(Deserialize)]
 struct Statement {
     #[serde(default)]

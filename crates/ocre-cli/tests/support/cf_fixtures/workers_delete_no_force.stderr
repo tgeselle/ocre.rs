@@ -1,0 +1,3 @@
+? This will permanently delete the Worker and its associated versions and deployments. Continue?
+  (non-interactive; pass --force to confirm)
+Aborted.

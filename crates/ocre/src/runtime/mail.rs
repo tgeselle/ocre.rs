@@ -37,7 +37,7 @@ use crate::{
 /// - [`Error::Internal`](crate::Error::Internal) (500), with a log message naming the fix:
 ///   `MAIL_ADAPTER` unset or unknown; `MAIL_FROM` unset or not an address; a
 ///   subject that is empty or spans several lines; the `RESEND_API_KEY`
-///   secret or the `[[send_email]]` binding named `EMAIL` missing; the
+///   secret or the `EMAIL: bindings.sendEmail()` binding missing; the
 ///   provider refused the email (e.g. Resend's quota reached, an unverified
 ///   domain or recipient) or could not be reached.
 ///
@@ -83,7 +83,7 @@ pub fn send(ctx: &Ctx, email: Email) -> impl Future<Output = Result<()>> + Send 
 /// - [`Error::Internal`](crate::Error::Internal) (500): `MAIL_ADAPTER` unset or
 ///   unknown, `MAIL_FROM` unset or not an address, a subject that is empty or
 ///   spans several lines, an email over the 128 KB queue message limit, the
-///   `[[queues.producers]]` binding named `JOBS` missing from wrangler.toml, or
+///   `JOBS` queue binding missing from cloudflare.config.ts, or
 ///   Queues refusing the message.
 ///
 /// # Examples
@@ -174,8 +174,8 @@ async fn resend(env: &Env, outgoing: &Outgoing) -> Result<()> {
 async fn cloudflare(env: &Env, outgoing: &Outgoing) -> Result<()> {
     let binding = env.send_email(EMAIL_BINDING).map_err(|err| {
         Error::internal(format!(
-            "cannot send email: the send_email binding `{EMAIL_BINDING}` is missing ({err}). Fix: add a \
-             [[send_email]] entry with name = \"{EMAIL_BINDING}\" to wrangler.toml"
+            "cannot send email: the send_email binding `{EMAIL_BINDING}` is missing ({err}). Fix: add \
+             `{EMAIL_BINDING}: bindings.sendEmail(),` to worker.env in cloudflare.config.ts"
         ))
     })?;
     let Outgoing { from, email } = outgoing;

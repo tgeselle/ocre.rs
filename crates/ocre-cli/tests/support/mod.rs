@@ -1,5 +1,6 @@
-//! Test sandbox: a scratch directory, a fake `npx` (wrangler) on PATH, and
-//! helpers to run the real `ocre` binary against them.
+//! Test sandbox: a scratch directory, fake `cf`, `wrangler`, `npx`, `npm`,
+//! `node` and `tsc` on PATH (tests/support/fake_cf.sh), and helpers to run
+//! the real `ocre` binary against them.
 
 #![allow(dead_code)] // each test binary uses a different subset
 
@@ -15,6 +16,15 @@ use std::{
 use serde_json::Value;
 
 pub const OCRE: &str = env!("CARGO_BIN_EXE_ocre");
+
+/// Names the fake answers to on PATH; `npm install` links the others
+/// (cf, wrangler, tsc) into the app's node_modules/.bin.
+const FAKES: [&str; 3] = ["npx", "npm", "node"];
+
+/// `wrangler <args>` of the local database fallback, as logged by the fake.
+pub fn local_d1(args: &str) -> String {
+    format!("wrangler {args} -c .wrangler/ocre-d1.json --persist-to .wrangler/state")
+}
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -46,8 +56,9 @@ impl Sandbox {
             bin,
             state,
         };
-        sandbox.script("npx", include_str!("fake_npx.sh"));
-        sandbox.write_state("d1_list.json", "[]");
+        for name in FAKES {
+            sandbox.script(name, include_str!("fake_cf.sh"));
+        }
         sandbox
     }
 
@@ -58,21 +69,28 @@ impl Sandbox {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
-    /// PATH is only the sandbox bin directory: no git, rustc, node...
+    /// Takes a fake off PATH (e.g. `node`, to test its absence).
+    pub fn remove_tool(&self, name: &str) {
+        fs::remove_file(self.bin.join(name)).unwrap();
+    }
+
+    /// PATH is only the sandbox bin directory: no git, rustc, real node...
     pub fn isolate_path(&mut self) {
         self.path = self.bin.clone().into_os_string();
     }
 
-    /// Removes the fake wrangler so the real `npx wrangler` runs.
-    pub fn use_real_wrangler(&self) {
-        fs::remove_file(self.bin.join("npx")).unwrap();
+    /// Removes the fakes so the real npm, node, cf and wrangler run.
+    pub fn use_real_cloudflare(&self) {
+        for name in FAKES {
+            self.remove_tool(name);
+        }
     }
 
     pub fn write_state(&self, name: &str, contents: &str) {
         fs::write(self.state.join(name), contents).unwrap();
     }
 
-    /// JSON outputs of the next `d1 execute --command` calls, one per call, in order.
+    /// JSON outputs of the next D1 queries, one per call, in order.
     pub fn queue_execute(&self, outputs: &[&str]) {
         let dir = self.state.join("execute_queue");
         fs::create_dir_all(&dir).unwrap();
@@ -81,9 +99,14 @@ impl Sandbox {
         }
     }
 
-    /// Makes the fake wrangler behave differently (see fake_npx.sh).
+    /// Makes the fakes behave differently (see fake_cf.sh).
     pub fn set(&self, marker: &str) {
         self.write_state(marker, "");
+    }
+
+    /// The remote D1 database `name` exists (id `uuid-<name>`).
+    pub fn remote_database(&self, name: &str) {
+        self.set(&format!("d1db_{name}"));
     }
 
     pub fn login_as(&self, accounts: &[(&str, &str)]) {
@@ -91,7 +114,13 @@ impl Sandbox {
             .iter()
             .map(|(id, name)| serde_json::json!({ "id": id, "name": name, "type": "standard" }))
             .collect();
-        let whoami = serde_json::json!({ "loggedIn": true, "email": "dev@example.com", "accounts": accounts });
+        let whoami = serde_json::json!({
+            "authenticated": true,
+            "authSource": "oauth",
+            "tokenValid": true,
+            "email": "dev@example.com",
+            "accounts": accounts,
+        });
         self.write_state("whoami.json", &whoami.to_string());
         self.set("logged_in");
     }
@@ -101,14 +130,24 @@ impl Sandbox {
         fs::remove_file(self.state.join("logged_in")).unwrap();
     }
 
-    /// Wrangler invocations so far, e.g. `["whoami --json", "login"]`.
+    /// cf, wrangler and npm invocations so far, e.g. `["cf auth whoami", "cf auth login"]`.
     pub fn calls(&self) -> Vec<String> {
         fs::read_to_string(self.state.join("calls.log")).unwrap_or_default().lines().map(str::to_owned).collect()
     }
 
+    /// Forgets the calls so far.
+    pub fn clear_calls(&self) {
+        let _ = fs::remove_file(self.state.join("calls.log"));
+    }
+
     pub fn command(&self, args: &[&str], cwd: &Path) -> Command {
         let mut command = Command::new(OCRE);
-        command.args(args).current_dir(cwd).env("PATH", &self.path).env("FAKE_WRANGLER_STATE", &self.state);
+        command
+            .args(args)
+            .current_dir(cwd)
+            .env("PATH", &self.path)
+            .env("FAKE_CF_STATE", &self.state)
+            .env("FAKE_CF_FIXTURES", Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/cf_fixtures"));
         command
     }
 
@@ -127,13 +166,15 @@ impl Sandbox {
         (value, output.status.success())
     }
 
-    /// Creates `app` in the work dir with the local ocre crate, returns its root.
+    /// Creates `app` in the work dir with the local ocre crate (and the fake
+    /// npm packages), returns its root. The calls it made are forgotten.
     pub fn new_app(&self, name: &str, extra: &[&str]) -> PathBuf {
         let ocre = ocre_crate();
         let mut args = vec!["new", name, "--ocre-path", ocre.to_str().unwrap()];
         args.extend_from_slice(extra);
         let (report, ok) = self.json(&args, &self.work);
         assert!(ok, "{report}");
+        self.clear_calls();
         self.work.join(name)
     }
 }

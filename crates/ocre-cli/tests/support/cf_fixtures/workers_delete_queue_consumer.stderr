@@ -1,0 +1,7 @@
+
+┌ APIError
+│ [10064] Cannot delete this Worker as it is a consumer for a Queue. Remove it from the Queue's consumers first, then retry.
+│ 403 Forbidden · HTTP /accounts/0123456789abcdef0123456789abcdef/workers/workers/ocre-cfcheck-demo?force=true
+└
+
+→ Check your API token permissions

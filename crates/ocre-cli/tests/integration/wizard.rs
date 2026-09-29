@@ -57,7 +57,7 @@ fn guided_setup_logs_in_and_deploys() {
     press(&mut s, "y");
     s.exp_string("Deploy it now?").unwrap();
     press(&mut s, ENTER);
-    s.exp_string("Your app is live at https://app.example.workers.dev").unwrap();
+    s.exp_string("Your app is live at https://blog.example.workers.dev").unwrap();
     let (_, code) = finish(s);
 
     assert_eq!(code, 0);
@@ -67,16 +67,18 @@ fn guided_setup_logs_in_and_deploys() {
     assert_eq!(
         sandbox.calls(),
         [
-            "whoami --json",
-            "whoami --json",
-            "login",
-            "whoami --json",
-            "secret list --format json",
-            "d1 list --json",
-            "deploy --secrets-file .wrangler/ocre-secrets.env",
+            "cf auth whoami",
+            "cf auth whoami",
+            "cf auth login",
+            "cf auth whoami",
+            "npm install",
+            "cf d1 list --name blog",
+            "cf d1 create --name blog",
+            "cf workers secrets list --worker blog",
+            "cf d1 migrations apply uuid-blog",
+            "cf deploy --secrets-file .wrangler/ocre-secrets.env",
             "secrets file ok",
             "build --release",
-            "d1 migrations apply blog --remote"
         ]
     );
 }
@@ -104,8 +106,8 @@ fn guided_setup_asks_which_account_when_there_are_several() {
     let (_, code) = finish(s);
 
     assert_eq!(code, 0);
-    let wrangler = fs::read_to_string(sandbox.work.join("shop/wrangler.toml")).unwrap();
-    assert!(wrangler.contains("account_id = \"acc2\""), "{wrangler}");
+    let config = fs::read_to_string(sandbox.work.join("shop/cloudflare.config.ts")).unwrap();
+    assert!(config.contains("\taccountId: \"acc2\",\n\tworker: {"), "{config}");
     assert!(!sandbox.work.join("shop/.git").exists());
     assert!(!sandbox.work.join("shop/src/posts.rs").exists(), "empty starter");
 }
@@ -128,7 +130,7 @@ fn guided_setup_builds_an_api_only_app_and_can_skip_cloudflare() {
     let (_, code) = finish(s);
 
     assert_eq!(code, 0);
-    assert_eq!(sandbox.calls(), ["whoami --json"], "no deploy offered without a login");
+    assert_eq!(sandbox.calls(), ["cf auth whoami", "npm install"], "no deploy offered without a login");
     let root = sandbox.work.join("later");
     assert!(root.join("src/posts_api.rs").is_file(), "blog starter as a JSON API");
     assert!(!root.join("templates").exists());
@@ -143,9 +145,22 @@ fn flags_answer_the_questions_in_a_terminal_too() {
     let (output, code) = finish(s);
 
     assert_eq!(code, 0, "{output}");
-    assert!(output.contains("Your app is live at https://app.example.workers.dev"), "{output}");
+    assert!(output.contains("Your app is live at https://flagged.example.workers.dev"), "{output}");
     assert!(!output.contains("What are you building?") && !output.contains("Deploy it now?"), "{output}");
     assert!(sandbox.work.join("flagged/src/lib.rs").is_file() && !sandbox.work.join("flagged/templates").exists());
+}
+
+#[test]
+fn no_install_skips_npm_and_the_deploy_question() {
+    let sandbox = Sandbox::new();
+    sandbox.login_as(&[("acc1", "Main")]);
+    let s = start(&sandbox, &["new", "offline", "--full-stack", "--starter", "empty", "--no-git", "--no-install"]);
+    let (output, code) = finish(s);
+
+    assert_eq!(code, 0, "{output}");
+    assert!(output.contains("Happy building!") && !output.contains("Deploy it now?"), "{output}");
+    assert_eq!(sandbox.calls(), ["cf auth whoami"]);
+    assert!(!sandbox.work.join("offline/node_modules").exists());
 }
 
 #[test]
@@ -167,7 +182,7 @@ fn flags_can_decline_login_and_deploy() {
     sandbox.login_as(&[("acc1", "Main"), ("acc2", "Side")]);
     sandbox.write_state(
         "whoami.json",
-        r#"{"loggedIn":true,"accounts":[{"id":"acc1","name":"Main"},{"id":"acc2","name":"Side"}]}"#,
+        r#"{"authenticated":true,"accounts":[{"id":"acc1","name":"Main"},{"id":"acc2","name":"Side"}]}"#,
     );
     let s = start(
         &sandbox,
@@ -176,11 +191,12 @@ fn flags_can_decline_login_and_deploy() {
     let (output, code) = finish(s);
     assert_eq!(code, 0, "{output}");
     assert!(output.contains("Logged in to Cloudflare as an API token"), "{output}");
-    assert!(fs::read_to_string(sandbox.work.join("token/wrangler.toml")).unwrap().contains("account_id = \"acc1\""));
+    let config = fs::read_to_string(sandbox.work.join("token/cloudflare.config.ts")).unwrap();
+    assert!(config.contains("\taccountId: \"acc1\",\n"), "{config}");
 }
 
 #[test]
-fn a_failing_deploy_shows_the_captured_wrangler_output() {
+fn a_failing_deploy_shows_the_captured_cf_output() {
     let sandbox = Sandbox::new();
     sandbox.login_as(&[("acc1", "Main")]);
     sandbox.set("deploy_fails");
@@ -188,8 +204,9 @@ fn a_failing_deploy_shows_the_captured_wrangler_output() {
     let (output, code) = finish(s);
 
     assert_eq!(code, 1);
-    assert!(output.contains("error: `wrangler deploy --secrets-file .wrangler/ocre-secrets.env` failed"), "{output}");
-    assert!(output.contains("stdout before failure") && output.contains("[ERROR] deploy_fails"), "{output}");
+    assert!(output.contains("error: `cf deploy --secrets-file .wrangler/ocre-secrets.env` failed"), "{output}");
+    assert!(output.contains("stdout before failure") && output.contains("deploy_fails"), "{output}");
+    assert!(!sandbox.work.join("broken/.wrangler/ocre-secrets.env").exists(), "secrets file deleted");
 }
 
 #[test]

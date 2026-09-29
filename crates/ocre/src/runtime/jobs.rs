@@ -19,7 +19,7 @@ use crate::{
 /// Sends `job` to the `JOBS` queue, to run in the background through [`consume`](crate::jobs::consume).
 ///
 /// Returns once Cloudflare stored the message; the `queue` event runs it
-/// within seconds (`max_batch_timeout = 5` in wrangler.toml). The job is
+/// within seconds (`maxBatchTimeout: 5` in cloudflare.config.ts). The job is
 /// serialized to JSON and wrapped as `{"at": <now>, "job": ...}`; the whole
 /// message must fit in 128 KB, so pass ids, not records. The returned future
 /// is `Send`, so axum handlers can await it.
@@ -33,7 +33,7 @@ use crate::{
 ///
 /// [`Error::Internal`](crate::Error::Internal) (500) when the job does not
 /// serialize to JSON, the message is over the 128 KB limit, the
-/// `[[queues.producers]] binding = "JOBS"` entry is missing from wrangler.toml
+/// `JOBS: bindings.queue(...)` entry is missing from cloudflare.config.ts
 /// (run `ocre g job <Name>` once), or Queues refuses the message.
 ///
 /// # Examples
@@ -101,9 +101,9 @@ pub fn enqueue_all<J: Serialize>(ctx: &Ctx, jobs: &[J]) -> impl Future<Output = 
 ///
 /// Cloudflare Queues has no priorities: Ocre gives urgent work its own
 /// queue instead, like Rails' `queue_as`/`set(queue:)` and Loco's named
-/// queues. Each queue has its own consumer settings in wrangler.toml
+/// queues. Each queue has its own consumer settings in cloudflare.config.ts
 /// (`ocre g job <Name> --queue urgent` adds `<app>-jobs-urgent` with
-/// `max_batch_timeout = 1`), so a backlog of slow jobs on `default` never
+/// `maxBatchTimeout: 1`), so a backlog of slow jobs on `default` never
 /// delays it. Every queue is consumed by the same `queue` event and the
 /// same `perform`. The name `default` is the `JOBS` queue of
 /// [`enqueue`](crate::jobs::enqueue); `urgent` is bound as `JOBS_URGENT`.
@@ -413,7 +413,7 @@ where
 /// Runs the app's task for the Cron Trigger that fired; the Worker's `scheduled` entry point.
 ///
 /// Calls `run(ctx, cron)`, where `cron` is the expression from
-/// `[triggers] crons` in wrangler.toml (UTC), and logs
+/// a `triggers.scheduled({ schedule })` entry of cloudflare.config.ts (UTC), and logs
 /// `[ocre cron] <cron> done` or `[ocre cron] <cron> failed: <error>`.
 /// Cloudflare does not retry a failed run; the next one comes at the next
 /// scheduled time, so enqueue jobs from the task for work that must not be

@@ -5,7 +5,7 @@ This guide moves slow or retryable work out of requests with background jobs on 
 ## Before you start
 
 - An app created with [`ocre new`](../reference/cli.md#ocre-new). Jobs use [Cloudflare Queues](https://developers.cloudflare.com/queues/), which the [Workers Free plan includes since February 2026](https://developers.cloudflare.com/changelog/post/2026-02-04-queues-free-plan/); schedules use [Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/).
-- Nothing to create by hand: the first `ocre g job` adds the queue to `wrangler.toml`, `ocre dev` runs it locally, and [`ocre deploy`](../reference/cli.md#ocre-deploy) creates it on Cloudflare.
+- Nothing to create by hand: the first `ocre g job` adds the queue to `cloudflare.config.ts`, `ocre dev` runs it locally, and [`ocre deploy`](../reference/cli.md#ocre-deploy) creates it on Cloudflare.
 - The examples build on `ocre g auth` (users) and `ocre g mailer User welcome` (the welcome email); see [Authentication](authentication.md) and [Email](email.md).
 - The outputs below come from an app created with `ocre new shop --starter blog`, served by `ocre dev` on the default port 8787.
 
@@ -32,7 +32,7 @@ ocre g job SendWelcome user_id:integer
   create  src/jobs/send_welcome.rs
   create  src/jobs/mod.rs
   update  src/lib.rs
-  update  wrangler.toml
+  update  cloudflare.config.ts
 
 Next:
   enqueue it from a handler: jobs::SendWelcome { user_id }.perform_later(&ctx).await?
@@ -47,7 +47,7 @@ The first job wires everything; later ones only create their file and add a vari
 | `src/jobs/send_welcome.rs` | `pub struct SendWelcome { pub user_id: i64 }` (serde), `fn perform_later(self, ctx)` (sends it to the queue) and `async fn perform(self, ctx: &Ctx) -> Result<()>`, which does nothing yet |
 | `src/jobs/mod.rs` | The `Job` enum (one variant per job) and `perform`, which matches on it; keep the `// ocre:jobs`, `// ocre:job-variants` and `// ocre:job-dispatch` markers |
 | `src/lib.rs` | `mod jobs;` and the `queue` entry point (first job only) |
-| `wrangler.toml` | The `JOBS` producer and the consumer settings (first job only) |
+| `cloudflare.config.ts` | The `JOBS` producer binding and the consumer trigger (first job only) |
 
 `src/jobs/mod.rs` after the first job:
 
@@ -89,22 +89,19 @@ async fn queue(batch: worker::MessageBatch<String>, env: worker::Env, _ctx: work
 }
 ```
 
-And the queue in `wrangler.toml` (for an app named `shop`):
+And the queue in `cloudflare.config.ts` (for an app named `shop`), the producer after `// ocre:env` and the consumer after `// ocre:triggers`:
 
-```toml
-[[queues.producers]]
-binding = "JOBS"
-queue = "shop-jobs"
+```ts
+// in worker.env
+// Background jobs (`ocre g job`): the Worker sends jobs to this queue and runs
+// them (src/jobs/). ...
+JOBS: bindings.queue({ name: "shop-jobs" }),
 
-# Up to 10 messages per run, waiting at most 5 s to fill a batch. Each run is
-# one Worker request with 10 ms of CPU on the free plan: lower max_batch_size
-# for CPU-heavy jobs. ...
-[[queues.consumers]]
-queue = "shop-jobs"
-max_batch_size = 10
-max_batch_timeout = 5
-max_retries = 5
-dead_letter_queue = "shop-jobs-failed"
+// in worker.triggers
+// Runs the jobs of shop-jobs: up to 10 messages per run, waiting at most 5 s
+// to fill a batch. Each run is one Worker request with 10 ms of CPU on the free
+// plan: lower maxBatchSize for CPU-heavy jobs. ...
+triggers.queue({ name: "shop-jobs", deadLetterQueue: "shop-jobs-failed", maxBatchSize: 10, maxBatchTimeout: 5, maxRetries: 5 }),
 ```
 
 ## Write perform
@@ -207,9 +204,9 @@ Subject: Welcome
 [wrangler:info] QUEUE shop-jobs 2/3 (13ms)
 ```
 
-`QUEUE shop-jobs 2/3` is wrangler's summary of one consumer run: 2 of the 3 messages of that batch were acknowledged (this job and a `deliver_later` email; the third was the failing job of [Errors: retry or discard](#errors-retry-or-discard)).
+`QUEUE shop-jobs 2/3` is the local server's summary of one consumer run (a wrangler line: `cf dev` runs wrangler): 2 of the 3 messages of that batch were acknowledged (this job and a `deliver_later` email; the third was the failing job of [Errors: retry or discard](#errors-retry-or-discard)).
 
-`perform_later`, `enqueue`, `enqueue_in` and `enqueue_all` fail with `Error::Internal` (500, the log names the fix) when the job does not serialize, the message is over 128 KB, the delay is over 24 hours, the queue's binding (`JOBS`, `JOBS_URGENT`...) is missing from `wrangler.toml`, or Queues refuses the message. For later work than 24 hours, enqueue from a [scheduled task](#schedules) or store the due time in D1.
+`perform_later`, `enqueue`, `enqueue_in` and `enqueue_all` fail with `Error::Internal` (500, the log names the fix) when the job does not serialize, the message is over 128 KB, the delay is over 24 hours, the queue's binding (`JOBS`, `JOBS_URGENT`...) is missing from `cloudflare.config.ts`, or Queues refuses the message. For later work than 24 hours, enqueue from a [scheduled task](#schedules) or store the due time in D1.
 
 ### The message
 
@@ -254,7 +251,7 @@ ocre g job SendCode user_id:integer --queue urgent
 
 ```text
   create  src/jobs/send_code.rs
-  update  wrangler.toml
+  update  cloudflare.config.ts
   update  src/jobs/mod.rs
 
 Next:
@@ -263,19 +260,13 @@ Next:
   ocre deploy creates the queue shop-jobs-urgent and its dead-letter queue
 ```
 
-The generated `perform_later` sends to that queue (`ocre::jobs::queue(ctx, "urgent").enqueue(...)`), and `wrangler.toml` gets the producer `JOBS_URGENT` and a consumer that waits at most 1 second to fill a batch:
+The generated `perform_later` sends to that queue (`ocre::jobs::queue(ctx, "urgent").enqueue(...)`), and `cloudflare.config.ts` gets the producer `JOBS_URGENT` and a consumer that waits at most 1 second to fill a batch:
 
-```toml
-[[queues.producers]]
-binding = "JOBS_URGENT"
-queue = "shop-jobs-urgent"
-
-[[queues.consumers]]
-queue = "shop-jobs-urgent"
-max_batch_size = 10
-max_batch_timeout = 1
-max_retries = 5
-dead_letter_queue = "shop-jobs-urgent-failed"
+```ts
+// in worker.env
+JOBS_URGENT: bindings.queue({ name: "shop-jobs-urgent" }),
+// in worker.triggers
+triggers.queue({ name: "shop-jobs-urgent", deadLetterQueue: "shop-jobs-urgent-failed", maxBatchSize: 10, maxBatchTimeout: 1, maxRetries: 5 }),
 ```
 
 Every queue is consumed by the same `queue` event and the same `perform`: the queue changes when a job runs, not how. Queue names are lowercase letters, digits and `-`; `default` is the `JOBS` queue. Queues are free to create; a message costs the same 3 operations on any queue. Loco's worker tags (a process that only runs some jobs) have no equivalent: there are no worker processes, and a queue per kind of work gives the same isolation.
@@ -306,7 +297,7 @@ D1 has no transaction that stays open across `await`s: a group of writes is one 
 
 Cloudflare runs several consumer invocations of a queue in parallel when messages pile up. Rails' `limits_concurrency` has two Ocre forms:
 
-- For a whole queue, add `max_concurrency = 1` to its `[[queues.consumers]]` entry in `wrangler.toml`: one batch at a time. Combine it with a [named queue](#urgent-jobs-named-queues) for the jobs that must not overlap.
+- For a whole queue, add `maxConcurrency: 1` to its `triggers.queue({ ... })` entry in `cloudflare.config.ts`: one batch at a time. Combine it with a [named queue](#urgent-jobs-named-queues) for the jobs that must not overlap.
 - For jobs sharing a key (one import per account), claim a row in D1 first, with an expiry in case a run dies, and return an error to retry later when it is taken:
 
   ```rust
@@ -360,7 +351,7 @@ What `perform` returns decides what happens to the message:
 | `Err(Error::NotFound)`, `BadRequest`, `Unauthorized`, `Forbidden`, `Invalid`, `PayloadTooLarge` | Logs `discarded, not retried` and acknowledges it: another try would fail the same way | `discard_on`, `ActiveJob::DeserializationError` |
 | Any other `Err` (`Internal`, `TooManyRequests`) | Retries it with a growing delay | `retry_on` |
 
-A retried job comes back after twice the time since it was due, 30 seconds at least. For a job processed right away that gives 30 s, 1 min, 3 min, 9 min and 27 min. After `max_retries = 5` retries, Cloudflare moves the message to the dead-letter queue `<app>-jobs-failed`, where it stays 24 hours; inspect it in the dashboard (Queues > `<app>-jobs-failed`), which lists its messages. The last retry comes about 40 minutes after the job was due. The number of retries is per queue (`max_retries` in `wrangler.toml`): put jobs that need another policy on their [own queue](#urgent-jobs-named-queues).
+A retried job comes back after twice the time since it was due, 30 seconds at least. For a job processed right away that gives 30 s, 1 min, 3 min, 9 min and 27 min. After `maxRetries: 5` retries, Cloudflare moves the message to the dead-letter queue `<app>-jobs-failed`, where it stays 24 hours; inspect it in the dashboard (Queues > `<app>-jobs-failed`), which lists its messages. The last retry comes about 40 minutes after the job was due. The number of retries is per queue (`maxRetries` in `cloudflare.config.ts`): put jobs that need another policy on their [own queue](#urgent-jobs-named-queues).
 
 To change the policy of one job, map its errors in `perform`: `Err(Error::internal(..))` to retry what Ocre would discard, `Ok(())` (with a log line) to drop what it would retry.
 
@@ -422,7 +413,7 @@ ocre g schedule nightly_cleanup "every day at 3am"
 ```text
   create  src/schedules/nightly_cleanup.rs
   create  src/schedules/mod.rs
-  update  wrangler.toml
+  update  cloudflare.config.ts
   update  src/lib.rs
 
 Next:
@@ -434,13 +425,13 @@ Next:
 |---|---|
 | `src/schedules/nightly_cleanup.rs` | `pub async fn run(ctx: &Ctx) -> Result<()>`, which does nothing yet |
 | `src/schedules/mod.rs` | `run(ctx, cron)`, which matches the expression that fired to a task; keep the `// ocre:schedules` and `// ocre:schedule-dispatch` markers |
-| `wrangler.toml` | The expression in `[triggers] crons = ["0 3 * * *"]` |
+| `cloudflare.config.ts` | The expression, `triggers.scheduled({ schedule: "0 3 * * *" }),` after `// ocre:triggers` |
 | `src/lib.rs` | `mod schedules;` and the `scheduled` entry point (first schedule only) |
 
 The entry point calls `ocre::jobs::cron`, which runs the task and logs the result:
 
 ```rust
-/// Cron Triggers (`[triggers] crons` in wrangler.toml), run by `schedules::run` (src/schedules/mod.rs).
+/// Cron Triggers (`triggers.scheduled` in cloudflare.config.ts), run by `schedules::run` (src/schedules/mod.rs).
 #[worker::event(scheduled)]
 async fn scheduled(event: worker::ScheduledEvent, env: worker::Env, _ctx: worker::ScheduleContext) {
     ocre::jobs::cron(event, env, schedules::run).await
@@ -533,7 +524,7 @@ ocre schedules run nightly_cleanup
   fired nightly_cleanup (0 3 * * *); its `[ocre cron]` line is in the `ocre dev` output
 ```
 
-It calls wrangler's local endpoint with the task's expression (`--port` if `ocre dev` is not on 8787); the same with curl, spaces as `+`:
+It calls the dev server's local endpoint with the task's expression (`--port` if `ocre dev` is not on 8787); the same with curl, spaces as `+`:
 
 ```sh
 curl 'http://localhost:8787/cdn-cgi/local/scheduled?cron=0+3+*+*+*'
@@ -569,7 +560,7 @@ curl 'http://localhost:8787/cdn-cgi/local/scheduled?cron=*/5+*+*+*+*'
 ```
 
 ```text
-✘ [ERROR] [ocre cron] */5 * * * * failed: internal error: no scheduled task for cron `*/5 * * * *`. Fix: add it to the match in src/schedules/mod.rs, or remove it from [triggers] crons in wrangler.toml
+✘ [ERROR] [ocre cron] */5 * * * * failed: internal error: no scheduled task for cron `*/5 * * * *`. Fix: add it to the match in src/schedules/mod.rs, or remove its `triggers.scheduled(...)` entry from cloudflare.config.ts
 ```
 
 ## One-off tasks
@@ -589,12 +580,12 @@ A job is a plain struct: build it in a unit test and check what it holds, or tes
 
 ## Deploy
 
-`ocre deploy` handles the queues and crons of `wrangler.toml`:
+`ocre deploy` handles the queues and crons of `cloudflare.config.ts`:
 
-- Before deploying, it runs `wrangler queues info` for every queue named there (producers, consumers and dead-letter queues) and `wrangler queues create` for the missing ones, because a consumer of a missing queue fails the deploy. For each queue it creates, it prints `Created queue <name> on Cloudflare` (for example `Created queue shop-jobs on Cloudflare` and `Created queue shop-jobs-failed on Cloudflare`); with `--json` they are listed in `provisioned` as `"queue shop-jobs"`.
-- `wrangler deploy` then registers the consumer and the `[triggers] crons`. Crons fire only on the deployed Worker.
+- Before deploying, it lists the account's queues (`cf queues list`) and creates (`cf queues create`) every queue named there that is missing (producers, consumers and dead-letter queues), because a consumer of a missing queue fails the deploy. For each queue it creates, it prints `Created queue <name> on Cloudflare` (for example `Created queue shop-jobs on Cloudflare` and `Created queue shop-jobs-failed on Cloudflare`); with `--json` they are listed in `provisioned` as `"queue shop-jobs"`.
+- `cf deploy` then registers the consumer and the `triggers.scheduled` crons. Crons fire only on the deployed Worker.
 
-Follow the deployed Worker's job and cron lines with `npx wrangler tail`. See [Deployment](deployment.md) for the rest of the deploy.
+Follow the deployed Worker's job and cron lines in Workers Logs (dashboard: your Worker > Logs; search `[ocre jobs]` or `[ocre cron]`). See [Deployment](deployment.md) for the rest of the deploy.
 
 ## Free-plan budget
 

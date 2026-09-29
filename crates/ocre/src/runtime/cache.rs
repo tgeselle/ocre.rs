@@ -37,7 +37,7 @@ fn kv_error(operation: &str, key: &str, err: &worker::KvError) -> Error {
 /// # Errors
 ///
 /// - [`Error::Internal`] (500) when the `CACHE` binding is missing, naming the
-///   fix: `ocre g cache` adds `[[kv_namespaces]] binding = "CACHE"` to wrangler.toml.
+///   fix: `ocre g cache` adds `CACHE: bindings.kv(),` to cloudflare.config.ts.
 /// - [`Error::Internal`] when `key` is empty or longer than 512 bytes, or
 ///   `ttl` is below 60 seconds.
 /// - [`Error::Internal`] when the computed value does not serialize to JSON.
@@ -114,7 +114,7 @@ where
 /// # Errors
 ///
 /// - [`Error::Internal`] (500) when the `CACHE` binding is missing, naming the
-///   fix: `ocre g cache` adds `[[kv_namespaces]] binding = "CACHE"` to wrangler.toml.
+///   fix: `ocre g cache` adds `CACHE: bindings.kv(),` to cloudflare.config.ts.
 /// - [`Error::Internal`] when `key` is empty or longer than 512 bytes.
 ///
 /// # Examples
@@ -159,7 +159,7 @@ pub fn read<'a, T: DeserializeOwned>(
 /// # Errors
 ///
 /// - [`Error::Internal`] (500) when the `CACHE` binding is missing, naming the
-///   fix: `ocre g cache` adds `[[kv_namespaces]] binding = "CACHE"` to wrangler.toml.
+///   fix: `ocre g cache` adds `CACHE: bindings.kv(),` to cloudflare.config.ts.
 /// - [`Error::Internal`] when `key` is empty or longer than 512 bytes, `ttl`
 ///   is below 60 seconds, or `value` does not serialize to JSON.
 /// - [`Error::Internal`] when KV rejects the write, e.g. past the daily limit
@@ -207,7 +207,7 @@ pub fn write<'a, T: Serialize + ?Sized>(
 /// # Errors
 ///
 /// - [`Error::Internal`] (500) when the `CACHE` binding is missing, naming the
-///   fix: `ocre g cache` adds `[[kv_namespaces]] binding = "CACHE"` to wrangler.toml.
+///   fix: `ocre g cache` adds `CACHE: bindings.kv(),` to cloudflare.config.ts.
 /// - [`Error::Internal`] when `key` is empty or longer than 512 bytes.
 /// - [`Error::Internal`] when KV rejects the delete, e.g. past the daily limit
 ///   (message prefixed with [`LOG_PREFIX`](crate::cache::LOG_PREFIX)).

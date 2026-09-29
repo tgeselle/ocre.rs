@@ -7,27 +7,33 @@
 use std::{
     io::IsTerminal,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
 
 use crate::{
-    CliResult, generate,
+    CliResult,
+    cloudflare::{
+        CF_VERSION, Cloudflare, Deployed, Echo, NODE_MIN, TYPESCRIPT_VERSION, WRANGLER_VERSION, pick_account,
+    },
+    config, generate,
     output::{CliError, Report},
     project::{Project, check_wasm_target},
     secret::{self, SECRET_KEY_BASE},
     template::Template,
-    wrangler::{Deployed, Echo, Wrangler, pick_account},
 };
 
 const OCRE_GIT: &str = "https://github.com/tgeselle/ocre.rs";
 /// Documentation site, linked from the app's AGENTS.md (`__DOCS_URL__`). Also
 /// `DEFAULT_BASE_URL` in docs/tool/src/main.rs: change both together.
-const DOCS_URL: &str = "https://ocre-docs.raitomm.workers.dev";
+pub(crate) const DOCS_URL: &str = "https://ocre-docs.raitomm.workers.dev";
 
 /// (path in the app, template contents), shared by both app kinds.
 const FILES: &[(&str, &str)] = &[
     ("Cargo.toml", include_str!("../templates/new/Cargo.toml.tmpl")),
-    ("wrangler.toml", include_str!("../templates/new/wrangler.toml")),
+    (config::FILE, include_str!("../templates/new/cloudflare.config.ts")),
+    (config::BUILD_FILE, include_str!("../templates/new/wrangler.config.ts")),
+    ("package.json", include_str!("../templates/new/package.json")),
+    ("tsconfig.json", include_str!("../templates/new/tsconfig.json")),
     ("rust-toolchain.toml", include_str!("../templates/new/rust-toolchain.toml")),
     (".gitignore", include_str!("../templates/new/gitignore")),
     ("AGENTS.md", include_str!("../templates/new/AGENTS.md")),
@@ -69,6 +75,8 @@ pub struct NewArgs {
     pub login: Option<bool>,
     pub deploy: Option<bool>,
     pub yes: bool,
+    /// Run `npm install` in the new app (`--no-install` turns it off).
+    pub install: bool,
     /// `--template`: path or URL of an application template.
     pub template: Option<String>,
 }
@@ -85,6 +93,10 @@ fn run_with_flags(args: NewArgs, cwd: &Path, json: bool) -> CliResult {
             .hint("run `ocre new <name>`, or run `ocre new` in a terminal for the guided setup")
     })?;
     let deploy = args.deploy.unwrap_or(false);
+    if deploy && !args.install {
+        return Err(CliError::new("--deploy needs the app's npm packages")
+            .hint("drop --no-install, or deploy later with `npm install && ocre deploy`"));
+    }
     let starter = args.starter.unwrap_or(Starter::Empty);
     let mut plan = Plan::new(
         cwd,
@@ -96,10 +108,11 @@ fn run_with_flags(args: NewArgs, cwd: &Path, json: bool) -> CliResult {
         args.account_id,
     )?;
     plan.template = args.template.map(|source| Template::load(&source, cwd)).transpose()?;
+    plan.install = args.install;
     let echo = Echo::for_json(json);
     // Deploying needs a session, so `--deploy` implies `--login`.
     let session =
-        if args.login.unwrap_or(false) || deploy { Some(Wrangler::new(cwd, echo).ensure_login()?) } else { None };
+        if args.login.unwrap_or(false) || deploy { Some(Cloudflare::new(cwd, echo).ensure_login()?) } else { None };
     if let Some(session) = &session {
         plan.account_id = pick_account(session, plan.account_id.as_deref())?;
     }
@@ -108,6 +121,7 @@ fn run_with_flags(args: NewArgs, cwd: &Path, json: bool) -> CliResult {
         let deployed = plan.deploy(echo)?;
         report.url = deployed.url;
         report.secret_created = deployed.secret_created;
+        report.provisioned = deployed.provisioned;
         report.next.retain(|step| step != "ocre deploy");
     }
     report.email = session.and_then(|s| s.email);
@@ -125,6 +139,8 @@ pub struct Plan {
     pub account_id: Option<String>,
     /// Applied right after the app and its starter are created.
     pub template: Option<Template>,
+    /// Run `npm install` once the files are written.
+    pub install: bool,
 }
 
 impl Plan {
@@ -166,11 +182,17 @@ impl Plan {
             git,
             account_id,
             template: None,
+            install: true,
         })
     }
 
     pub fn create(&self) -> CliResult {
         let name = &self.name;
+        if self.install && !npm_available() {
+            return Err(CliError::new("npm not found").hint(format!(
+                "install Node.js {NODE_MIN} or newer (it provides npm), or pass --no-install and run `npm install` in the app later"
+            )));
+        }
         let mut report = Report::new("new");
         let kind_files = if self.api { API_FILES } else { HTML_FILES };
         for (relative, template) in FILES.iter().chain(kind_files) {
@@ -179,16 +201,19 @@ impl Plan {
             let mut contents = template
                 .replace("__APP_NAME__", name)
                 .replace("__OCRE_DEP__", &self.ocre_dep)
-                .replace("__DOCS_URL__", DOCS_URL);
+                .replace("__DOCS_URL__", DOCS_URL)
+                .replace("__CF_VERSION__", CF_VERSION)
+                .replace("__WRANGLER_VERSION__", WRANGLER_VERSION)
+                .replace("__TYPESCRIPT_VERSION__", TYPESCRIPT_VERSION);
             match (*relative, &self.account_id) {
-                ("wrangler.toml", Some(id)) => contents = with_account_id(&contents, id),
+                (config::FILE, Some(id)) => contents = config::with_account_id(&contents, id),
                 ("Cargo.toml", _) if self.api => contents = contents.replace(ASKAMA_DEP, "") + API_METADATA,
                 _ => {}
             }
             std::fs::write(&path, contents)?;
             report.created.push(format!("{name}/{relative}"));
         }
-        // Local secrets and overrides for `wrangler dev`, git-ignored. Deploys create
+        // Local secrets and overrides for `ocre dev`, git-ignored. Deploys create
         // the production secret; MAIL_ADAPTER=log makes `ocre dev` print email instead of sending it.
         let dev_vars = format!("{SECRET_KEY_BASE}={}\nMAIL_ADAPTER=log\n", secret::generate());
         std::fs::write(self.root.join(".dev.vars"), dev_vars)?;
@@ -211,6 +236,10 @@ impl Plan {
             report.created.extend(applied.created.into_iter().map(|path| format!("{name}/{path}")));
             report.ran.extend(applied.ran);
         }
+        if self.install {
+            npm_install(&self.root)?;
+            report.ran.push(format!("npm install (cf {CF_VERSION}, wrangler {WRANGLER_VERSION})"));
+        }
         if self.git {
             let status = Command::new("git").args(["init", "--quiet"]).current_dir(&self.root).status()?;
             if !status.success() {
@@ -218,13 +247,16 @@ impl Plan {
             }
         }
         report.next = vec![format!("cd {name}"), "ocre dev".to_owned(), "ocre deploy".to_owned()];
+        if !self.install {
+            report.next.insert(1, "npm install".to_owned());
+        }
         Ok(report)
     }
 
     /// Builds and deploys the new app; returns its workers.dev URL.
     pub fn deploy(&self, echo: Echo) -> Result<Deployed, CliError> {
         check_wasm_target()?;
-        Wrangler::new(&self.root, echo).deploy(&self.name)
+        Cloudflare::new(&self.root, echo).deploy(&Project::at(self.root.clone())?)
     }
 }
 
@@ -253,14 +285,34 @@ fn validate_app_name(name: &str) -> Result<(), CliError> {
     }
 }
 
-/// Adds `account_id` right after the `name` line of wrangler.toml.
-fn with_account_id(wrangler_toml: &str, account_id: &str) -> String {
-    let (first, rest) = wrangler_toml.split_once('\n').expect("template has several lines");
-    format!("{first}\naccount_id = \"{account_id}\"\n{rest}")
-}
-
 fn git_available() -> bool {
     Command::new("git").arg("--version").output().is_ok_and(|out| out.status.success())
+}
+
+fn npm_available() -> bool {
+    Command::new("npm").arg("--version").stdin(Stdio::null()).output().is_ok_and(|out| out.status.success())
+}
+
+/// Installs the app's pinned cf, wrangler and typescript (writes package-lock.json).
+/// `npm` answered `npm --version` in [`Plan::create`] before any file was written.
+fn npm_install(root: &Path) -> Result<(), CliError> {
+    let output = Command::new("npm")
+        .args(["install", "--no-audit", "--no-fund"])
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(CliError::new(format!(
+        "`npm install` failed in {} ({}):\n{}",
+        root.display(),
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim_end()
+    ))
+    .hint(format!(
+        "the app is created: fix the cause above (network, Node.js {NODE_MIN}+), then run `npm install` in it"
+    )))
 }
 
 #[cfg(test)]

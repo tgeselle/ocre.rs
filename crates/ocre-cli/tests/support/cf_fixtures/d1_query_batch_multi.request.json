@@ -1,0 +1,1 @@
+[{"sql": "INSERT INTO posts (title, body) VALUES ('A', 'a')"}, {"sql": "SELECT id, title FROM posts ORDER BY id"}]

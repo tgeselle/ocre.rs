@@ -158,7 +158,7 @@ A job is one queue message. Cloudflare counts operations per message ([Queues pr
 
 With 10,000 operations a day, that is about 3,300 jobs a day when none fails. A job that fails every time costs 3 + 5 retries + 1 dead-letter write = 9 operations. Keep messages small (ids, not records) so each stays in one 64 KB unit; Ocre refuses messages over 128 KB. `ocre::mail::deliver_later` is one job per email.
 
-Consumer runs take up to 10 messages (`max_batch_size = 10`, waiting at most 5 s), and each run is one invocation with 10 ms of CPU for the whole batch. Jobs should be I/O (D1, mail, `fetch`); lower `max_batch_size` in `wrangler.toml` for CPU-heavy ones.
+Consumer runs take up to 10 messages (`maxBatchSize: 10`, waiting at most 5 s), and each run is one invocation with 10 ms of CPU for the whole batch. Jobs should be I/O (D1, mail, `fetch`); lower `maxBatchSize` in `cloudflare.config.ts` for CPU-heavy ones.
 
 ## Realtime and Durable Objects
 
@@ -224,4 +224,4 @@ The generated app runs unchanged on Workers Paid: no Ocre setting depends on the
 - [Free-plan limits](../reference/limits.md): every limit with its source.
 - [Architecture](architecture.md): how a request flows through `ocre::serve`.
 - [Caching](../guides/caching.md), [Background jobs and schedules](../guides/jobs.md), [Realtime](../guides/realtime.md), [Authentication](../guides/authentication.md).
-- [Configuration](../reference/configuration.md): the `wrangler.toml` settings mentioned here.
+- [Configuration](../reference/configuration.md): the `cloudflare.config.ts` settings mentioned here.

@@ -1,0 +1,16 @@
+[
+  {
+    "queue_id": "f5e8b72398e342838aa4d707c39cb476",
+    "queue_name": "ocre-cfcheck-demo-jobs",
+    "settings": {
+      "delivery_delay": 0,
+      "message_retention_period": 86400
+    },
+    "created_on": "2026-09-29T22:55:55.98522Z",
+    "modified_on": "2026-09-29T22:55:55.98522Z",
+    "producers_total_count": 0,
+    "producers": [],
+    "consumers_total_count": 0,
+    "consumers": []
+  }
+]

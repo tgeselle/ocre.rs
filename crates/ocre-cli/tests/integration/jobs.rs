@@ -13,6 +13,25 @@ fn read(root: &std::path::Path, path: &str) -> String {
     fs::read_to_string(root.join(path)).unwrap()
 }
 
+const CONFIG: &str = "cloudflare.config.ts";
+
+/// Writes `entry` into cloudflare.config.ts on the line before `marker` (as
+/// if written by hand); returns the new text.
+fn hand_write(root: &std::path::Path, marker: &str, entry: &str) -> String {
+    let text = read(root, CONFIG).replacen(marker, &format!("{entry}\n\t\t\t{marker}"), 1);
+    fs::write(root.join(CONFIG), &text).unwrap();
+    text
+}
+
+/// cloudflare.config.ts with `from` replaced (once), written; returns the new text.
+fn rewrite(root: &std::path::Path, from: &str, to: &str) -> String {
+    let text = read(root, CONFIG);
+    assert!(text.contains(from), "{from} in {text}");
+    let text = text.replacen(from, to, 1);
+    fs::write(root.join(CONFIG), &text).unwrap();
+    text
+}
+
 #[test]
 fn first_job_wires_the_queue_and_later_jobs_extend_the_registry() {
     let sandbox = Sandbox::new();
@@ -20,7 +39,7 @@ fn first_job_wires_the_queue_and_later_jobs_extend_the_registry() {
     let (report, ok) = sandbox.json(&["g", "job", "SendWelcomeJob", "user_id:integer", "note:text?"], &root);
     assert!(ok, "{report}");
     assert_eq!(report["created"], json!(["src/jobs/send_welcome.rs", "src/jobs/mod.rs"]));
-    assert_eq!(report["updated"], json!(["src/lib.rs", "wrangler.toml"]));
+    assert_eq!(report["updated"], json!(["src/lib.rs", "cloudflare.config.ts"]));
     assert_eq!(
         report["next"],
         json!([
@@ -59,13 +78,15 @@ fn first_job_wires_the_queue_and_later_jobs_extend_the_registry() {
         ),
         "{lib}"
     );
-    let wrangler: toml::Table = read(&root, "wrangler.toml").parse().unwrap();
-    assert_eq!(wrangler["queues"]["producers"][0]["binding"].as_str(), Some("JOBS"));
-    assert_eq!(wrangler["queues"]["producers"][0]["queue"].as_str(), Some("shop-jobs"));
-    let consumer = &wrangler["queues"]["consumers"][0];
-    assert_eq!(consumer["queue"].as_str(), Some("shop-jobs"));
-    assert_eq!(consumer["dead_letter_queue"].as_str(), Some("shop-jobs-failed"));
-    assert_eq!(consumer["max_retries"].as_integer(), Some(5));
+    let config = read(&root, CONFIG);
+    assert!(config.contains("\t\t\tJOBS: bindings.queue({ name: \"shop-jobs\" }),\n"), "{config}");
+    assert!(
+        config.contains(
+            "\t\t\ttriggers.queue({ name: \"shop-jobs\", deadLetterQueue: \"shop-jobs-failed\", maxBatchSize: 10, \
+             maxBatchTimeout: 5, maxRetries: 5 }),\n"
+        ),
+        "{config}"
+    );
 
     // A second job, without arguments: only the registry changes.
     let output = sandbox.ocre(&["g", "job", "cleanup"], &root);
@@ -78,7 +99,7 @@ fn first_job_wires_the_queue_and_later_jobs_extend_the_registry() {
     let registry = read(&root, "src/jobs/mod.rs");
     assert!(registry.contains("    Cleanup(Cleanup),\n    SendWelcome(SendWelcome),\n"), "{registry}");
     assert_eq!(read(&root, "src/lib.rs").matches("event(queue)").count(), 1);
-    assert_eq!(read(&root, "wrangler.toml").matches("[[queues.producers]]").count(), 1);
+    assert_eq!(read(&root, CONFIG).matches("bindings.queue(").count(), 1);
 }
 
 #[test]
@@ -105,13 +126,15 @@ fn a_named_queue_gets_its_own_cloudflare_queue_once() {
         ),
         "{job}"
     );
-    let wrangler: toml::Table = read(&root, "wrangler.toml").parse().unwrap();
-    let producers = wrangler["queues"]["producers"].as_array().unwrap();
-    assert_eq!(producers[1]["binding"].as_str(), Some("JOBS_URGENT"));
-    assert_eq!(producers[1]["queue"].as_str(), Some("shop-jobs-urgent"));
-    let consumer = &wrangler["queues"]["consumers"][1];
-    assert_eq!(consumer["max_batch_timeout"].as_integer(), Some(1));
-    assert_eq!(consumer["dead_letter_queue"].as_str(), Some("shop-jobs-urgent-failed"));
+    let config = read(&root, CONFIG);
+    assert!(config.contains("JOBS_URGENT: bindings.queue({ name: \"shop-jobs-urgent\" }),\n"), "{config}");
+    assert!(
+        config.contains(
+            "triggers.queue({ name: \"shop-jobs-urgent\", deadLetterQueue: \"shop-jobs-urgent-failed\", \
+             maxBatchSize: 10, maxBatchTimeout: 1, maxRetries: 5 }),\n"
+        ),
+        "{config}"
+    );
 
     // The same queue again: only the job; the default queue: `enqueue`.
     let (report, ok) = sandbox.json(&["g", "job", "SendSms", "--queue", "urgent"], &root);
@@ -120,17 +143,24 @@ fn a_named_queue_gets_its_own_cloudflare_queue_once() {
     let (report, ok) = sandbox.json(&["g", "job", "Cleanup", "--queue", "default"], &root);
     assert!(ok, "{report}");
     assert!(read(&root, "src/jobs/cleanup.rs").contains("ocre::jobs::enqueue(ctx, &super::Job::Cleanup(self))"));
-    assert_eq!(read(&root, "wrangler.toml").matches("[[queues.producers]]").count(), 2);
+    assert_eq!(read(&root, CONFIG).matches("bindings.queue(").count(), 2);
+    assert_eq!(read(&root, CONFIG).matches("triggers.queue(").count(), 2);
 
     for bad in ["Urgent", "-x", "x-", "a_b", ""] {
         let (report, ok) = sandbox.json(&["g", "job", "Other", &format!("--queue={bad}")], &root);
         assert!(!ok);
         assert_eq!(report["error"], format!("invalid queue name `{bad}`"));
     }
-    let wrangler = read(&root, "wrangler.toml");
-    fs::write(root.join("wrangler.toml"), wrangler.replacen("name = \"shop\"\n", "", 1)).unwrap();
+    rewrite(&root, "name: \"shop\",", "name: app,");
     let (report, _) = sandbox.json(&["g", "job", "Other", "--queue", "low"], &root);
-    assert_eq!(report["error"], "wrangler.toml has no `name`");
+    assert_eq!(report["error"], "cloudflare.config.ts has no `worker.name` Ocre can read");
+    assert!(!root.join("src/jobs/other.rs").exists());
+    rewrite(&root, "name: app,", "name: \"shop\",");
+    rewrite(&root, "// ocre:triggers", "");
+    let before = read(&root, CONFIG);
+    let (report, _) = sandbox.json(&["g", "job", "Other", "--queue", "low"], &root);
+    assert_eq!(report["error"], "cloudflare.config.ts is missing the `// ocre:triggers` marker");
+    assert_eq!(read(&root, CONFIG), before);
     assert!(!root.join("src/jobs/other.rs").exists());
 }
 
@@ -145,9 +175,8 @@ fn schedules_are_listed_and_fired_on_ocre_dev() {
     assert!(report["hint"].as_str().unwrap().contains("ocre g schedule"), "{report}");
 
     sandbox.json(&["g", "schedule", "nightly", "every day at 3am"], &root);
-    let wrangler =
-        read(&root, "wrangler.toml").replace("crons = [\"0 3 * * *\"]", "crons = [\"0 3 * * *\", \"*/5 * * * *\"]");
-    fs::write(root.join("wrangler.toml"), wrangler).unwrap();
+    let nightly = "triggers.scheduled({ schedule: \"0 3 * * *\" }),";
+    rewrite(&root, nightly, &format!("{nightly}\n\t\t\ttriggers.scheduled({{ schedule: \"*/5 * * * *\" }}),"));
     let (report, ok) = sandbox.json(&["schedules"], &root);
     assert!(ok, "{report}");
     assert_eq!(
@@ -187,9 +216,12 @@ fn schedules_are_listed_and_fired_on_ocre_dev() {
     let (report, _) = sandbox.json(&["schedules", "run", "nightly", "--port", &port.to_string()], &root);
     assert!(report["error"].as_str().unwrap().starts_with(&format!("cannot reach `ocre dev` on port {port}:")));
 
-    fs::write(root.join("wrangler.toml"), "[triggers\n").unwrap();
-    let (report, _) = sandbox.json(&["schedules"], &root);
-    assert!(!report["ok"].as_bool().unwrap());
+    // A cron Ocre cannot read.
+    rewrite(&root, "{ schedule: \"*/5 * * * *\" }", "{ schedule: every5 }");
+    let (report, ok) = sandbox.json(&["schedules"], &root);
+    assert!(!ok);
+    assert_eq!(report["error"], "cloudflare.config.ts has a scheduled trigger Ocre cannot read");
+    assert_eq!(report["hint"], "write it as `triggers.scheduled({ schedule: \"0 3 * * *\" }),`");
 }
 
 /// A stand-in for `ocre dev`: reads one whole request, answers `response`,
@@ -217,13 +249,12 @@ fn stand_in(response: &'static [u8]) -> (u16, std::thread::JoinHandle<String>) {
 fn a_hand_written_jobs_producer_is_reused() {
     let sandbox = Sandbox::new();
     let root = sandbox.new_app("shop", &[]);
-    let wrangler = read(&root, "wrangler.toml") + "\n[[queues.producers]]\nbinding = \"JOBS\"\nqueue = \"tasks\"\n";
-    fs::write(root.join("wrangler.toml"), &wrangler).unwrap();
+    let config = hand_write(&root, "// ocre:env", "JOBS: bindings.queue({ name: \"custom\" }),");
     let (report, ok) = sandbox.json(&["g", "job", "Ping"], &root);
     assert!(ok, "{report}");
     assert_eq!(report["updated"], json!(["src/lib.rs"]));
-    assert_eq!(report["next"][2], "ocre deploy creates the queue tasks and its dead-letter queue");
-    assert_eq!(read(&root, "wrangler.toml"), wrangler);
+    assert_eq!(report["next"][2], "ocre deploy creates the queue custom and its dead-letter queue");
+    assert_eq!(read(&root, CONFIG), config);
 }
 
 #[test]
@@ -257,16 +288,26 @@ fn job_errors_name_the_fix_and_write_nothing() {
     assert_eq!(report["error"], "src/lib.rs is missing the `// ocre:modules` marker");
     fs::write(root.join("src/lib.rs"), &lib).unwrap();
 
-    // wrangler.toml problems.
-    let wrangler = read(&root, "wrangler.toml");
-    fs::write(root.join("wrangler.toml"), wrangler.replacen("name = \"shop\"\n", "", 1)).unwrap();
+    // cloudflare.config.ts problems: named, nothing written.
+    let config = read(&root, CONFIG);
+    rewrite(&root, "name: \"shop\",", "name: `${prefix}shop`,");
     let (report, _) = sandbox.json(&["g", "job", "Ping"], &root);
-    // Without `name`, Project::find still works (it reads the D1 binding).
-    assert_eq!(report["error"], "wrangler.toml has no `name`");
-    fs::write(root.join("wrangler.toml"), wrangler.clone() + "\n[[queues.producers]]\nbinding = \"JOBS\"\n").unwrap();
+    // Without a readable `name`, Project::find still works (it reads the D1 binding).
+    assert_eq!(report["error"], "cloudflare.config.ts has no `worker.name` Ocre can read");
+    fs::write(root.join(CONFIG), &config).unwrap();
+    hand_write(&root, "// ocre:env", "JOBS: bindings.queue({ name: queueName }),");
     let (report, _) = sandbox.json(&["g", "job", "Ping"], &root);
-    assert_eq!(report["error"], "the JOBS queue producer in wrangler.toml has no `queue`");
-    fs::write(root.join("wrangler.toml"), &wrangler).unwrap();
+    assert_eq!(report["error"], "cloudflare.config.ts defines `JOBS` in a form Ocre cannot read");
+    assert_eq!(report["hint"], "write it as a literal: `JOBS: bindings.queue({ name: \"<app-name>-jobs\" }),`");
+    for marker in ["// ocre:env", "// ocre:triggers"] {
+        let without = config.replace(marker, "");
+        fs::write(root.join(CONFIG), &without).unwrap();
+        let (report, _) = sandbox.json(&["g", "job", "Ping"], &root);
+        assert_eq!(report["error"], format!("cloudflare.config.ts is missing the `{marker}` marker"));
+        assert!(report["hint"].as_str().unwrap().starts_with(&format!("put `{marker}` on its own line")));
+        assert_eq!(read(&root, CONFIG), without);
+    }
+    fs::write(root.join(CONFIG), &config).unwrap();
     assert!(pristine(&root));
     assert_eq!(read(&root, "src/lib.rs"), lib);
 
@@ -292,7 +333,7 @@ fn schedules_add_crons_and_dispatch_by_expression() {
     let (report, ok) = sandbox.json(&["g", "schedule", "NightlyCleanup", " 0  3 * * * "], &root);
     assert!(ok, "{report}");
     assert_eq!(report["created"], json!(["src/schedules/nightly_cleanup.rs", "src/schedules/mod.rs"]));
-    assert_eq!(report["updated"], json!(["wrangler.toml", "src/lib.rs"]));
+    assert_eq!(report["updated"], json!(["cloudflare.config.ts", "src/lib.rs"]));
     assert_eq!(report["next"][0], "ocre dev, then: ocre schedules run nightly_cleanup");
     let task = read(&root, "src/schedules/nightly_cleanup.rs");
     assert!(task.starts_with(
@@ -315,12 +356,12 @@ fn schedules_add_crons_and_dispatch_by_expression() {
         ),
         "{lib}"
     );
-    assert!(read(&root, "wrangler.toml").ends_with("[triggers]\ncrons = [\"0 3 * * *\"]\n"));
+    assert!(read(&root, CONFIG).contains("\t\t\ttriggers.scheduled({ schedule: \"0 3 * * *\" }),\n"));
 
-    // Weekday with `#` is escaped in the local URL; the array grows in place.
+    // Weekday with `#` is escaped in the local URL; each cron is its own trigger.
     let (report, ok) = sandbox.json(&["g", "schedule", "monthly_report", "0 9 * * MON#1"], &root);
     assert!(ok, "{report}");
-    assert_eq!(report["updated"], json!(["wrangler.toml", "src/schedules/mod.rs"]));
+    assert_eq!(report["updated"], json!(["cloudflare.config.ts", "src/schedules/mod.rs"]));
     assert!(read(&root, "src/schedules/monthly_report.rs").contains("?cron=0+9+*+*+MON%231'"));
     // Plain English, converted to cron; the phrase stays in the task's comment.
     let (report, ok) = sandbox.json(&["g", "schedule", "digest", "every monday at 9:30am"], &root);
@@ -331,12 +372,12 @@ fn schedules_add_crons_and_dispatch_by_expression() {
     );
     assert!(read(&root, "src/schedules/digest.rs").contains("Runs at `30 9 * * MON` (every monday at 9:30am), UTC"));
     assert!(read(&root, "src/schedules/mod.rs").contains("\"30 9 * * MON\" => digest::run(&ctx).await,"));
-    assert!(read(&root, "wrangler.toml").contains("crons = [\"0 3 * * *\", \"0 9 * * MON#1\", \"30 9 * * MON\"]\n"));
+    assert_eq!(crons(&sandbox, &root), ["30 9 * * MON", "0 9 * * MON#1", "0 3 * * *"], "newest first, at the marker");
     assert_eq!(read(&root, "src/lib.rs").matches("event(scheduled)").count(), 1);
 
     // Duplicates and bad input.
     let cases: &[(&[&str], &str)] = &[
-        (&["g", "schedule", "again", "0 3 * * *"], "cron `0 3 * * *` is already in [triggers] crons"),
+        (&["g", "schedule", "again", "0 3 * * *"], "cron `0 3 * * *` is already scheduled in cloudflare.config.ts"),
         (&["g", "schedule", "hourly", "0 * * *"], "invalid schedule `0 * * *`"),
         (&["g", "schedule", "hourly", "0 * * * ?"], "invalid schedule `0 * * * ?`"),
         (&["g", "schedule", "often", "every 30 seconds"], "invalid schedule `every 30 seconds`"),
@@ -353,68 +394,62 @@ fn schedules_add_crons_and_dispatch_by_expression() {
     assert!(!root.join("src/schedules/again.rs").exists() && !root.join("src/schedules/hourly.rs").exists());
 }
 
+/// The crons `ocre schedules` reads, in file order.
+fn crons(sandbox: &Sandbox, root: &std::path::Path) -> Vec<String> {
+    let (report, ok) = sandbox.json(&["schedules"], root);
+    assert!(ok, "{report}");
+    report["schedules"].as_array().unwrap().iter().map(|s| s["cron"].as_str().unwrap().to_owned()).collect()
+}
+
 #[test]
-fn crons_are_edited_where_they_are() {
+fn crons_are_added_at_the_triggers_marker() {
     let sandbox = Sandbox::new();
     let root = sandbox.new_app("shop", &[]);
-    let wrangler = read(&root, "wrangler.toml");
-    let with = |extra: &str| fs::write(root.join("wrangler.toml"), format!("{wrangler}{extra}")).unwrap();
-    let crons = |root: &std::path::Path| {
-        let config: toml::Table = read(root, "wrangler.toml").parse().unwrap();
-        config["triggers"]["crons"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|c| c.as_str().unwrap().to_owned())
-            .collect::<Vec<_>>()
-    };
+    let pristine = read(&root, CONFIG);
 
-    // A multi-line array followed by another table.
-    with("\n[triggers]\n# kept\ncrons = [\n  \"0 1 * * *\",\n  \"0 2 * * *\",\n]\n\n[placement]\nmode = \"smart\"\n");
-    let (report, ok) = sandbox.json(&["g", "schedule", "a", "0 3 * * *"], &root);
-    assert!(ok, "{report}");
-    let text = read(&root, "wrangler.toml");
-    assert!(
-        text.ends_with("[triggers]\n# kept\ncrons = [\"0 1 * * *\", \"0 2 * * *\", \"0 3 * * *\"]\n\n[placement]\nmode = \"smart\"\n"),
-        "{text}"
+    // Hand-written triggers: crons count toward the free plan, queue consumers do not.
+    hand_write(
+        &root,
+        "// ocre:triggers",
+        "triggers.scheduled({ schedule: \"0 1 * * *\" }),\n\t\t\ttriggers.scheduled({ schedule: \"0 2 * * *\" }),\n\t\t\t\
+         triggers.queue({ name: \"shop-jobs\" }),\n\t\t\ttriggers.scheduled({ schedule: \"0 3 * * *\" }),",
     );
-
-    // `[triggers]` without `crons`, and more crons than the free plan allows.
-    fs::remove_dir_all(root.join("src/schedules")).unwrap();
-    fs::write(root.join("src/lib.rs"), read(&root, "src/lib.rs").replace("event(scheduled)", "")).unwrap();
-    with("\n[triggers]\n\n[vars.more]\nX = \"1\"\n");
-    for (i, name) in ["a", "b", "c", "d", "e"].iter().enumerate() {
-        let (report, ok) = sandbox.json(&["g", "schedule", name, &format!("{i} * * * *")], &root);
+    for (name, cron) in [("a", "0 4 * * *"), ("b", "0 5 * * *")] {
+        let (report, ok) = sandbox.json(&["g", "schedule", name, cron], &root);
         assert!(ok, "{report}");
         assert_eq!(report["next"].as_array().unwrap().len(), 2, "{report}");
     }
-    let (report, _) = sandbox.json(&["g", "schedule", "f", "9 * * * *"], &root);
+    let (report, ok) = sandbox.json(&["g", "schedule", "c", "0 6 * * *"], &root);
+    assert!(ok, "{report}");
     assert_eq!(
         report["next"][2],
         "this app now has 6 crons; the free plan allows 5 per account: run several tasks from one cron"
     );
-    assert_eq!(crons(&root).len(), 6);
-    assert!(read(&root, "wrangler.toml").contains("[vars.more]\nX = \"1\"\n"));
+    // Hand-written entries sit above the marker; Ocre's go right below it, newest first.
+    assert_eq!(crons(&sandbox, &root), ["0 1 * * *", "0 2 * * *", "0 3 * * *", "0 6 * * *", "0 5 * * *", "0 4 * * *"]);
+    let (report, _) = sandbox.json(&["g", "schedule", "d", "0 2 * * *"], &root);
+    assert_eq!(report["error"], "cron `0 2 * * *` is already scheduled in cloudflare.config.ts", "hand-written too");
 
-    // Forms Ocre does not edit.
+    // Forms Ocre does not edit: named, nothing written.
     fs::remove_dir_all(root.join("src/schedules")).unwrap();
     let lib = read(&root, "src/lib.rs").replace("event(scheduled)", "");
     fs::write(root.join("src/lib.rs"), &lib).unwrap();
-    for extra in ["\n[triggers.crons]\nx = 1\n", "\n[triggers]\ncrons = [1]\n"] {
-        with(extra);
-        let (report, _) = sandbox.json(&["g", "schedule", "a", "0 3 * * *"], &root);
-        assert_eq!(report["error"], "wrangler.toml defines `triggers` in a form Ocre cannot edit", "{extra}");
-    }
-    fs::write(root.join("wrangler.toml"), format!("triggers = {{ crons = [] }}\n{wrangler}")).unwrap();
+    let without = pristine.replace("// ocre:triggers", "");
+    fs::write(root.join(CONFIG), &without).unwrap();
     let (report, _) = sandbox.json(&["g", "schedule", "a", "0 3 * * *"], &root);
-    assert_eq!(report["error"], "wrangler.toml defines `triggers` in a form Ocre cannot edit");
-    fs::write(root.join("wrangler.toml"), format!("{wrangler}\n[triggers\n")).unwrap();
+    assert_eq!(report["error"], "cloudflare.config.ts is missing the `// ocre:triggers` marker");
+    assert!(report["hint"].as_str().unwrap().contains("inside `worker.triggers: [ ... ]`"), "{report}");
+    assert_eq!(read(&root, CONFIG), without);
+    fs::write(root.join(CONFIG), &pristine).unwrap();
+    let unreadable = hand_write(&root, "// ocre:triggers", "triggers.scheduled({ schedule: nightly }),");
     let (report, _) = sandbox.json(&["g", "schedule", "a", "0 3 * * *"], &root);
-    assert!(report["error"].as_str().unwrap().starts_with("wrangler.toml is not valid TOML"), "{report}");
+    assert_eq!(report["error"], "cloudflare.config.ts has a scheduled trigger Ocre cannot read");
+    assert_eq!(read(&root, CONFIG), unreadable);
     assert!(!root.join("src/schedules").exists());
+    assert_eq!(read(&root, "src/lib.rs"), lib);
 
     // lib.rs problems.
-    with("");
+    fs::write(root.join(CONFIG), &pristine).unwrap();
     fs::write(root.join("src/lib.rs"), format!("{lib}\n// #[worker::event(scheduled)]\n")).unwrap();
     let (report, _) = sandbox.json(&["g", "schedule", "a", "0 3 * * *"], &root);
     assert_eq!(report["error"], "src/lib.rs already handles the `scheduled` event");
@@ -422,6 +457,7 @@ fn crons_are_edited_where_they_are() {
     let (report, _) = sandbox.json(&["g", "schedule", "a", "0 3 * * *"], &root);
     assert_eq!(report["error"], "src/lib.rs is missing the `// ocre:modules` marker");
     fs::write(root.join("src/lib.rs"), &lib).unwrap();
+    assert_eq!(read(&root, CONFIG), pristine);
 
     // A registry without its markers.
     let (report, ok) = sandbox.json(&["g", "schedule", "a", "0 3 * * *"], &root);
@@ -432,7 +468,7 @@ fn crons_are_edited_where_they_are() {
         let (report, _) = sandbox.json(&["g", "schedule", "b", "0 4 * * *"], &root);
         assert_eq!(report["error"], format!("src/schedules/mod.rs is missing the `{marker}` marker"));
     }
-    assert_eq!(crons(&root), ["0 3 * * *"]);
+    assert_eq!(crons(&sandbox, &root), ["0 3 * * *"]);
 }
 
 #[test]
@@ -440,46 +476,81 @@ fn deploy_creates_missing_queues_once() {
     let sandbox = Sandbox::new();
     let root = sandbox.new_app("shop", &[]);
     sandbox.set("has_secret");
+    sandbox.remote_database("shop");
     let (report, ok) = sandbox.json(&["g", "job", "Ping"], &root);
     assert!(ok, "{report}");
     sandbox.set("queue_shop-jobs");
+    sandbox.clear_calls();
 
     let output = sandbox.ocre(&["deploy"], &root);
     let (stdout, _) = text(&output);
     assert!(output.status.success(), "{stdout}");
     assert!(stdout.contains("Created queue shop-jobs-failed on Cloudflare\n"), "{stdout}");
-    let calls = sandbox.calls();
     assert_eq!(
-        calls[..4],
+        sandbox.calls(),
         [
-            "queues info shop-jobs",
-            "queues info shop-jobs-failed",
-            "queues create shop-jobs-failed",
-            "secret list --format json"
+            "cf d1 list --name shop",
+            "cf queues list",
+            "cf queues create --queue-name shop-jobs-failed",
+            "cf workers secrets list --worker shop",
+            "cf d1 migrations apply uuid-shop",
+            "cf deploy",
+            "build --release",
         ]
     );
 
     // Everything exists now: nothing to create.
+    sandbox.clear_calls();
     let (report, ok) = sandbox.json(&["deploy"], &root);
     assert!(ok, "{report}");
     assert!(report.get("provisioned").is_none(), "{report}");
+    assert!(!sandbox.calls().iter().any(|call| call.starts_with("cf queues create")), "{:?}", sandbox.calls());
 
+    // A named queue: producer and dead-letter queue, from one list.
     fs::remove_file(sandbox.work.join("../state/queue_shop-jobs")).unwrap();
+    let (report, ok) = sandbox.json(&["g", "job", "SendCode", "--queue", "urgent"], &root);
+    assert!(ok, "{report}");
+    sandbox.clear_calls();
     let (report, ok) = sandbox.json(&["deploy"], &root);
     assert!(ok, "{report}");
-    assert_eq!(report["provisioned"], json!(["queue shop-jobs"]));
+    assert_eq!(
+        report["provisioned"],
+        json!(["queue shop-jobs-urgent", "queue shop-jobs", "queue shop-jobs-urgent-failed"])
+    );
+    assert_eq!(sandbox.calls().iter().filter(|call| *call == "cf queues list").count(), 1);
 
     // Any other failure stops the deploy before it starts.
-    sandbox.set("queues_info_fails");
+    let unset = |marker: &str| fs::remove_file(sandbox.work.join("../state").join(marker)).unwrap();
+    sandbox.set("queues_list_fails");
     let (report, ok) = sandbox.json(&["deploy"], &root);
     assert!(!ok);
-    assert_eq!(report["error"], "`wrangler queues info shop-jobs` failed: ✘ [ERROR] queues_info_fails");
+    assert_eq!(report["error"], "`cf queues list` failed: ┌ Error\n│ queues_list_fails\n└");
     assert!(report["hint"].as_str().unwrap().contains("ocre login"), "{report}");
-    fs::remove_file(sandbox.work.join("../state/queues_info_fails")).unwrap();
-    fs::remove_file(sandbox.work.join("../state/queue_shop-jobs")).unwrap();
+    unset("queues_list_fails");
+    unset("queue_shop-jobs");
     sandbox.set("queues_create_fails");
     let (report, ok) = sandbox.json(&["deploy"], &root);
     assert!(!ok);
-    assert_eq!(report["error"], "`wrangler queues create shop-jobs` failed (exit status: 1)");
-    assert_eq!(sandbox.calls().last().unwrap(), "queues create shop-jobs", "never deployed without its queues");
+    // The transient 500 recorded once on the real API.
+    let error = report["error"].as_str().unwrap();
+    assert!(error.starts_with("`cf queues create --queue-name shop-jobs` failed: ┌ APIError\n│ [10013] "), "{error}");
+    assert_eq!(
+        sandbox.calls().last().unwrap(),
+        "cf queues create --queue-name shop-jobs",
+        "never deployed without its queues"
+    );
+    unset("queues_create_fails");
+
+    // Queue names Ocre cannot read: the canonical form, nothing created.
+    let config = read(&root, CONFIG);
+    rewrite(&root, "{ name: \"shop-jobs-urgent\" }", "{ name: urgent }");
+    sandbox.clear_calls();
+    let (report, _) = sandbox.json(&["deploy"], &root);
+    assert_eq!(report["error"], "cloudflare.config.ts defines `JOBS_URGENT` in a form Ocre cannot read");
+    assert_eq!(report["hint"], "write it as a literal: `JOBS_URGENT: bindings.queue({ name: \"<queue>\" }),`");
+    fs::write(root.join(CONFIG), &config).unwrap();
+    rewrite(&root, "triggers.queue({ name: \"shop-jobs\",", "triggers.queue({ name: jobs,");
+    let (report, _) = sandbox.json(&["deploy"], &root);
+    assert_eq!(report["error"], "cloudflare.config.ts has a queue trigger Ocre cannot read");
+    assert!(!sandbox.calls().iter().any(|call| call.starts_with("cf queues") || call.starts_with("cf deploy")));
 }

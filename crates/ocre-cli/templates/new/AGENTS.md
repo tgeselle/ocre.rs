@@ -66,8 +66,10 @@ on stdout (`"ok": true|false`, plus `error` and `hint` on failure).
 | Secret names locally and deployed; upload production values | `ocre secrets list`, `ocre secrets push GITHUB_CLIENT_SECRET --file .prod.vars` |
 | Check tools, bindings, migrations, secrets (fails on a problem) | `ocre doctor` |
 | Versions and configuration; code size; TODO/FIXME comments | `ocre about`, `ocre stats`, `ocre notes` |
-| Cloudflare login (browser; once) | `ocre login` |
-| Deploy + remote migrations | `ocre deploy` |
+| Cloudflare login (browser, `cf auth login`; once) | `ocre login` |
+| Deploy: creates missing resources, remote migrations, then `cf deploy` | `ocre deploy` |
+| Check cloudflare.config.ts after editing it | `npx tsc -p .` |
+| Find a Cloudflare command `ocre` does not wrap | `npx cf cli search "list worker versions"`, then `npx cf <command> --help` |
 | Type-check | `cargo check --target wasm32-unknown-unknown` |
 | Unit tests + type-check (`--e2e`: also `tests/e2e.sh` against a local server, `$BASE_URL`) | `ocre test` |
 
@@ -112,14 +114,33 @@ templates/          askama templates, compiled into the binary
 locales/<code>.yml  translations (after `ocre g locale`), declared in `ocre::locales!(..)` in src/lib.rs
 public/             static files (CSS, images, robots.txt), served by Cloudflare before the Worker runs
 migrations/         numbered D1 SQL migrations, applied in order
-wrangler.toml       Cloudflare config; the D1 binding must be named DB; MAIL_FROM under [vars]
-                    the JOBS queue ([[queues.*]], JOBS_<NAME> per named queue) and [triggers] crons are added by the generators;
-                    [[kv_namespaces]] CACHE by `ocre g cache` (`ocre deploy` writes its id: commit it)
+cloudflare.config.ts  Cloudflare config (bindings, triggers, exports); the D1 binding must be DB;
+                    variables are `KEY: bindings.text("value")` in worker.env (MAIL_FROM);
+                    generators add entries after `// ocre:env`, `// ocre:triggers`, `// ocre:exports`
+                    (JOBS / JOBS_<NAME> queues, crons, CACHE, STORAGE, CHANNELS, AUTH_RATE_LIMITER);
+                    `ocre deploy` writes the CACHE KV id into it: commit it
+wrangler.config.ts  build command (worker-build) and assets directory, read by cf through the app's wrangler
+package.json        pinned cf, wrangler, typescript (commit package-lock.json); tsconfig.json checks the .ts files
 .dev.vars           local secrets and overrides for `ocre dev` (SECRET_KEY_BASE, MAIL_ADAPTER=log); never commit it
+.prod.vars          production secret values for `ocre secrets push` (git-ignored); never commit it
 ```
 
 ## Rules
 
+- Cloudflare: use `ocre` commands first, then Cloudflare's `cf` CLI
+  (`npx cf ...`, the version pinned in package.json); never run `wrangler`
+  directly (Ocre runs the app's wrangler itself where cf cannot yet). Find a
+  command with `npx cf cli search "<what you want to do>"` and read its
+  `--help` (or `npx cf schema <command>`). Production secrets: put
+  `NAME=value` lines in `.prod.vars`, then `ocre secrets push NAME --file .prod.vars`;
+  never pass secret values on the command line.
+- cloudflare.config.ts: edit only its literal entries, in the canonical forms
+  the generators write (`JOBS: bindings.queue({ name: "__APP_NAME__-jobs" }),`,
+  `triggers.scheduled({ schedule: "0 3 * * *" }),`); Ocre reads the file
+  without running it, so no variables, template strings or spreads in the
+  values it reads (names, queues, buckets, crons, KV ids). Keep the
+  `// ocre:env`, `// ocre:triggers` and `// ocre:exports` markers. Check with
+  `npx tsc -p .` (or `ocre doctor`).
 - Handlers are plain axum handlers taking `State(ctx): State<Ctx>`. Do not add
   `#[worker::send]`; Ocre types are already `Send`.
 - Queries: start from the model's `query()` (an `ocre::Query<T>`):
@@ -214,9 +235,10 @@ wrangler.toml       Cloudflare config; the D1 binding must be named DB; MAIL_FRO
   `flash.notice()` / `flash.alert()`.
 - CSRF protection is automatic: browsers' cross-site POST/PUT/PATCH/DELETE get
   403. Forms and `fetch()` calls need no token. Another site (a separate
-  frontend) that must call the app: list its origin in `ALLOWED_ORIGINS` under
-  `[vars]` in wrangler.toml (comma-separated); that also enables CORS for it.
-  `ALLOWED_HOSTS = "example.com, .example.com"` answers only on those hosts.
+  frontend) that must call the app: list its origin in
+  `ALLOWED_ORIGINS: bindings.text("https://app.example.com")` in worker.env of
+  cloudflare.config.ts (comma-separated); that also enables CORS for it.
+  `ALLOWED_HOSTS: bindings.text("example.com, .example.com")` answers only on those hosts.
 - Security headers (nosniff, SAMEORIGIN framing, referrer policy, HSTS on
   HTTPS) are added to every response; a handler that sets one keeps its value.
   Full-stack apps also set a Content-Security-Policy in src/lib.rs: no inline
@@ -228,7 +250,8 @@ wrangler.toml       Cloudflare config; the D1 binding must be named DB; MAIL_FRO
   `ocre::security::sanitize` before `|safe`. Redirect targets from the
   request: `ocre::security::url_from`.
 - Rate limiting: `ocre::security::rate_limit(&ctx, "BINDING", &key).await?`
-  (429 when over) with a `[[ratelimits]]` binding in wrangler.toml; key by
+  (429 when over) with a `BINDING: bindings.rateLimit({ namespace: "<unique integer>", simple: { limit: 10, period: 60 } }),`
+  entry in cloudflare.config.ts; key by
   `ocre::remote_ip(&headers)` or user id.
 - `GET /up` is the health check; keep it cheap (no database).
 - Email: build it in a mailer (`src/mailers/`), send it from the handler with
@@ -237,7 +260,7 @@ wrangler.toml       Cloudflare config; the D1 binding must be named DB; MAIL_FRO
   delivery: `log` (`ocre dev`: the email is printed in the dev output between
   `[ocre mail]` lines, links included; read them there), `resend` (secret
   `RESEND_API_KEY`; free plan: any recipient, 100/day) or `cloudflare`
-  (`[[send_email]]` binding `EMAIL`; free plan: only verified addresses of the
+  (`EMAIL: bindings.sendEmail()` binding; free plan: only verified addresses of the
   account). Unset in production = `send` fails with an error naming the fix.
   Put data in the template structs; `.txt` templates are not HTML-escaped.
   More on an `Email`: `.cc(..)`, `.bcc(..)`, `.also_to(..)`, `.reply_to(..)`,
@@ -306,7 +329,7 @@ wrangler.toml       Cloudflare config; the D1 binding must be named DB; MAIL_FRO
     `AUTH_RATE_LIMITER`, 10 a minute per IP): do the same in new ones.
   - `--db-sessions` apps: sessions are D1 rows (`/account/sessions` revokes
     them). `--oauth` apps: secrets `<PROVIDER>_CLIENT_ID` and
-    `<PROVIDER>_CLIENT_SECRET` in .dev.vars and `npx wrangler secret put`.
+    `<PROVIDER>_CLIENT_SECRET` in .dev.vars and, for production, `ocre secrets push ... --file .prod.vars`.
 
 - Files (`attachment` fields, `ocre::storage`, R2 binding `STORAGE`):
   - Rules live in the model: `pub const IMAGE: Rules { max_bytes, content_types }`
@@ -345,7 +368,7 @@ wrangler.toml       Cloudflare config; the D1 binding must be named DB; MAIL_FRO
   - Messages are rendered HTML: use askama templates (escaping) as for pages.
     Client messages are ignored; use forms/htmx requests to send data.
   - Needs `features = ["realtime"]` on `ocre` in Cargo.toml and the
-    `CHANNELS` Durable Object + `[[migrations]]` in wrangler.toml (the
+    `CHANNELS` binding + `OcreChannel` export in cloudflare.config.ts (the
     generator adds them; `ocre deploy` creates the namespace).
 
 - Caching (after `ocre g cache`):
@@ -414,3 +437,4 @@ wrangler.toml       Cloudflare config; the D1 binding must be named DB; MAIL_FRO
   raw sockets. Crates that need them (sqlx, reqwest with native TLS, tokio)
   do not compile. Use `worker::Fetch` for outgoing HTTP.
 - Rust must come from rustup with the wasm32 target (Homebrew `rust` lacks it).
+- Node.js 22 or newer, with the app's npm packages installed (`npm install`).

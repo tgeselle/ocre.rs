@@ -114,7 +114,7 @@ fn secret(env: &Env, name: &str) -> Result<String> {
     env.secret(name).map(|secret| secret.to_string()).map_err(|_| {
         Error::internal(format!(
             "the {name} secret is not set. Fix: put it in .dev.vars for `ocre dev` and run \
-             `npx wrangler secret put {name}` for production"
+             `ocre secrets push {name} --file .prod.vars` for production"
         ))
     })
 }

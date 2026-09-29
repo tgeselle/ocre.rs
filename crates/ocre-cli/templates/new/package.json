@@ -1,0 +1,10 @@
+{
+  "name": "__APP_NAME__",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "cf": "__CF_VERSION__",
+    "typescript": "__TYPESCRIPT_VERSION__",
+    "wrangler": "__WRANGLER_VERSION__"
+  }
+}

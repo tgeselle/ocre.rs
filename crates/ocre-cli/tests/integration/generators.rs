@@ -150,14 +150,15 @@ fn destroy_refuses_changed_files_unless_forced() {
 }
 
 #[test]
-fn destroy_keeps_cargo_and_wrangler_changes() {
+fn destroy_keeps_cloudflare_config_changes() {
     let sandbox = Sandbox::new();
     let root = sandbox.new_app("shop", &[]);
     ok(&sandbox, &["g", "cache"], &root);
-    let wrangler = read(&root, "wrangler.toml");
+    let (cargo, config) = (read(&root, "Cargo.toml"), read(&root, "cloudflare.config.ts"));
+    assert!(config.contains("CACHE: bindings.kv(),"), "{config}");
     let report = ok(&sandbox, &["destroy", "cache"], &root);
-    assert_eq!(report["skipped"], json!(["wrangler.toml"]));
-    assert_eq!(read(&root, "wrangler.toml"), wrangler);
+    assert_eq!(report["skipped"], json!(["cloudflare.config.ts"]));
+    assert_eq!((read(&root, "Cargo.toml"), read(&root, "cloudflare.config.ts")), (cargo, config));
 }
 
 #[test]

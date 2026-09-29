@@ -23,7 +23,7 @@
 //!   [`params!`], askama templates compiled at build time, htmx for
 //!   interactivity, a single [`Error`] type that knows its HTTP status.
 //! - **Errors name the fix.** A missing binding answers 500 and logs which
-//!   `wrangler.toml` entry to add; internal details are logged, never shown
+//!   `cloudflare.config.ts` entry to add; internal details are logged, never shown
 //!   to users.
 //! - **Free plan first.** Nothing costs a request, a KV write or a database
 //!   row unless the app asks for it: sessions live in an encrypted cookie
@@ -115,7 +115,7 @@
 //! # fn main() {}
 //! ```
 //!
-//! `wrangler.toml` binds the D1 database as `DB`; `ocre new` writes it, and
+//! `cloudflare.config.ts` binds the D1 database as `DB`; `ocre new` writes it, and
 //! `ocre dev` / `ocre deploy` run it.
 //!
 //! # Cargo features

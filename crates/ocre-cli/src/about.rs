@@ -1,10 +1,16 @@
 //! `ocre version` and `ocre about`: versions, then the app's resolved
 //! configuration (bindings, variables, Ocre features), read from Cargo.toml,
-//! wrangler.toml and rust-toolchain.toml without building anything.
+//! cloudflare.config.ts, wrangler.config.ts and rust-toolchain.toml without
+//! building anything.
 
 use serde::Serialize;
 
-use crate::{CliResult, output::Report, project::Project};
+use crate::{
+    CliResult,
+    config::{self, Config},
+    output::{CliError, Report},
+    project::Project,
+};
 
 /// What `ocre about` reports; `ocre version` fills the first four fields.
 #[derive(Serialize, Default)]
@@ -27,7 +33,7 @@ pub struct About {
     /// Cloudflare bindings and triggers, e.g. `D1 DB (blog)`, `cron 0 3 * * *`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub bindings: Vec<String>,
-    /// Names of the `[vars]` (values stay out of reports).
+    /// Names of the plain-text variables (values stay out of reports).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub vars: Vec<String>,
     /// Optional Ocre features turned on in Cargo.toml.
@@ -83,7 +89,7 @@ pub fn version() -> CliResult {
 pub fn about() -> CliResult {
     let project = Project::find()?;
     let cargo = read_toml(&project, "Cargo.toml");
-    let wrangler = read_toml(&project, "wrangler.toml");
+    let config = project.config()?;
     let toolchain = read_toml(&project, "rust-toolchain.toml");
     let (ocre, features) = ocre_dependency(&cargo).unzip();
     let about = About {
@@ -93,9 +99,9 @@ pub fn about() -> CliResult {
         ocre,
         mode: Some(if project.api_only { "api (JSON only)" } else { "full-stack (HTML and JSON)" }),
         rust_toolchain: toolchain.get("toolchain").and_then(|t| t.get("channel")).and_then(str_value),
-        compatibility_date: wrangler.get("compatibility_date").and_then(str_value),
-        bindings: bindings(&wrangler),
-        vars: wrangler.get("vars").and_then(|v| v.as_table()).map(|v| v.keys().cloned().collect()).unwrap_or_default(),
+        compatibility_date: config.compatibility_date.clone(),
+        bindings: bindings(&config, config::assets_directory(&project.root))?,
+        vars: config.vars().map(|(key, _)| key.to_owned()).collect(),
         features: features.unwrap_or_default(),
     };
     Ok(Report { about: Some(about), ..Report::new("about") })
@@ -134,39 +140,25 @@ fn ocre_dependency(cargo: &toml::Table) -> Option<(String, Vec<String>)> {
     Some((source.join(" "), features))
 }
 
-/// Bindings and triggers of wrangler.toml, in a fixed order.
-fn bindings(wrangler: &toml::Table) -> Vec<String> {
-    let entries = |key: &str| wrangler.get(key).and_then(|v| v.as_array()).cloned().unwrap_or_default();
-    let field = |entry: &toml::Value, key: &str| entry.get(key).and_then(str_value).unwrap_or_default();
+/// Bindings and triggers of cloudflare.config.ts, in a fixed order, then
+/// the static assets directory of wrangler.config.ts.
+fn bindings(config: &Config, assets: Option<String>) -> Result<Vec<String>, CliError> {
+    let key = |call: &config::Call| call.key.clone().unwrap_or_default();
+    let field = |call: &config::Call, name: &str| call.field(name).unwrap_or_default().to_owned();
     let mut out = Vec::new();
-    for db in entries("d1_databases") {
-        out.push(format!("D1 {} ({})", field(&db, "binding"), field(&db, "database_name")));
-    }
-    for kv in entries("kv_namespaces") {
-        out.push(format!("KV {}", field(&kv, "binding")));
-    }
-    for bucket in entries("r2_buckets") {
-        out.push(format!("R2 {} ({})", field(&bucket, "binding"), field(&bucket, "bucket_name")));
-    }
-    let queues = wrangler.get("queues");
-    for producer in queues.and_then(|q| q.get("producers")).and_then(|p| p.as_array()).into_iter().flatten() {
-        out.push(format!("Queue {} ({})", field(producer, "binding"), field(producer, "queue")));
-    }
-    for consumer in queues.and_then(|q| q.get("consumers")).and_then(|c| c.as_array()).into_iter().flatten() {
-        out.push(format!("Queue consumer ({})", field(consumer, "queue")));
-    }
-    let objects = wrangler.get("durable_objects").and_then(|d| d.get("bindings")).and_then(|b| b.as_array());
-    for object in objects.into_iter().flatten() {
-        out.push(format!("Durable Object {} ({})", field(object, "name"), field(object, "class_name")));
-    }
-    for email in entries("send_email") {
-        out.push(format!("Email {}", field(&email, "name")));
-    }
-    let crons = wrangler.get("triggers").and_then(|t| t.get("crons")).and_then(|c| c.as_array());
-    for cron in crons.into_iter().flatten().filter_map(str_value) {
-        out.push(format!("cron {cron}"));
-    }
-    let assets = wrangler.get("assets").map(|a| a.get("directory").and_then(str_value).unwrap_or_default());
+    out.extend(config.bindings("d1").map(|db| format!("D1 {} ({})", key(db), field(db, "name"))));
+    out.extend(config.bindings("kv").map(|kv| format!("KV {}", key(kv))));
+    out.extend(config.bindings("r2").map(|bucket| format!("R2 {} ({})", key(bucket), field(bucket, "name"))));
+    out.extend(config.bindings("queue").map(|queue| format!("Queue {} ({})", key(queue), field(queue, "name"))));
+    out.extend(config.triggers("queue").map(|consumer| format!("Queue consumer ({})", field(consumer, "name"))));
+    out.extend(
+        config
+            .bindings("durableObject")
+            .map(|object| format!("Durable Object {} ({})", key(object), field(object, "exportName"))),
+    );
+    out.extend(config.bindings("sendEmail").map(|email| format!("Email {}", key(email))));
+    out.extend(config.bindings("rateLimit").map(|limit| format!("Rate limit {}", key(limit))));
+    out.extend(config.crons()?.into_iter().map(|cron| format!("cron {cron}")));
     out.extend(assets.map(|directory| format!("Assets ({directory})")));
-    out
+    Ok(out)
 }

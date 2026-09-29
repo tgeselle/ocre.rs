@@ -477,7 +477,8 @@ fn check(pages: &[String]) -> Res<()> {
     println!("Generating {} (ocre new --starter blog, then {} generators)...", app.display(), FIXTURE.len());
     quiet(
         Command::new(&ocre)
-            .args(["new", &name, "--starter", "blog", "--yes", "--json", "--ocre-path"])
+            // Only the Rust code is compiled: no need for the app's npm packages.
+            .args(["new", &name, "--starter", "blog", "--yes", "--no-install", "--json", "--ocre-path"])
             .arg(repo.join("crates/ocre"))
             .current_dir(&work),
     )?;

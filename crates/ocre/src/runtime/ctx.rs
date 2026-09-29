@@ -51,7 +51,7 @@ impl Ctx {
     ///
     /// Use it for vars, secrets and bindings such as AI or Vectorize; prefer
     /// the Ocre helpers when one exists, since their errors name the
-    /// wrangler.toml fix.
+    /// cloudflare.config.ts fix.
     ///
     /// # Examples
     ///
@@ -77,8 +77,8 @@ impl Ctx {
     /// # Errors
     ///
     /// [`Error::Internal`] (500, logged) when the Worker has no `DB` binding;
-    /// the message says to add a `[[d1_databases]]` entry with
-    /// `binding = "DB"` to wrangler.toml.
+    /// the message says to add `DB: bindings.d1({ name: "<app>" })` to
+    /// cloudflare.config.ts.
     ///
     /// # Examples
     ///
@@ -99,8 +99,8 @@ impl Ctx {
 
     /// Another D1 database of the app, by its binding name (Rails' multiple databases).
     ///
-    /// Each database is a `[[d1_databases]]` entry in wrangler.toml with its
-    /// own `binding`, `database_name` and `migrations_dir` (see the Models
+    /// Each database is a `KEY: bindings.d1({ name: "..." })` entry in
+    /// cloudflare.config.ts with its own binding key and database name (see the Models
     /// guide, "Several databases"). Queries cannot join across databases:
     /// load ids from one, then `find_many` in the other.
     ///
@@ -112,7 +112,7 @@ impl Ctx {
     /// # Errors
     ///
     /// [`Error::Internal`] (500, logged) when the Worker has no D1 binding
-    /// named `binding`; the message names the wrangler.toml entry to add.
+    /// named `binding`; the message names the cloudflare.config.ts entry to add.
     ///
     /// # Examples
     ///
@@ -130,7 +130,7 @@ impl Ctx {
     pub fn db_named(&self, binding: &str) -> Result<Db> {
         self.env.d1(binding).map(Db::new).map_err(|err| {
             Error::internal(format!(
-                "D1 binding `{binding}` is missing ({err}). Fix: add a [[d1_databases]] entry with binding = \"{binding}\" to wrangler.toml"
+                "D1 binding `{binding}` is missing ({err}). Fix: add `{binding}: bindings.d1({{ name: \"<database>\" }}),` to worker.env in cloudflare.config.ts"
             ))
         })
     }

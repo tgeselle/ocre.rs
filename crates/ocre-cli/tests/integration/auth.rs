@@ -63,7 +63,7 @@ fn auth_generates_pages_json_api_and_models_in_a_full_stack_app() {
         ]),
         "numbered after the starter's migration"
     );
-    assert_eq!(report["updated"], serde_json::json!(["src/models/mod.rs", "src/lib.rs", "wrangler.toml"]));
+    assert_eq!(report["updated"], serde_json::json!(["src/models/mod.rs", "src/lib.rs", "cloudflare.config.ts"]));
     assert_eq!(report["next"], serde_json::json!(["ocre migrate", "ocre dev", "open http://localhost:8787/signup"]));
 
     let lib = read(&root, "src/lib.rs");
@@ -85,9 +85,10 @@ fn auth_generates_pages_json_api_and_models_in_a_full_stack_app() {
     assert!(read(&root, "src/auth.rs").contains("pub const OAUTH_PROVIDERS: &[&str] = &[];"));
     let account = read(&root, "templates/auth/account.html");
     assert!(!account.contains("ocre:account-links") && !account.contains("/account/sessions"), "{account}");
-    let wrangler = read(&root, "wrangler.toml");
-    assert!(wrangler.contains("[[ratelimits]]\nname = \"AUTH_RATE_LIMITER\"\nnamespace_id = \""), "{wrangler}");
-    assert!(wrangler.contains("simple = { limit = 10, period = 60 }"), "{wrangler}");
+    let config = read(&root, "cloudflare.config.ts");
+    let entry = config.lines().find(|line| line.contains("AUTH_RATE_LIMITER:")).unwrap_or_else(|| panic!("{config}"));
+    assert!(entry.trim().starts_with("AUTH_RATE_LIMITER: bindings.rateLimit({ namespace: \""), "{entry}");
+    assert!(entry.ends_with("\", simple: { limit: 10, period: 60 } }),"), "{entry}");
 
     let (stdout, _) = text(&sandbox.ocre(&["routes", "login"], &root));
     assert!(
@@ -179,11 +180,14 @@ fn auth_with_database_sessions_and_oauth() {
 
     // An existing rate limiter binding is kept; no .dev.vars is fine.
     fs::remove_file(other.join(".dev.vars")).unwrap();
-    let wrangler = read(&other, "wrangler.toml");
-    fs::write(other.join("wrangler.toml"), format!("{wrangler}\n[[ratelimits]]\nname = \"AUTH_RATE_LIMITER\"\nnamespace_id = \"7\"\nsimple = {{ limit = 5, period = 10 }}\n")).unwrap();
+    let config = read(&other, "cloudflare.config.ts").replace(
+        "// ocre:env",
+        "AUTH_RATE_LIMITER: bindings.rateLimit({ namespace: \"7\", simple: { limit: 5, period: 10 } }),\n\t\t\t// ocre:env",
+    );
+    fs::write(other.join("cloudflare.config.ts"), &config).unwrap();
     let (report, ok) = sandbox.json(&["g", "auth", "--oauth", "github"], &other);
     assert!(ok, "{report}");
-    assert_eq!(read(&other, "wrangler.toml").matches("[[ratelimits]]").count(), 1);
+    assert_eq!(read(&other, "cloudflare.config.ts"), config);
     assert!(!other.join(".dev.vars").exists());
 }
 
@@ -226,7 +230,7 @@ fn auth_writes_nothing_when_a_file_is_in_the_way() {
 
     let (report, ok) = sandbox.json(&["g", "auth"], &sandbox.work);
     assert!(!ok);
-    assert_eq!(report["error"], "no wrangler.toml found in this directory or its parents");
+    assert_eq!(report["error"], "no cloudflare.config.ts found in this directory or its parents");
 }
 
 #[test]

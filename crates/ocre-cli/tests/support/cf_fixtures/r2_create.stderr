@@ -1,0 +1,7 @@
+
+┌ APIError
+│ [10042] Please enable R2 through the Cloudflare Dashboard.
+│ 403 Forbidden · HTTP /accounts/0123456789abcdef0123456789abcdef/r2/buckets
+└
+
+→ Check your API token permissions

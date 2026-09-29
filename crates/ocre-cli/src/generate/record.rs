@@ -18,7 +18,7 @@ pub(crate) const DIR: &str = ".ocre/generated";
 
 /// Files whose changes `ocre destroy` keeps: features and bindings, which
 /// later generators may rely on without having changed them.
-pub(crate) const KEPT: [&str; 2] = ["Cargo.toml", "wrangler.toml"];
+pub(crate) const KEPT: [&str; 3] = ["Cargo.toml", "cloudflare.config.ts", "package.json"];
 
 /// One generator run.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]

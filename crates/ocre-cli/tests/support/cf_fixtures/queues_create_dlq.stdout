@@ -1,0 +1,10 @@
+{
+  "queue_id": "6d31ae5d12b6463ca19d65ea2cb2e83a",
+  "queue_name": "ocre-cfcheck-demo-jobs-failed",
+  "settings": {
+    "delivery_delay": 0,
+    "message_retention_period": 86400
+  },
+  "created_on": "2026-09-29T22:56:23.185249Z",
+  "modified_on": "2026-09-29T22:56:23.185249Z"
+}

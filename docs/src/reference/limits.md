@@ -13,7 +13,7 @@ This page lists the Cloudflare Workers Free plan limits that matter to an Ocre a
 | Limit | Free plan (September 2026) | Source | What Ocre does |
 |---|---|---|---|
 | Requests | 100,000 a day per account; past it, error 1027 until midnight UTC | [Workers limits](https://developers.cloudflare.com/workers/platform/limits/#daily-requests) | Files in `public/` are served by Workers Static Assets, free and unlimited, without running the Worker. A WebSocket connection counts once, not per message. |
-| Static asset requests | free and unlimited; 20,000 files per version, 25 MiB per file | [Static assets billing](https://developers.cloudflare.com/workers/static-assets/billing-and-limitations/), [limits](https://developers.cloudflare.com/workers/platform/limits/#static-assets) | `[assets] directory = "public"` in `wrangler.toml` from `ocre new`. Turning on Workers Cache makes asset requests count ([Workers Cache pricing](https://developers.cloudflare.com/workers/cache/#pricing)); Ocre does not enable it. |
+| Static asset requests | free and unlimited; 20,000 files per version, 25 MiB per file | [Static assets billing](https://developers.cloudflare.com/workers/static-assets/billing-and-limitations/), [limits](https://developers.cloudflare.com/workers/platform/limits/#static-assets) | `assetsDirectory: "public"` in `wrangler.config.ts` from `ocre new`. Turning on Workers Cache makes asset requests count ([Workers Cache pricing](https://developers.cloudflare.com/workers/cache/#pricing)); Ocre does not enable it. |
 | CPU time | 10 ms per invocation (HTTP request, Cron Trigger, queue consumer batch); occasional overruns are tolerated per isolate, frequent ones end in error 1102 | [CPU time](https://developers.cloudflare.com/workers/platform/limits/#cpu-time) | Waiting on D1, KV, R2 or `fetch` does not count. Passwords are hashed with WebCrypto PBKDF2 (native, about 5.5 ms) instead of WebAssembly; R2 downloads are streamed without passing through WebAssembly; GraphQL (20 to 60 ms at instance start) is opt-in. |
 | Memory | 128 MB per isolate, shared by the concurrent requests it runs | [Memory](https://developers.cloudflare.com/workers/platform/limits/#memory) | Uploads are read into memory: generated attachment rules default to 10 MB per file and forms refuse bodies over the sum of their files' limits plus 1 MB (413). |
 | Request body size | 100 MB (Cloudflare Free plan); larger bodies get 413 before the Worker runs | [Request limits](https://developers.cloudflare.com/workers/platform/limits/#request-and-response-limits) | Keep `max_bytes` of attachment `Rules` in the tens of MB. |
@@ -104,6 +104,6 @@ This page lists the Cloudflare Workers Free plan limits that matter to an Ocre a
 ## See also
 
 - [Cost model](../explanations/cost-model.md): how a request spends these limits, with a daily budget example.
-- [Configuration](configuration.md): the `wrangler.toml` entries behind each binding.
+- [Configuration](configuration.md): the `cloudflare.config.ts` entries behind each binding.
 - [Background jobs and schedules](../guides/jobs.md), [File storage](../guides/files.md), [Caching](../guides/caching.md), [Realtime](../guides/realtime.md), [Email](../guides/email.md).
 - [Cloudflare Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/) for the Workers Paid plan.

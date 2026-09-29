@@ -5,7 +5,7 @@ Ocre pushes HTML to open pages over WebSockets, like Rails' Action Cable and Tur
 ## Before you start
 
 - An Ocre app created with `ocre new`, full-stack (the default). API-only apps can use the same pieces by hand; see [Without the scaffold](#without-the-scaffold-and-in-api-only-apps).
-- Nothing to set up on Cloudflare: the first `--realtime` scaffold adds everything to `Cargo.toml` and `wrangler.toml`, and `ocre deploy` creates the Durable Object namespace.
+- Nothing to set up on Cloudflare: the first `--realtime` scaffold adds everything to `Cargo.toml` and `cloudflare.config.ts`, and `ocre deploy` creates the Durable Object namespace.
 - The private-channel example uses `crate::auth::OptionalUser`, created by `ocre g auth` (see [Authentication](authentication.md)); the job example needs a job from `ocre g job` (see [Background jobs and schedules](jobs.md)).
 
 ## How it works
@@ -42,7 +42,7 @@ ocre g scaffold Message body:text --realtime
   update  src/models/mod.rs
   update  src/lib.rs
   update  Cargo.toml
-  update  wrangler.toml
+  update  cloudflare.config.ts
 
 Next:
   ocre migrate
@@ -60,22 +60,20 @@ Next:
 | `src/messages.rs` | After a successful create, broadcasts `prepend("messages", row)`; after update, the new row (same `id`, so it replaces the old one); after delete, `remove("message_<id>")` |
 | `src/realtime.rs` (first use) | `GET /realtime/{channel}` routed to `connect`, which lists the channels anyone may open; later `--realtime` scaffolds add their channel under `// ocre:channels` |
 | `Cargo.toml` (first use) | Ocre's `realtime` feature |
-| `wrangler.toml` (first use) | The `CHANNELS` Durable Object binding and its migration |
+| `cloudflare.config.ts` (first use) | The `CHANNELS` Durable Object binding and the `OcreChannel` export |
 
-The `wrangler.toml` entries:
+The `cloudflare.config.ts` entries (for an app named `chat`):
 
-```toml
-# Realtime channels (`ocre::realtime`): one Durable Object per channel holds the
-# browsers' WebSockets, hibernated between broadcasts so idle connections cost
-# no duration. Deploying creates the namespace from the migration below; the
-# free plan only accepts SQLite-backed classes (`new_sqlite_classes`).
-[[durable_objects.bindings]]
-name = "CHANNELS"
-class_name = "OcreChannel"
+```ts
+// in worker.env, after // ocre:env
+// The realtime channels' Durable Objects (`ocre::realtime`).
+CHANNELS: bindings.durableObject({ worker: "chat", exportName: "OcreChannel" }),
 
-[[migrations]]
-tag = "ocre-realtime-v1"
-new_sqlite_classes = ["OcreChannel"]
+// in worker.exports, after // ocre:exports
+// Realtime channels (`ocre::realtime`): one Durable Object per channel holds the
+// browsers' WebSockets, hibernated between broadcasts so idle connections cost
+// no duration. The free plan only accepts SQLite-backed classes.
+OcreChannel: exports.durableObject({ storage: "sqlite" }),
 ```
 
 The generated index page (`templates/messages/index.html`):
@@ -253,7 +251,7 @@ message: <ul hx-swap-oob="beforeend:#announcements"><li id="announcement_1790656
 
 Here the broadcast is the whole point of the request, so its error is returned (`?`). The generated controllers treat broadcasts as best effort instead: they `.ok()` the result, so a failure is only logged and the database write still succeeds. Either way, broadcast after the database write succeeded, and once per change, not once per row in a loop.
 
-Every failure is logged as `[ocre realtime] broadcast to <channel> failed: ...` and returned as a 500 (`Error::Internal`): an invalid channel name, a missing `CHANNELS` binding (the message names the `wrangler.toml` entries to add), or a channel object that cannot be reached, for example past the daily free-plan quota.
+Every failure is logged as `[ocre realtime] broadcast to <channel> failed: ...` and returned as a 500 (`Error::Internal`): an invalid channel name, a missing `CHANNELS` binding (the message names the `cloudflare.config.ts` entries to add), or a channel object that cannot be reached, for example past the daily free-plan quota.
 
 ## Authorizing channels
 
@@ -366,14 +364,16 @@ So the daily count is roughly: connections and reconnections of every open page,
 
 ## Deploying
 
-`ocre deploy` needs no extra step: `wrangler deploy` creates the Durable Object namespace from the `[[migrations]]` entry. Keep the migration tag as generated; Durable Object migrations are applied once per tag.
+`ocre deploy` needs no extra step: `cf deploy` creates the Durable Object namespace from the `OcreChannel` export. Keep the export as generated: removing or renaming it deletes the class and its objects.
+
+Apps first deployed with an earlier Ocre declared the class with a wrangler `[[migrations]]` entry (tag `ocre-realtime-v1`). How cf maps the export onto such a Worker is not verified yet: see [Upgrading from wrangler.toml](upgrading.md#realtime-apps-deploy-to-a-preview-first) and deploy to a preview first.
 
 ## Without the scaffold, and in API-only apps
 
 The scaffold only writes app code around three framework pieces, so any app, API-only included, can set them up by hand:
 
 1. Turn on the feature in `Cargo.toml`: `ocre = { ..., features = ["realtime"] }` (see [Configuration](../reference/configuration.md#ocre-features)).
-2. Add the `[[durable_objects.bindings]]` and `[[migrations]]` entries shown above to `wrangler.toml`.
+2. Add the `CHANNELS` binding and the `OcreChannel` export shown above to `cloudflare.config.ts`.
 3. Add a `connect` route like `src/realtime.rs` above (any path; `WebSocketUpgrade` is the extractor) and merge it in `routes()`.
 4. Broadcast from handlers or jobs. Non-htmx clients usually want JSON: `realtime::broadcast(&ctx, "orders", &ocre::serde_json::json!({"id": 12, "status": "paid"}).to_string())`. `WebSocketUpgrade` rejects a request without `Upgrade: websocket` with a 400 rendered as JSON in API-only apps.
 
@@ -382,7 +382,7 @@ A browser client without htmx is a plain `new WebSocket("wss://<host>/realtime/o
 ## See also
 
 - [Generators](../reference/generators.md#ocre-g-scaffold): `ocre g scaffold --realtime`.
-- [Configuration](../reference/configuration.md#durable_objectsbindings-and-migrations): the Durable Object entries.
+- [Configuration](../reference/configuration.md#env-channels-and-exports-ocrechannel-durable-objects): the Durable Object entries.
 - [Background jobs and schedules](jobs.md): enqueueing jobs that broadcast.
 - [Authentication](authentication.md): `CurrentUser` and `OptionalUser`.
 - [Sessions, flash and security](security.md): the cross-site check on handshakes.

@@ -1,0 +1,5 @@
+
+┌ APIError
+│ [7404] The database 71338291-825e-49d2-bea8-99b13f9db18a could not be found
+│ 404 Not Found · HTTP /accounts/0123456789abcdef0123456789abcdef/d1/database/71338291-825e-49d2-bea8-99b13f9db18a
+└

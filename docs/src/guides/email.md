@@ -4,7 +4,7 @@ This guide sends email from an Ocre app with `ocre::mail` (built directly, or by
 
 ## Before you start
 
-- An app created with [`ocre new`](../reference/cli.md#ocre-new). It already has what sending needs: `MAIL_FROM` under `[vars]` in `wrangler.toml` and `MAIL_ADAPTER=log` in `.dev.vars`, so `ocre dev` prints every email instead of sending it.
+- An app created with [`ocre new`](../reference/cli.md#ocre-new). It already has what sending needs: `MAIL_FROM` in `cloudflare.config.ts` and `MAIL_ADAPTER=log` in `.dev.vars`, so `ocre dev` prints every email instead of sending it.
 - Mailers: [`ocre g mailer`](../reference/generators.md#ocre-g-mailer). Receiving: [`ocre g mailbox`](../reference/generators.md#ocre-g-mailbox). Sending later: one [`ocre g job`](../reference/generators.md#ocre-g-job) (it wires the queue `deliver_later` uses).
 - For production delivery: a domain you control, verified with Resend or onboarded to Cloudflare Email Service (see [Choose an adapter](#choose-an-adapter)).
 - The outputs below come from an app created with `ocre new shop --starter blog`, served by `ocre dev` on the default port 8787.
@@ -43,13 +43,12 @@ Nothing is checked while building. `send` checks, then delivers:
 | A recipient (`to`, `cc`, `bcc`) or `reply_to` is not an email address | `Error::BadRequest`, 400 `invalid email address: <address>` |
 | `MAIL_ADAPTER` unset or unknown, the sender unset or not an address, no recipient or more than 50, subject empty or on several lines, a header Ocre sets itself (`Subject`, `Cc`...) or with a line break, an attachment without a name or a MIME type, `RESEND_API_KEY` or the `EMAIL` binding missing, the provider refused or could not be reached | `Error::Internal`, 500; the log line says what to fix |
 
-The sender is the `MAIL_FROM` variable, `noreply@yourdomain.com` or `Name <noreply@yourdomain.com>`. `ocre new` puts a placeholder in `wrangler.toml`:
+The sender is the `MAIL_FROM` variable, `noreply@yourdomain.com` or `Name <noreply@yourdomain.com>`. `ocre new` puts a placeholder in `cloudflare.config.ts`:
 
-```toml
-# wrangler.toml
-[vars]
-# Sender for `ocre::mail::send`: "noreply@yourdomain.com" or "Name <noreply@yourdomain.com>".
-MAIL_FROM = "shop <noreply@example.com>"
+```ts
+// cloudflare.config.ts, in worker.env
+// Sender for `ocre::mail::send`: "noreply@yourdomain.com" or "Name <noreply@yourdomain.com>".
+MAIL_FROM: bindings.text("shop <noreply@example.com>"),
 ```
 
 `send` waits for the provider (one HTTP subrequest with Resend). The request answers after delivery succeeded; use [`deliver_later`](#send-from-the-background-deliver_later) to answer first and retry failures.
@@ -60,16 +59,16 @@ The `MAIL_ADAPTER` variable names how mail leaves the Worker. Nothing is guessed
 
 | `MAIL_ADAPTER` | Delivery | Configuration | Free-plan limits (September 2026) |
 |---|---|---|---|
-| `log` | Prints the whole email (headers, text, HTML, one line per attachment) to the Worker console between `[ocre mail]` lines; sends nothing. In `ocre dev` it also keeps the last 20 for the [development pages](#preview-and-inspect-emails-in-development) | none; `ocre new` writes `MAIL_ADAPTER=log` to `.dev.vars`, which overrides `[vars]` in `ocre dev` | none |
+| `log` | Prints the whole email (headers, text, HTML, one line per attachment) to the Worker console between `[ocre mail]` lines; sends nothing. In `ocre dev` it also keeps the last 20 for the [development pages](#preview-and-inspect-emails-in-development) | none; `ocre new` writes `MAIL_ADAPTER=log` to `.dev.vars`, which overrides `cloudflare.config.ts` in `ocre dev` | none |
 | `resend` | `POST https://api.resend.com/emails` | `RESEND_API_KEY` secret; `MAIL_FROM` on a domain verified in Resend | [Resend free plan](https://resend.com/docs/knowledge-base/account-quotas-and-limits): 100 emails a day, 3,000 a month, one domain; any recipient |
-| `cloudflare` | Cloudflare Email Service through the `EMAIL` [send_email binding](https://developers.cloudflare.com/email-service/api/send-emails/workers-api/) | `[[send_email]] name = "EMAIL"` in `wrangler.toml`; `MAIL_FROM` on a domain onboarded to Email Service | [Workers Free](https://developers.cloudflare.com/email-service/platform/pricing/): only verified destination addresses of the account; any recipient needs Workers Paid (3,000 a month included, then $0.35 per 1,000) |
+| `cloudflare` | Cloudflare Email Service through the `EMAIL` [send_email binding](https://developers.cloudflare.com/email-service/api/send-emails/workers-api/) | `EMAIL: bindings.sendEmail()` in `cloudflare.config.ts`; `MAIL_FROM` on a domain onboarded to Email Service | [Workers Free](https://developers.cloudflare.com/email-service/platform/pricing/): only verified destination addresses of the account; any recipient needs Workers Paid (3,000 a month included, then $0.35 per 1,000) |
 
 For sign-up, magic-link and password-reset mail to any address on the free plan, use Resend. The `cloudflare` adapter on the free plan suits mail to yourself (alerts, reports).
 
 With `MAIL_ADAPTER` unset, `send` fails rather than dropping mail silently. With `MAIL_ADAPTER` removed from `.dev.vars`, a handler that sends answers 500 and `ocre dev` logs:
 
 ```text
-✘ [ERROR] [ocre] cannot send email: MAIL_ADAPTER is not set. Fix: set MAIL_ADAPTER to "resend" (with the RESEND_API_KEY secret) or "cloudflare" (with a [[send_email]] binding named EMAIL) under [vars] in wrangler.toml; `ocre new` puts MAIL_ADAPTER=log in .dev.vars so `ocre dev` only logs mail
+✘ [ERROR] [ocre] cannot send email: MAIL_ADAPTER is not set. Fix: set MAIL_ADAPTER to "resend" (with the RESEND_API_KEY secret) or "cloudflare" (with the EMAIL: bindings.sendEmail() binding) in worker.env of cloudflare.config.ts, as MAIL_ADAPTER: bindings.text("resend"); `ocre new` puts MAIL_ADAPTER=log in .dev.vars so `ocre dev` only logs mail
 ```
 
 ### log (development)
@@ -98,23 +97,24 @@ This is the welcome email. Edit templates/mailers/user/welcome.txt.
 [ocre mail] end
 ```
 
-`Cc`, `Bcc`, `Reply-To` and extra headers are printed with the others, and each attachment as a line such as `[ocre mail] attachment: digest.csv (text/csv, 4 bytes)`. Links in emails (magic links, password resets) can be opened from there, or from the [development pages](#preview-and-inspect-emails-in-development). In production, `log` writes to the Worker logs (`npx wrangler tail`); it never delivers.
+`Cc`, `Bcc`, `Reply-To` and extra headers are printed with the others, and each attachment as a line such as `[ocre mail] attachment: digest.csv (text/csv, 4 bytes)`. Links in emails (magic links, password resets) can be opened from there, or from the [development pages](#preview-and-inspect-emails-in-development). In production, `log` writes to the Worker logs (Workers Logs in the dashboard); it never delivers.
 
 ### resend (production, any recipient)
 
 1. Create a [Resend](https://resend.com) account, add and verify your domain at <https://resend.com/domains>, and create an API key at <https://resend.com/api-keys>.
-2. Store the key as a Worker secret:
+2. Store the key as a Worker secret: put `RESEND_API_KEY=<key>` in `.prod.vars` (git-ignored), then
 
    ```sh
-   npx wrangler secret put RESEND_API_KEY
+   ocre secrets push RESEND_API_KEY --file .prod.vars
    ```
 
-3. In `wrangler.toml`, set the adapter and a sender on the verified domain:
+   (the Worker must exist: after the first `ocre deploy`).
 
-   ```toml
-   [vars]
-   MAIL_FROM = "Shop <noreply@yourdomain.com>"
-   MAIL_ADAPTER = "resend"
+3. In `cloudflare.config.ts`, in `worker.env`, set the adapter and a sender on the verified domain:
+
+   ```ts
+   MAIL_FROM: bindings.text("Shop <noreply@yourdomain.com>"),
+   MAIL_ADAPTER: bindings.text("resend"),
    ```
 
 4. `ocre deploy`. `.dev.vars` keeps `MAIL_ADAPTER=log`, so `ocre dev` still only prints. To send for real from `ocre dev`, put `MAIL_ADAPTER=resend` and `RESEND_API_KEY=...` in `.dev.vars`.
@@ -124,20 +124,17 @@ Resend errors are 500s whose log names the fix: a 401 or 403 from Resend says to
 ### cloudflare (production, verified addresses on the free plan)
 
 1. Onboard the sending domain to [Cloudflare Email Service](https://developers.cloudflare.com/email-service/) in the dashboard.
-2. In `wrangler.toml`, uncomment the binding `ocre new` left there, and set the adapter:
+2. In `cloudflare.config.ts`, in `worker.env`, uncomment the binding `ocre new` left there, and set the adapter:
 
-   ```toml
-   [vars]
-   MAIL_FROM = "Shop <noreply@yourdomain.com>"
-   MAIL_ADAPTER = "cloudflare"
-
-   [[send_email]]
-   name = "EMAIL"
+   ```ts
+   MAIL_FROM: bindings.text("Shop <noreply@yourdomain.com>"),
+   MAIL_ADAPTER: bindings.text("cloudflare"),
+   EMAIL: bindings.sendEmail(),
    ```
 
 3. `ocre deploy`.
 
-`ocre dev` simulates the binding: with `MAIL_ADAPTER=cloudflare` in `.dev.vars` and the binding uncommented, sending prints wrangler's summary and writes the bodies to files instead of sending:
+`ocre dev` simulates the binding: with `MAIL_ADAPTER=cloudflare` in `.dev.vars` and the binding uncommented, sending prints the local server's summary (a wrangler line, since `cf dev` runs wrangler) and writes the bodies to files instead of sending:
 
 ```text
 [wrangler:info] send_email binding called with MessageBuilder:
@@ -340,7 +337,7 @@ The first request prints the "Welcome" email to bob@example.com shown in [log (d
 
 `ocre::mail::deliver_later(&ctx, email).await?` is Rails' `deliver_later`. It checks the email and the configuration right away like `send` (a bad address is still a 400, a missing `MAIL_ADAPTER` or `MAIL_FROM` a 500), puts the email on the jobs queue, and returns without waiting for the provider. The queue consumer sends it with `send` moments later; a failure (Resend down, quota reached) is retried with the jobs backoff (30 s, 1 min, 3 min, 9 min, 27 min), then moved to the dead-letter queue. The Resend key and the `EMAIL` binding are only looked up when the consumer sends.
 
-It needs the `JOBS` queue that the first `ocre g job` adds to `wrangler.toml` (see [Background jobs and schedules](jobs.md)); without it, `deliver_later` is a 500 whose log says to run `ocre g job <Name>` once. In `ocre dev` the queue runs locally, and the email appears within about 5 seconds, followed by the job line:
+It needs the `JOBS` queue that the first `ocre g job` adds to `cloudflare.config.ts` (see [Background jobs and schedules](jobs.md)); without it, `deliver_later` is a 500 whose log says to run `ocre g job <Name>` once. In `ocre dev` the queue runs locally, and the email appears within about 5 seconds, followed by the job line:
 
 ```sh
 curl -s -X POST http://localhost:8787/invitations/later -d email=carol@example.com -o /dev/null -w '%{http_code}\n'
@@ -510,7 +507,7 @@ pub async fn receive(ctx: Ctx, email: InboundEmail) -> Result<()> {
 
 ### Test it locally
 
-While `ocre dev` runs, the simplest way is the form at `http://localhost:8787/ocre/dev/mailbox`, Rails' Action Mailbox conductor: fill in the envelope, the subject and the body, and it delivers the message through wrangler's local email endpoint, showing the answer (`200: Worker successfully processed email`). The same endpoint works from a terminal: POST a raw message; `from` and `to` in the query string are the envelope. The message needs a `Message-ID` header:
+While `ocre dev` runs, the simplest way is the form at `http://localhost:8787/ocre/dev/mailbox`, Rails' Action Mailbox conductor: fill in the envelope, the subject and the body, and it delivers the message through the dev server's local email endpoint, showing the answer (`200: Worker successfully processed email`). The same endpoint works from a terminal: POST a raw message; `from` and `to` in the query string are the envelope. The message needs a `Message-ID` header:
 
 ```sh
 curl 'http://localhost:8787/cdn-cgi/local/email?from=ada@example.com&to=posts@example.com' \
@@ -606,7 +603,7 @@ Receiving needs a domain on Cloudflare (its DNS managed by Cloudflare); `*.worke
 3. For forwarding, add each target as a destination address and confirm it from the email Cloudflare sends.
 4. Create a [routing rule](https://developers.cloudflare.com/email-service/configuration/email-routing-addresses/) for an address (for example `posts@yourdomain.com`) with the action "Send to a Worker", and pick the app's Worker. Each rule maps one address to one Worker; a catch-all rule can send every address to it, and `email.to()` tells them apart.
 
-Nothing is added to `wrangler.toml` for receiving.
+Nothing is added to `cloudflare.config.ts` for receiving.
 
 ## See also
 

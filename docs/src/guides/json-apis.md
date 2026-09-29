@@ -509,11 +509,11 @@ Without the `html` feature, errors that would otherwise be HTML pages (such as a
 
 ## Calling the API from another origin (CORS)
 
-A browser frontend served from another origin (a separate SPA, a mobile web view) needs that origin listed in the `ALLOWED_ORIGINS` Worker variable, comma-separated, in `wrangler.toml`:
+A browser frontend served from another origin (a separate SPA, a mobile web view) needs that origin listed in the `ALLOWED_ORIGINS` Worker variable, comma-separated, in `cloudflare.config.ts`:
 
-```toml
-[vars]
-ALLOWED_ORIGINS = "https://app.example.com"
+```ts
+// in worker.env
+ALLOWED_ORIGINS: bindings.text("https://app.example.com"),
 ```
 
 Listed origins get CORS headers (methods `GET, POST, PUT, PATCH, DELETE`; headers `Content-Type, Authorization, Accept`; credentials allowed) and pass the CSRF check; unlisted ones get neither. A preflight from the listed origin:
