@@ -70,24 +70,49 @@ fn start(sandbox: &Sandbox, root: &Path) -> Server {
 struct Page {
     status: u16,
     location: String,
+    /// `name=value` of the first Set-Cookie, as a browser would send it back.
+    cookie: String,
+    headers: ureq::http::HeaderMap,
     body: String,
 }
 
 fn get(server: &Server, path: &str) -> Page {
-    page(agent().get(&format!("{}{path}", server.base)).call().unwrap())
+    send(server, "GET", path, &[], &[])
 }
 
 fn post(server: &Server, path: &str, form: &[(&str, &str)]) -> Page {
-    page(agent().post(&format!("{}{path}", server.base)).send_form(form.iter().copied()).unwrap())
+    send(server, "POST", path, &[], form)
+}
+
+/// GET, or POST of a form, with extra request headers.
+fn send(server: &Server, method: &str, path: &str, headers: &[(&str, &str)], form: &[(&str, &str)]) -> Page {
+    let url = format!("{}{path}", server.base);
+    let response = if method == "GET" {
+        let mut request = agent().get(&url);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        request.call()
+    } else {
+        let mut request = agent().post(&url);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        request.send_form(form.iter().copied())
+    };
+    page(response.unwrap())
 }
 
 fn page(mut response: ureq::http::Response<ureq::Body>) -> Page {
     let location = response.headers().get("location").map_or("", |v| v.to_str().unwrap()).to_owned();
+    let cookie =
+        response.headers().get("set-cookie").map_or("", |v| v.to_str().unwrap().split(';').next().unwrap()).to_owned();
     let status = response.status().as_u16();
+    let headers = response.headers().clone();
     // 204 has no body by definition; wrangler dev still labels it gzip, which
     // makes the client's decompressor fail on the empty stream.
     let body = if status == 204 { String::new() } else { response.body_mut().read_to_string().unwrap() };
-    Page { status, location, body }
+    Page { status, location, cookie, headers, body }
 }
 
 /// JSON request (`POST`, `PATCH`, `DELETE`); returns status and parsed body
@@ -176,13 +201,30 @@ fn generated_app_serves_full_crud_on_workerd() {
     let home = get(&server, "/");
     assert_eq!(home.status, 200);
     assert!(home.body.contains("<h1>e2e</h1>"));
+    assert_eq!(home.headers["x-content-type-options"], "nosniff", "security headers");
+    assert_eq!(home.headers["x-frame-options"], "SAMEORIGIN");
+    let up = get(&server, "/up");
+    assert_eq!((up.status, up.body.as_str()), (200, "OK"));
+    let robots = get(&server, "/robots.txt");
+    assert!(robots.status == 200 && robots.body.contains("User-agent"), "static file from public/: {}", robots.body);
 
     // Create, with HTML that must come back escaped.
     let created = post(&server, "/posts", &[("title", "Hello <b>edge</b>"), ("body", "First"), ("published", "true")]);
     assert_eq!((created.status, created.location.as_str()), (303, "/posts/1"));
-    let shown = get(&server, "/posts/1");
+    assert!(created.cookie.starts_with("_ocre_session="), "flash travels in the session cookie");
+    let session = [("cookie", created.cookie.as_str())];
+    let shown = send(&server, "GET", "/posts/1", &session, &[]);
     assert!(shown.body.contains("<dd>Hello &#60;b&#62;edge&#60;/b&#62;</dd>"), "{}", shown.body);
     assert!(shown.body.contains("<dt>Published</dt><dd>true</dd>"));
+    assert!(shown.body.contains(r#"<p class="notice">Post was successfully created.</p>"#), "{}", shown.body);
+    let again = send(&server, "GET", "/posts/1", &[("cookie", shown.cookie.as_str())], &[]);
+    assert!(!again.body.contains("successfully created"), "flash shows once");
+
+    // Another site's form cannot post here (CSRF).
+    let forged = send(&server, "POST", "/posts", &[("sec-fetch-site", "cross-site")], &[("title", "x"), ("body", "y")]);
+    assert_eq!(forged.status, 403);
+    let same_site = [("sec-fetch-site", "same-origin")];
+    assert_eq!(send(&server, "POST", "/posts", &same_site, &[("title", "Own"), ("body", "form")]).status, 303);
 
     // List, edit form, update (unchecked box = false).
     assert!(get(&server, "/posts").body.contains("<a href=\"/posts/1\">Show</a>"));

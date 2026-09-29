@@ -11,6 +11,8 @@ mod names;
 mod new;
 mod output;
 mod project;
+mod routes;
+mod secret;
 mod wizard;
 mod wrangler;
 
@@ -112,6 +114,17 @@ enum Command {
     },
     /// Deploy to Cloudflare and apply remote migrations.
     Deploy,
+    /// Print a new random secret, like `rails secret`: a value for SECRET_KEY_BASE.
+    ///
+    /// Example: `ocre secret | npx wrangler secret put SECRET_KEY_BASE`.
+    Secret,
+    /// List the app's HTTP routes, read from its source (no build).
+    ///
+    /// Example: `ocre routes posts` keeps routes whose method, path or handler contains "posts".
+    Routes {
+        /// Only routes whose method, path or handler contains this text (case-insensitive).
+        filter: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -245,6 +258,8 @@ fn main() -> ExitCode {
         Command::Sql { query, remote } => db::sql(&query, remote, json),
         Command::Dev { port } => wrangler::dev(port, json),
         Command::Deploy => wrangler::deploy(json),
+        Command::Secret => secret::run(),
+        Command::Routes { filter } => Project::find().and_then(|project| routes::run(&project, filter.as_deref())),
     };
     output::finish(result, json)
 }

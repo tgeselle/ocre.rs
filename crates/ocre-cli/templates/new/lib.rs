@@ -13,6 +13,7 @@ async fn fetch(req: HttpRequest, env: Env, _ctx: Context) -> worker::Result<axum
 fn routes() -> Router<Ctx> {
     Router::new()
         .route("/", get(home))
+        .route("/up", get(up))
         // ocre:routes
 }
 
@@ -22,4 +23,10 @@ struct HomeView;
 
 async fn home() -> Result<Html<String>> {
     render(&HomeView)
+}
+
+/// Health check for uptime monitors and load balancers, like Rails' `/up`:
+/// 200 `OK` whenever the Worker runs.
+async fn up() -> &'static str {
+    "OK"
 }

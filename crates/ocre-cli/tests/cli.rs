@@ -17,7 +17,10 @@ fn new_creates_an_app_without_touching_cloudflare_by_default() {
     assert!(ok, "{report}");
     assert_eq!(report["command"], "new");
     assert_eq!(report["next"], serde_json::json!(["cd shop", "ocre dev", "ocre deploy"]));
-    assert!(report["created"].as_array().unwrap().contains(&"shop/AGENTS.md".into()));
+    let created = report["created"].as_array().unwrap();
+    for file in ["shop/AGENTS.md", "shop/public/robots.txt", "shop/.dev.vars"] {
+        assert!(created.contains(&file.into()), "{file} in {created:?}");
+    }
     let root = sandbox.work.join("shop");
     let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
     assert!(cargo.contains("name = \"shop\""));
@@ -25,7 +28,21 @@ fn new_creates_an_app_without_touching_cloudflare_by_default() {
     let wrangler = fs::read_to_string(root.join("wrangler.toml")).unwrap();
     assert!(wrangler.contains("database_name = \"shop\"") && !wrangler.contains("account_id"));
     assert!(!root.join(".git").exists());
+    assert_dev_secret(&root);
+    let lib = fs::read_to_string(root.join("src/lib.rs")).unwrap();
+    assert!(lib.contains(".route(\"/up\", get(up))\n        // ocre:routes"), "{lib}");
+    assert!(wrangler.contains("[assets]\ndirectory = \"public\""), "{wrangler}");
+    assert!(fs::read_to_string(root.join("public/robots.txt")).unwrap().contains("User-agent: *"));
+    let gitignore = fs::read_to_string(root.join(".gitignore")).unwrap();
+    assert!(gitignore.contains("\n.dev.vars\n.dev.vars.*\n"), "{gitignore}");
     assert!(sandbox.calls().is_empty(), "no wrangler call without --login/--deploy");
+}
+
+/// `.dev.vars` holds a fresh 128-hex SECRET_KEY_BASE for `wrangler dev`.
+fn assert_dev_secret(root: &std::path::Path) {
+    let vars = fs::read_to_string(root.join(".dev.vars")).unwrap();
+    let secret = vars.strip_prefix("SECRET_KEY_BASE=").and_then(|rest| rest.strip_suffix('\n')).unwrap();
+    assert!(secret.len() == 128 && secret.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')), "{vars}");
 }
 
 #[test]
@@ -167,10 +184,20 @@ fn new_with_deploy_logs_in_deploys_and_returns_the_url() {
     assert!(ok, "{report}");
     assert_eq!(report["url"], "https://app.example.workers.dev");
     assert_eq!(report["next"], serde_json::json!(["cd shop", "ocre dev"]));
+    assert_eq!(report["secret_created"], true, "a new Worker gets SECRET_KEY_BASE");
     assert_eq!(
         sandbox.calls(),
-        ["whoami --json", "d1 list --json", "deploy", "build --release", "d1 migrations apply shop --remote"]
+        [
+            "whoami --json",
+            "secret list --format json",
+            "d1 list --json",
+            "deploy --secrets-file .wrangler/ocre-secrets.env",
+            "secrets file ok",
+            "build --release",
+            "d1 migrations apply shop --remote"
+        ]
     );
+    assert!(!sandbox.work.join("shop/.wrangler/ocre-secrets.env").exists(), "secrets file deleted");
 }
 
 // ---------- ocre login ----------
@@ -440,6 +467,10 @@ fn new_api_creates_a_json_only_app() {
     assert!(
         fs::read_to_string(root.join("src/lib.rs")).unwrap().contains("Json(Status { app: \"svc\", status: \"ok\" })")
     );
+    let lib = fs::read_to_string(root.join("src/lib.rs")).unwrap();
+    assert!(lib.contains(".route(\"/up\", get(up))") && lib.contains("async fn up() -> &'static str"), "{lib}");
+    assert_dev_secret(&root);
+    assert!(root.join("public/robots.txt").is_file());
     assert!(root.join("src/posts_api.rs").is_file() && !root.join("templates").exists());
 
     // In an API-only app, scaffold generates the JSON API.
@@ -619,11 +650,77 @@ fn deploy_migrates_an_existing_database_before_the_code_goes_live() {
     let sandbox = Sandbox::new();
     let root = sandbox.new_app("shop", &[]);
     sandbox.write_state("d1_list.json", r#"[{"name": "other"}, {"name": "shop"}]"#);
+    sandbox.set("has_secret");
     let output = sandbox.ocre(&["deploy"], &root);
     let (stdout, _) = text(&output);
     assert!(output.status.success());
-    assert!(stdout.ends_with("\nhttps://app.example.workers.dev\n"), "{stdout}");
-    assert_eq!(sandbox.calls(), ["d1 list --json", "d1 migrations apply shop --remote", "deploy", "build --release"]);
+    assert!(
+        stdout.ends_with("Uploaded app\n  https://app.example.workers.dev\n\nhttps://app.example.workers.dev\n"),
+        "{stdout}"
+    );
+    assert_eq!(
+        sandbox.calls(),
+        [
+            "secret list --format json",
+            "d1 list --json",
+            "d1 migrations apply shop --remote",
+            "deploy",
+            "build --release"
+        ]
+    );
+}
+
+#[test]
+fn deploy_creates_secret_key_base_only_when_the_worker_has_none() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    let secrets_file = root.join(".wrangler/ocre-secrets.env");
+    let deploy_calls = || sandbox.calls().into_iter().filter(|call| call.starts_with("deploy")).collect::<Vec<_>>();
+
+    // Deployed Worker without the secret; a stale file from a killed deploy is replaced.
+    fs::create_dir_all(secrets_file.parent().unwrap()).unwrap();
+    fs::write(&secrets_file, "SECRET_KEY_BASE=stale\n").unwrap();
+    let output = sandbox.ocre(&["deploy"], &root);
+    let (stdout, _) = text(&output);
+    assert!(output.status.success(), "{stdout}");
+    assert!(
+        stdout.ends_with("Created the SECRET_KEY_BASE secret on Cloudflare\n\nhttps://app.example.workers.dev\n"),
+        "{stdout}"
+    );
+    assert!(sandbox.calls().contains(&"secrets file ok".to_owned()));
+    assert_eq!(deploy_calls(), ["deploy --secrets-file .wrangler/ocre-secrets.env"]);
+    assert!(!secrets_file.exists(), "deleted after the deploy");
+
+    // No Worker yet: `secret list` fails with "not found".
+    sandbox.set("secret_list_fails");
+    let (report, ok) = sandbox.json(&["deploy"], &root);
+    assert!(ok, "{report}");
+    assert_eq!(report["secret_created"], true);
+    assert_eq!(report.as_object().unwrap().len(), 4, "the secret itself is never reported: {report}");
+
+    // The Worker has one: never replaced.
+    fs::remove_file(sandbox.work.join("../state/secret_list_fails")).unwrap();
+    sandbox.set("has_secret");
+    let (report, ok) = sandbox.json(&["deploy"], &root);
+    assert!(ok, "{report}");
+    assert!(report.get("secret_created").is_none(), "{report}");
+    assert_eq!(deploy_calls().last().unwrap(), "deploy");
+}
+
+#[test]
+fn secret_prints_a_new_random_secret() {
+    let sandbox = Sandbox::new();
+    let output = sandbox.ocre(&["secret"], &sandbox.work);
+    let (stdout, _) = text(&output);
+    assert!(output.status.success());
+    let secret = stdout.strip_suffix('\n').unwrap();
+    assert!(secret.len() == 128 && secret.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')), "{stdout}");
+
+    let (report, ok) = sandbox.json(&["secret"], &sandbox.work);
+    assert!(ok);
+    assert_eq!(report["command"], "secret");
+    assert_eq!(report["secret"].as_str().unwrap().len(), 128);
+    assert_ne!(report["secret"], secret, "a new secret every time");
 }
 
 #[test]
@@ -656,5 +753,23 @@ fn deploy_failures_carry_hints() {
     sandbox.write_state("d1_list.json", "[]");
     sandbox.set("deploy_fails");
     let (report, _) = sandbox.json(&["deploy"], &root);
-    assert!(report["error"].as_str().unwrap().starts_with("`wrangler deploy` failed"));
+    assert!(
+        report["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("`wrangler deploy --secrets-file .wrangler/ocre-secrets.env` failed")
+    );
+    assert!(!root.join(".wrangler/ocre-secrets.env").exists(), "deleted after a failed deploy");
+
+    // Only a missing Worker means "no secret yet"; other failures stop the deploy.
+    sandbox.set("secret_list_errors");
+    let (report, _) = sandbox.json(&["deploy"], &root);
+    assert_eq!(report["error"], "`wrangler secret list` failed: ✘ [ERROR] secret_list_errors");
+    assert!(report["hint"].as_str().unwrap().contains("only creates SECRET_KEY_BASE when sure"));
+
+    fs::remove_file(sandbox.work.join("../state/secret_list_errors")).unwrap();
+    sandbox.write_state("secret_list.json", "oops");
+    let (report, _) = sandbox.json(&["deploy"], &root);
+    assert!(report["error"].as_str().unwrap().starts_with("unexpected `wrangler secret list` output"));
+    assert_eq!(sandbox.calls().last().unwrap(), "secret list --format json", "nothing ran after the failed check");
 }

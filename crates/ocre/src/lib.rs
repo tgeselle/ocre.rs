@@ -16,7 +16,9 @@ pub mod graphql;
 #[cfg(feature = "html")]
 mod htmx;
 mod names;
+mod protect;
 mod runtime;
+mod session;
 mod sql;
 #[cfg(test)]
 mod test_util;
@@ -29,7 +31,9 @@ pub use error::{Error, OptionExt, Result};
 pub use fields::{optional, patch};
 #[cfg(feature = "html")]
 pub use htmx::Htmx;
+pub use protect::ALLOWED_ORIGINS;
 pub use runtime::{Ctx, Db, serve};
+pub use session::{Flash, SECRET_KEY_BASE, SESSION_COOKIE, Session};
 pub use sql::{IntoParam, MAX_SAFE_INTEGER, Param, Statement, bool_from_sql};
 pub use validate::{FieldError, Validator};
 #[cfg(feature = "html")]

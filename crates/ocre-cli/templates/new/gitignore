@@ -2,3 +2,6 @@ target/
 build/
 node_modules/
 .wrangler/
+# Local secrets for `wrangler dev` (SECRET_KEY_BASE, ...).
+.dev.vars
+.dev.vars.*

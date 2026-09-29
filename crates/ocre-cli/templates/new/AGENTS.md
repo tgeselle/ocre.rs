@@ -24,6 +24,8 @@ on stdout (`"ok": true|false`, plus `error` and `hint` on failure).
 | Recreate local database (migrations + seeds) | `ocre db reset` |
 | Query the database (JSON rows with `--json`) | `ocre sql "SELECT * FROM posts LIMIT 5"` |
 | Run locally (http://localhost:8787) | `ocre dev` |
+| List routes (method, path, handler) | `ocre routes` (or `ocre routes posts`) |
+| New secret value | `ocre secret` |
 | Cloudflare login (browser; once) | `ocre login` |
 | Deploy + remote migrations | `ocre deploy` |
 | Type-check | `cargo check --target wasm32-unknown-unknown` |
@@ -45,8 +47,10 @@ src/<plural>.rs     HTML resource: form parsing, handlers, routes (calls the mod
 src/<plural>_api.rs JSON resource: REST handlers and GraphQL resolvers (call the model)
 src/graphql.rs      GraphQL schema (when used); keep the `// ocre:graphql-*` markers
 templates/          askama templates, compiled into the binary
+public/             static files (CSS, images, robots.txt), served by Cloudflare before the Worker runs
 migrations/         numbered D1 SQL migrations, applied in order
 wrangler.toml       Cloudflare config; the D1 binding must be named DB
+.dev.vars           local secrets for `ocre dev` (SECRET_KEY_BASE); never commit it
 ```
 
 ## Rules
@@ -83,11 +87,25 @@ wrangler.toml       Cloudflare config; the D1 binding must be named DB
   Optional fields use `#[serde(default, deserialize_with = "ocre::optional")]`
   (empty or `null` = `None`) and, in `<Model>Changes`,
   `deserialize_with = "ocre::patch"` (missing keeps the value, `null` clears it).
+- Sessions: take `session: ocre::Session` in a handler; `session.insert("user_id", id)?`,
+  `session.get::<i64>("user_id")?`, `session.remove(..)?`, `session.clear()?`. The
+  session is an encrypted cookie (4 KB max): store ids, never records or secrets.
+- Flash: `session.flash("notice", "Post was successfully created.")?` before a
+  redirect; the next page takes `flash: ocre::Flash` and its template shows
+  `flash.notice()` / `flash.alert()`.
+- CSRF protection is automatic: browsers' cross-site POST/PUT/PATCH/DELETE get
+  403. Forms need no token. Another site (a separate frontend) that must call
+  the app: list its origin in `ALLOWED_ORIGINS` under `[vars]` in
+  wrangler.toml (comma-separated); that also enables CORS for it.
+- Security headers (nosniff, SAMEORIGIN framing, referrer policy, HSTS on
+  HTTPS) are added to every response; a handler that sets one keeps its value.
+- `GET /up` is the health check; keep it cheap (no database).
 
 ## Free-plan limits (design for them)
 
 - 10 ms CPU per request. Awaiting D1 or `fetch` does not count. No CPU-heavy
   work in handlers: no argon2/bcrypt (use WebCrypto PBKDF2), no large parsing.
+  Put static files in `public/`: they cost no Worker request or CPU.
 - D1: daily read/write row quotas. Avoid N+1 queries: one query with `JOIN` or
   `WHERE id IN (...)` instead of a query per row.
 - 100,000 requests per day.

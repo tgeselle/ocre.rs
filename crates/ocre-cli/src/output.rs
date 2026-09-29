@@ -24,9 +24,18 @@ pub struct Report {
     /// `ocre sql`: wrangler's JSON, one object with `results` per statement.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rows: Option<serde_json::Value>,
+    /// `ocre routes`: the app's routes, sorted by path then method.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub routes: Option<Vec<crate::routes::Route>>,
     /// The command targeted the production database on Cloudflare.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub remote: bool,
+    /// `ocre secret`: a new random value for SECRET_KEY_BASE.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
+    /// The deploy uploaded a new SECRET_KEY_BASE (the Worker had none).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub secret_created: bool,
     /// Commands to run next, in order.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub next: Vec<String>,
@@ -101,6 +110,9 @@ pub fn finish(result: Result<Report, CliError>, json: bool) -> ExitCode {
 }
 
 fn print_human(report: &Report) {
+    if let Some(secret) = &report.secret {
+        println!("{secret}");
+    }
     for path in &report.created {
         println!("  create  {path}");
     }
@@ -113,8 +125,14 @@ fn print_human(report: &Report) {
     for step in &report.ran {
         println!("  {step}");
     }
+    if let Some(routes) = &report.routes {
+        print!("{}", crate::routes::table(routes));
+    }
     if report.remote {
         println!("Target: remote D1 database on Cloudflare");
+    }
+    if report.secret_created {
+        println!("Created the SECRET_KEY_BASE secret on Cloudflare");
     }
     if let Some(url) = &report.url {
         println!("\n{url}");

@@ -71,7 +71,9 @@ pub fn new_app(args: NewArgs, cwd: &Path) -> CliResult {
     let plan = Plan::new(cwd, &name, args.ocre_path.as_deref(), api, starter, git, account_id)?;
     let mut report = step("Creating your app", &format!("Created {name}/"), || plan.create())?;
     if deploy {
-        report.url = step("Building and deploying to Cloudflare", "Deployed", || plan.deploy(Echo::Capture))?;
+        let deployed = step("Building and deploying to Cloudflare", "Deployed", || plan.deploy(Echo::Capture))?;
+        report.url = deployed.url;
+        report.secret_created = deployed.secret_created;
         report.next.retain(|step| step != "ocre deploy");
     } else if session.is_none() {
         report.next.push("ocre login".to_owned());

@@ -16,6 +16,8 @@ use axum::{Router, body::Body, http::Response};
 use tower_service::Service;
 use worker::{Env, HttpRequest};
 
+use crate::{protect, session};
+
 /// Runs one request through the application router.
 ///
 /// Call it from the Worker entry point:
@@ -27,7 +29,14 @@ use worker::{Env, HttpRequest};
 ///     ocre::serve(routes(), req, env).await
 /// }
 /// ```
+///
+/// It adds sessions, CSRF protection, CORS (`ALLOWED_ORIGINS`) and security
+/// headers; see the `protect` module.
 pub async fn serve(routes: Router<Ctx>, req: HttpRequest, env: Env) -> worker::Result<Response<Body>> {
-    let mut app = routes.with_state(Ctx::new(env));
+    let config = protect::Config {
+        key: session::key_from_secret(env.secret(session::SECRET_KEY_BASE).ok().map(|secret| secret.to_string())),
+        allowed_origins: protect::parse_origins(env.var(protect::ALLOWED_ORIGINS).ok().map(|var| var.to_string())),
+    };
+    let mut app = protect::wrap(routes.with_state(Ctx::new(env)), config);
     Ok(app.call(req).await?)
 }

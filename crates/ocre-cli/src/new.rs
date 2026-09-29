@@ -14,7 +14,8 @@ use crate::{
     CliResult, generate,
     output::{CliError, Report},
     project::{Project, check_wasm_target},
-    wrangler::{Echo, Wrangler, pick_account},
+    secret::{self, SECRET_KEY_BASE},
+    wrangler::{Deployed, Echo, Wrangler, pick_account},
 };
 
 const OCRE_GIT: &str = "https://github.com/tgeselle/ocre.rs";
@@ -27,6 +28,7 @@ const FILES: &[(&str, &str)] = &[
     (".gitignore", include_str!("../templates/new/gitignore")),
     ("AGENTS.md", include_str!("../templates/new/AGENTS.md")),
     ("migrations/.gitkeep", ""),
+    ("public/robots.txt", include_str!("../templates/new/robots.txt")),
 ];
 
 /// Full-stack apps: HTML pages.
@@ -95,7 +97,9 @@ fn run_with_flags(args: NewArgs, cwd: &Path, json: bool) -> CliResult {
     }
     let mut report = plan.create()?;
     if deploy {
-        report.url = plan.deploy(echo)?;
+        let deployed = plan.deploy(echo)?;
+        report.url = deployed.url;
+        report.secret_created = deployed.secret_created;
         report.next.retain(|step| step != "ocre deploy");
     }
     report.email = session.and_then(|s| s.email);
@@ -162,6 +166,9 @@ impl Plan {
             std::fs::write(&path, contents)?;
             report.created.push(format!("{name}/{relative}"));
         }
+        // Local secrets for `wrangler dev`, git-ignored. Deploys create the production one.
+        std::fs::write(self.root.join(".dev.vars"), format!("{SECRET_KEY_BASE}={}\n", secret::generate()))?;
+        report.created.push(format!("{name}/.dev.vars"));
         if self.starter == Starter::Blog {
             let fields = ["title:string", "body:text", "published:boolean"].map(String::from);
             let project = Project::at(self.root.clone())?;
@@ -183,7 +190,7 @@ impl Plan {
     }
 
     /// Builds and deploys the new app; returns its workers.dev URL.
-    pub fn deploy(&self, echo: Echo) -> Result<Option<String>, CliError> {
+    pub fn deploy(&self, echo: Echo) -> Result<Deployed, CliError> {
         check_wasm_target()?;
         Wrangler::new(&self.root, echo).deploy(&self.name)
     }

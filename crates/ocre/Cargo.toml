@@ -14,6 +14,9 @@ serde.workspace = true
 wasm-bindgen.workspace = true
 serde_json = "1.0.151"
 tower-service = "0.3.3"
+# Encrypted session cookies (AES-256-GCM, key derived with HKDF).
+cookie = { version = "0.18.2", features = ["private", "key-expansion", "percent-encode"] }
+tower-http = { version = "0.7.1", default-features = false, features = ["cors"] }
 # `custom-error-conversion` lets Ocre map its errors so internal details never reach clients.
 async-graphql = { version = "7.2.1", default-features = false, features = ["graphiql", "custom-error-conversion"], optional = true }
 
@@ -27,3 +30,7 @@ graphql = ["dep:async-graphql"]
 [dev-dependencies]
 pollster = "1.0.1"
 serde_urlencoded = "0.7.1"
+
+# Random nonces for cookie encryption come from WebCrypto on Workers.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2.17", features = ["js"] }

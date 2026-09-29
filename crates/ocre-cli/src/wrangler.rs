@@ -2,8 +2,9 @@
 //! Database commands built on it live in `db.rs`.
 
 use std::{
+    fs::OpenOptions,
     io::{BufRead, BufReader, Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
@@ -13,6 +14,7 @@ use crate::{
     CliResult,
     output::{CliError, Report},
     project::{Project, check_wasm_target},
+    secret::{self, SECRET_KEY_BASE},
 };
 
 /// Pinned major version, so generated apps and the CLI agree on flags.
@@ -98,20 +100,53 @@ impl<'a> Wrangler<'a> {
 
     /// Deploys and returns the workers.dev URL. An existing database is
     /// migrated before the new code goes live; a new one is created by the
-    /// first deploy, then migrated.
-    pub fn deploy(&self, database: &str) -> Result<Option<String>, CliError> {
+    /// first deploy, then migrated. A Worker without SECRET_KEY_BASE gets a
+    /// new one with the deploy; an existing one is never replaced, since that
+    /// would sign everyone out.
+    pub fn deploy(&self, database: &str) -> Result<Deployed, CliError> {
+        let secrets = if self.has_secret_key_base()? { None } else { Some(SecretsFile::create(self.cwd)?) };
+        let mut deploy = vec!["deploy"];
+        if secrets.is_some() {
+            deploy.extend(["--secrets-file", SecretsFile::PATH]);
+        }
         let output = if self.database_exists(database)? {
             self.migrate(database, true)?;
-            self.run(&["deploy"])?
+            self.run(&deploy)?
         } else {
-            let output = self.run(&["deploy"])?;
+            let output = self.run(&deploy)?;
             self.migrate(database, true)?;
             output
         };
-        Ok(output
+        let url = output
             .split_whitespace()
             .find(|word| word.starts_with("https://") && word.contains(".workers.dev"))
-            .map(str::to_owned))
+            .map(str::to_owned);
+        Ok(Deployed { url, secret_created: secrets.is_some() })
+    }
+
+    /// Whether the deployed Worker has SECRET_KEY_BASE; `false` when the
+    /// Worker does not exist yet. Any other failure is an error, so an
+    /// existing secret is never overwritten by mistake.
+    fn has_secret_key_base(&self) -> Result<bool, CliError> {
+        let output = self
+            .command()
+            .args(["secret", "list", "--format", "json"])
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(npx_missing)?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !output.status.success() {
+            if stderr.contains("not found") {
+                return Ok(false);
+            }
+            return Err(CliError::new(format!("`wrangler secret list` failed: {}", stderr.trim())).hint(
+                "log in with `ocre login`, or set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID; \
+                 Ocre only creates SECRET_KEY_BASE when sure the Worker has none",
+            ));
+        }
+        let secrets: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)
+            .map_err(|err| CliError::new(format!("unexpected `wrangler secret list` output: {err}")))?;
+        Ok(secrets.iter().any(|secret| secret["name"] == SECRET_KEY_BASE))
     }
 
     fn database_exists(&self, name: &str) -> Result<bool, CliError> {
@@ -230,8 +265,44 @@ pub fn dev(port: u16, json: bool) -> CliResult {
 pub fn deploy(json: bool) -> CliResult {
     let project = Project::find()?;
     check_wasm_target()?;
-    let url = Wrangler::new(&project.root, Echo::for_json(json)).deploy(&project.database_name)?;
-    Ok(Report { url, ..Report::new("deploy") })
+    let deployed = Wrangler::new(&project.root, Echo::for_json(json)).deploy(&project.database_name)?;
+    Ok(Report { url: deployed.url, secret_created: deployed.secret_created, ..Report::new("deploy") })
+}
+
+/// Result of [`Wrangler::deploy`].
+pub struct Deployed {
+    /// The workers.dev URL, when wrangler printed one.
+    pub url: Option<String>,
+    /// A new SECRET_KEY_BASE was uploaded with this deploy.
+    pub secret_created: bool,
+}
+
+/// A new SECRET_KEY_BASE for `wrangler deploy --secrets-file`, in the app's
+/// git-ignored `.wrangler/`. Readable by its owner only; deleted when dropped.
+struct SecretsFile(PathBuf);
+
+impl SecretsFile {
+    /// Relative to the app root, where wrangler runs.
+    const PATH: &str = ".wrangler/ocre-secrets.env";
+
+    fn create(root: &Path) -> Result<Self, CliError> {
+        let file = Self(root.join(Self::PATH));
+        std::fs::create_dir_all(file.0.parent().expect("the path has a parent"))?;
+        // Left over by an interrupted deploy: replace it with a fresh secret.
+        let _ = std::fs::remove_file(&file.0);
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        options.open(&file.0)?.write_all(format!("{SECRET_KEY_BASE}={}\n", secret::generate()).as_bytes())?;
+        Ok(file)
+    }
+}
+
+impl Drop for SecretsFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 #[cfg(test)]

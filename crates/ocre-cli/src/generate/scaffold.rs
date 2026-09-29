@@ -64,7 +64,7 @@ fn to_form(field: &Field, record: &str) -> String {
 }
 
 fn controller_rs(names: &ModelNames, fields: &[Field], command: &str) -> String {
-    let ModelNames { model, singular, plural, human_plural, .. } = names;
+    let ModelNames { model, singular, plural, human_singular, human_plural } = names;
     let mut form_fields = String::new();
     let mut new_values = String::new();
     let mut change_values = String::new();
@@ -93,7 +93,7 @@ use axum::{{
     response::{{Html, IntoResponse, Redirect, Response}},
     routing::{{get, post}},
 }};
-use ocre::{{Ctx, Error, FieldError, OptionExt, Page, Result, Validator, render}};
+use ocre::{{Ctx, Error, FieldError, Flash, OptionExt, Page, Result, Session, Validator, render}};
 use serde::Deserialize;
 
 use crate::models::{singular}::{{self, New{model}, {model}, {model}Changes}};
@@ -143,12 +143,14 @@ impl {model}Form {{
 #[derive(Template)]
 #[template(path = "{plural}/index.html")]
 struct IndexView {{
+    flash: Flash,
     {plural}: Vec<{model}>,
 }}
 
 #[derive(Template)]
 #[template(path = "{plural}/show.html")]
 struct ShowView {{
+    flash: Flash,
     {singular}: {model},
 }}
 
@@ -167,25 +169,28 @@ struct EditView {{
     errors: Vec<FieldError>,
 }}
 
-async fn index(State(ctx): State<Ctx>, page: Page) -> Result<Html<String>> {{
-    render(&IndexView {{ {plural}: {singular}::all(&ctx, page).await? }})
+async fn index(State(ctx): State<Ctx>, flash: Flash, page: Page) -> Result<Html<String>> {{
+    render(&IndexView {{ flash, {plural}: {singular}::all(&ctx, page).await? }})
 }}
 
-async fn show(State(ctx): State<Ctx>, Path(id): Path<i64>) -> Result<Html<String>> {{
-    render(&ShowView {{ {singular}: {singular}::find(&ctx, id).await?.or_404()? }})
+async fn show(State(ctx): State<Ctx>, flash: Flash, Path(id): Path<i64>) -> Result<Html<String>> {{
+    render(&ShowView {{ flash, {singular}: {singular}::find(&ctx, id).await?.or_404()? }})
 }}
 
 async fn new() -> Result<Html<String>> {{
     render(&NewView {{ form: {model}Form::default(), errors: vec![] }})
 }}
 
-async fn create(State(ctx): State<Ctx>, Form(form): Form<{model}Form>) -> Result<Response> {{
+async fn create(State(ctx): State<Ctx>, session: Session, Form(form): Form<{model}Form>) -> Result<Response> {{
     let created = match form.to_new() {{
         Ok(new) => {singular}::create(&ctx, new).await,
         Err(err) => Err(err),
     }};
     match created {{
-        Ok(record) => Ok(Redirect::to(&format!("/{plural}/{{}}", record.id)).into_response()),
+        Ok(record) => {{
+            session.flash("notice", "{human_singular} was successfully created.")?;
+            Ok(Redirect::to(&format!("/{plural}/{{}}", record.id)).into_response())
+        }}
         Err(Error::Invalid(errors)) => {{
             Ok((StatusCode::UNPROCESSABLE_ENTITY, render(&NewView {{ form, errors }})?).into_response())
         }}
@@ -198,13 +203,22 @@ async fn edit(State(ctx): State<Ctx>, Path(id): Path<i64>) -> Result<Html<String
     render(&EditView {{ id, form: {model}Form::from_record(&record), errors: vec![] }})
 }}
 
-async fn update(State(ctx): State<Ctx>, Path(id): Path<i64>, Form(form): Form<{model}Form>) -> Result<Response> {{
+async fn update(
+    State(ctx): State<Ctx>,
+    session: Session,
+    Path(id): Path<i64>,
+    Form(form): Form<{model}Form>,
+) -> Result<Response> {{
     let updated = match form.to_changes() {{
         Ok(changes) => {singular}::update(&ctx, id, changes).await,
         Err(err) => Err(err),
     }};
     match updated {{
-        Ok(record) => Ok(Redirect::to(&format!("/{plural}/{{}}", record.or_404()?.id)).into_response()),
+        Ok(record) => {{
+            let record = record.or_404()?;
+            session.flash("notice", "{human_singular} was successfully updated.")?;
+            Ok(Redirect::to(&format!("/{plural}/{{}}", record.id)).into_response())
+        }}
         Err(Error::Invalid(errors)) => {{
             Ok((StatusCode::UNPROCESSABLE_ENTITY, render(&EditView {{ id, form, errors }})?).into_response())
         }}
@@ -212,15 +226,20 @@ async fn update(State(ctx): State<Ctx>, Path(id): Path<i64>, Form(form): Form<{m
     }}
 }}
 
-async fn delete(State(ctx): State<Ctx>, Path(id): Path<i64>) -> Result<Redirect> {{
+async fn delete(State(ctx): State<Ctx>, session: Session, Path(id): Path<i64>) -> Result<Redirect> {{
     if !{singular}::delete(&ctx, id).await? {{
         return Err(Error::NotFound);
     }}
+    session.flash("notice", "{human_singular} was successfully destroyed.")?;
     Ok(Redirect::to("/{plural}"))
 }}
 "#
     )
 }
+
+/// Flash messages set by the previous request (create, update, delete).
+const FLASH: &str = r#"{% if let Some(notice) = flash.notice() %}<p class="notice">{{ notice }}</p>{% endif %}
+{% if let Some(alert) = flash.alert() %}<p class="alert">{{ alert }}</p>{% endif %}"#;
 
 /// `{{ post.title }}`, or an `if let` for optional values.
 fn display(field: &Field, record: &str) -> String {
@@ -244,6 +263,7 @@ fn index_html(names: &ModelNames, fields: &[Field]) -> String {
 
 {{% block content %}}
 <h1>{human_plural}</h1>
+{FLASH}
 <p><a href="/{plural}/new">New {lower}</a></p>
 
 <table>
@@ -276,6 +296,7 @@ fn show_html(names: &ModelNames, fields: &[Field]) -> String {
 
 {{% block content %}}
 <h1>{human_singular} {{{{ {singular}.id }}}}</h1>
+{FLASH}
 
 <dl>
 {rows}  <dt>Created at</dt><dd>{{{{ {singular}.created_at }}}}</dd>

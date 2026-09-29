@@ -66,8 +66,32 @@ case "$1" in
     echo "build $OCRE_BUILD" >> "$state/calls.log"
     echo "Ready on http://localhost:$3"
     ;;
+  secret)
+    # `secret list --format json`: SECRET_KEY_BASE only with has_secret;
+    # secret_list.json overrides the output.
+    if [ -e "$state/secret_list_fails" ]; then
+      echo "✘ [ERROR] Worker \"app\" not found." >&2
+      exit 1
+    fi
+    fail_if secret_list_errors
+    if [ -e "$state/secret_list.json" ]; then
+      cat "$state/secret_list.json"
+    elif [ -e "$state/has_secret" ]; then
+      echo '[{"name":"SECRET_KEY_BASE","type":"secret_text"},{"name":"OTHER","type":"secret_text"}]'
+    else
+      echo '[{"name":"OTHER","type":"secret_text"}]'
+    fi
+    ;;
   deploy)
     fail_if deploy_fails
+    if [ "$2" = "--secrets-file" ]; then
+      # The file must hold a fresh SECRET_KEY_BASE, readable by its owner only.
+      if ! grep -Eq '^SECRET_KEY_BASE=[0-9a-f]{128}$' "$3" || [ -z "$(find "$3" -perm 600)" ]; then
+        echo "✘ [ERROR] bad secrets file $3" >&2
+        exit 1
+      fi
+      echo "secrets file ok" >> "$state/calls.log"
+    fi
     echo "build $OCRE_BUILD" >> "$state/calls.log"
     echo "Uploaded app"
     echo "  https://app.example.workers.dev"

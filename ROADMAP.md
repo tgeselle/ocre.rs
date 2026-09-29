@@ -4,7 +4,7 @@ Feature-level inventory of Rails 8.1 and Loco 1.2, with what Ocre has and how
 each part maps to Cloudflare's free plan. Collected from the official Rails
 guides and the Loco documentation source; every item links to its page.
 
-993 features: 38 done, 42 partial, 889 to do, 24 not applicable on Workers.
+993 features: 49 done, 51 partial, 869 to do, 24 not applicable on Workers.
 
 Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason given).
 (R) Rails, (L) Loco.
@@ -315,7 +315,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** axum handlers and routers, askama templates compiled into the binary, htmx instead of Turbo/Stimulus, Workers Static Assets for files (free, not counted as Worker requests). tower middlewares that do not need tokio compile to WebAssembly.
 
-202 features: 7 done, 3 partial, 191 to do, 1 not applicable.
+202 features: 11 done, 8 partial, 182 to do, 1 not applicable.
 
 ### Controllers
 
@@ -323,7 +323,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [~] **Content negotiation (RespondTo / Format)** (L): An extractor that detects Html, Json, Xml, Other or None from Content-Type and then Accept, so one endpoint can serve several formats. [loco/how-to/respond-formats](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/respond-formats.md)
 - [~] **rescue_from** (R): Map exception classes to handler methods/blocks at the controller level. [action_controller_advanced_topics](https://guides.rubyonrails.org/action_controller_advanced_topics.html)
 - [ ] **Routes definition** (L): Routes::new().prefix(..).add(path, get(handler)) declares a controller's endpoints with axum method routers. [loco/how-to/add-controller](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/add-controller.md)
-- [ ] **Built-in health endpoints** (L): AppRoutes::with_default_routes() mounts /_ping, /_health and /_readiness monitoring endpoints. [loco/how-to/add-controller](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/add-controller.md)
+- [~] **Built-in health endpoints** (L): AppRoutes::with_default_routes() mounts /_ping, /_health and /_readiness monitoring endpoints. [loco/how-to/add-controller](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/add-controller.md)
 - [ ] **App-wide route prefix** (L): AppRoutes::prefix("/api") scopes every controller added after it. [loco/how-to/add-controller](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/add-controller.md)
 - [ ] **Nested and merged routes** (L): nest_prefix, nest_route/nest_routes, Routes::nest and Routes::merge/merge_all compose route groups under extra path segments. [loco/how-to/add-controller](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/add-controller.md)
 - [ ] **Per-route/controller tower layers** (L): Routes::layer and handler.layer(..) attach a tower::Layer (rate limiting, custom auth, and so on) to a single controller or route. [loco/how-to/add-controller](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/add-controller.md)
@@ -343,14 +343,14 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [ ] **default_url_options** (R): Set default options (e.g. locale) merged into all generated URLs. [action_controller_overview](https://guides.rubyonrails.org/action_controller_overview.html)
 - [ ] **Strong parameters** (R): params.expect, require/permit, permit! and nested/array permitting to guard mass assignment. [action_controller_overview](https://guides.rubyonrails.org/action_controller_overview.html)
 - [ ] **Cookies** (R): Read/write cookies with options (expires, httponly, permanent) and delete them. [action_controller_overview](https://guides.rubyonrails.org/action_controller_overview.html)
-- [ ] **Signed and encrypted cookies** (R): Tamper-proof (cookies.signed) and confidential (cookies.encrypted) cookie jars. [action_controller_overview](https://guides.rubyonrails.org/action_controller_overview.html)
-- [ ] **Session** (R): Per-user session hash with reset_session. [action_controller_overview](https://guides.rubyonrails.org/action_controller_overview.html)
-- [ ] **Flash messages** (R): One-request messages via flash, notice/alert on redirect, flash.now and flash.keep. [action_controller_overview](https://guides.rubyonrails.org/action_controller_overview.html)
-- [ ] **Session stores** (R): Pluggable session storage: CookieStore, CacheStore, ActiveRecord store, with key/domain/expiry options. [action_controller_overview](https://guides.rubyonrails.org/action_controller_overview.html)
+- [~] **Signed and encrypted cookies** (R): Tamper-proof (cookies.signed) and confidential (cookies.encrypted) cookie jars. [action_controller_overview](https://guides.rubyonrails.org/action_controller_overview.html)
+- [x] **Session** (R): Per-user session hash with reset_session. [action_controller_overview](https://guides.rubyonrails.org/action_controller_overview.html)
+- [~] **Flash messages** (R): One-request messages via flash, notice/alert on redirect, flash.now and flash.keep. [action_controller_overview](https://guides.rubyonrails.org/action_controller_overview.html)
+- [~] **Session stores** (R): Pluggable session storage: CookieStore, CacheStore, ActiveRecord store, with key/domain/expiry options. [action_controller_overview](https://guides.rubyonrails.org/action_controller_overview.html)
 - [ ] **Controller callbacks** (R): before_action, after_action, around_action with only/except, skip_*, blocks and callback classes. [action_controller_overview](https://guides.rubyonrails.org/action_controller_overview.html)
 - [ ] **Request object** (R): Access host, method, format, headers, remote_ip, url and query/request/path parameters. [action_controller_overview](https://guides.rubyonrails.org/action_controller_overview.html)
 - [ ] **Response object** (R): Set body, status, content type, charset, location and custom headers. [action_controller_overview](https://guides.rubyonrails.org/action_controller_overview.html)
-- [ ] **CSRF protection** (R): protect_from_forgery with authenticity tokens in forms and csrf_meta_tags for JS requests. [action_controller_advanced_topics](https://guides.rubyonrails.org/action_controller_advanced_topics.html)
+- [x] **CSRF protection** (R): protect_from_forgery with authenticity tokens in forms and csrf_meta_tags for JS requests. [action_controller_advanced_topics](https://guides.rubyonrails.org/action_controller_advanced_topics.html)
 - [ ] **allow_browser** (R): Restrict access to modern/specified browser versions, returning 406 otherwise. [action_controller_advanced_topics](https://guides.rubyonrails.org/action_controller_advanced_topics.html)
 - [ ] **HTTP Basic authentication** (R): http_basic_authenticate_with or authenticate_or_request_with_http_basic. [action_controller_advanced_topics](https://guides.rubyonrails.org/action_controller_advanced_topics.html)
 - [ ] **HTTP Digest authentication** (R): authenticate_or_request_with_http_digest for digest auth. [action_controller_advanced_topics](https://guides.rubyonrails.org/action_controller_advanced_topics.html)
@@ -361,7 +361,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [ ] **Parameter log filtering** (R): filter_parameters redacts sensitive params from logs. [action_controller_advanced_topics](https://guides.rubyonrails.org/action_controller_advanced_topics.html)
 - [ ] **Redirect log filtering** (R): filter_redirect hides sensitive redirect URLs from logs. [action_controller_advanced_topics](https://guides.rubyonrails.org/action_controller_advanced_topics.html)
 - [ ] **Force HTTPS** (R): config.force_ssl redirects to HTTPS, sets HSTS and secure cookies. [action_controller_advanced_topics](https://guides.rubyonrails.org/action_controller_advanced_topics.html)
-- [ ] **Health check endpoint** (R): Built-in /up route (Rails::HealthController) for load balancers and uptime monitors. [action_controller_advanced_topics](https://guides.rubyonrails.org/action_controller_advanced_topics.html)
+- [x] **Health check endpoint** (R): Built-in /up route (Rails::HealthController) for load balancers and uptime monitors. [action_controller_advanced_topics](https://guides.rubyonrails.org/action_controller_advanced_topics.html)
 - [ ] **Conditional GET** (R): fresh_when/stale? with ETag and Last-Modified return 304 Not Modified; expires_in and http_cache_forever set Cache-Control. [caching_with_rails](https://guides.rubyonrails.org/caching_with_rails.html)
 
 ### Routing
@@ -500,9 +500,9 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 ### Assets
 
-- [ ] **Static file serving** (L): The static middleware serves a folder (default assets/static at /static), with must_exist checking and a fallback file. [loco/how-to/serve-assets](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/serve-assets.md)
+- [x] **Static file serving** (L): The static middleware serves a folder (default assets/static at /static), with must_exist checking and a fallback file. [loco/how-to/serve-assets](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/serve-assets.md)
 - [ ] **SPA fallback routing** (L): Pointing the static fallback at index.html lets client-side routes survive a hard refresh. [loco/how-to/serve-assets](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/serve-assets.md)
-- [ ] **Precompressed assets and cache-control** (L): Serves .gz siblings of files when they exist, and sets a configurable Cache-Control header on static responses. [loco/how-to/serve-assets](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/serve-assets.md)
+- [~] **Precompressed assets and cache-control** (L): Serves .gz siblings of files when they exist, and sets a configurable Cache-Control header on static responses. [loco/how-to/serve-assets](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/serve-assets.md)
 - [ ] **Embedded assets (embedded_assets)** (L): A build-time feature that compiles static files and view templates into the binary for single-binary deploys, with no controller changes. [loco/how-to/serve-assets](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/serve-assets.md)
 - [ ] **Typed React SPA frontend** (L): The clientside starter creates a Vite, React, React Router and TanStack Query frontend/ served from frontend/dist, with a Vite dev proxy to the API. [loco/how-to/build-a-spa](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/build-a-spa.md)
 - [ ] **Rust-to-TypeScript DTO bindings** (L): DTOs deriving ts-rs export TypeScript types to frontend/src/bindings every time cargo test runs, so schema changes break the frontend build. [loco/how-to/build-a-spa](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/build-a-spa.md)
@@ -550,7 +550,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** Sessions in signed cookies (HMAC with WebCrypto), CSRF tokens, security headers. Password hashing must fit the 10 ms CPU budget: PBKDF2 through WebCrypto (runs natively, outside WebAssembly), never argon2/bcrypt in Rust. JWT and API keys with WebCrypto. Rate limiting through the Workers rate-limiting binding (free-plan availability not verified) or a Durable Object counter.
 
-54 features: 1 done, 0 partial, 53 to do, 0 not applicable.
+54 features: 5 done, 3 partial, 46 to do, 0 not applicable.
 
 ### Auth
 
@@ -576,14 +576,14 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [ ] **has_secure_password** (R): Stores a bcrypt password digest and adds password/password_confirmation attributes, validations and an authenticate method. [security](https://guides.rubyonrails.org/security.html)
 - [ ] **authenticate_by** (R): Finds a record by its credentials and checks the password in one call, resistant to timing attacks. [security](https://guides.rubyonrails.org/security.html)
 - [ ] **Database-backed session management** (R): A generated Session model records each session's IP and user agent behind a signed permanent cookie; allow_unauthenticated_access skips authentication for chosen actions. [security](https://guides.rubyonrails.org/security.html)
-- [ ] **Session storage (CookieStore)** (R): Sessions are stored in encrypted, signed cookies by default, and other session stores can be configured. [security](https://guides.rubyonrails.org/security.html)
-- [ ] **Encrypted and signed cookies** (R): cookies.encrypted and cookies.signed keep cookie values confidential and tamper-proof. [security](https://guides.rubyonrails.org/security.html)
+- [x] **Session storage (CookieStore)** (R): Sessions are stored in encrypted, signed cookies by default, and other session stores can be configured. [security](https://guides.rubyonrails.org/security.html)
+- [~] **Encrypted and signed cookies** (R): cookies.encrypted and cookies.signed keep cookie values confidential and tamper-proof. [security](https://guides.rubyonrails.org/security.html)
 - [ ] **Cookie configuration rotation** (R): config.action_dispatch.cookies_rotations changes cookie secrets, digests or ciphers without logging users out. [security](https://guides.rubyonrails.org/security.html)
 - [ ] **secret_key_base** (R): The application secret from which keys for cookies, message verifiers and encryptors are derived. [security](https://guides.rubyonrails.org/security.html)
 - [ ] **Replay attack countermeasures** (R): Guidance on keeping sensitive state (such as balances or nonces) out of the cookie session so an old cookie can't be replayed. [security](https://guides.rubyonrails.org/security.html)
-- [ ] **reset_session** (R): Issues a fresh session, typically after login, to prevent session fixation. [security](https://guides.rubyonrails.org/security.html)
+- [~] **reset_session** (R): Issues a fresh session, typically after login, to prevent session fixation. [security](https://guides.rubyonrails.org/security.html)
 - [ ] **Session expiry** (R): Sessions can be expired through cookie expiry and timestamps stored on the server. [security](https://guides.rubyonrails.org/security.html)
-- [ ] **CSRF protection** (R): protect_from_forgery checks authenticity tokens on non-GET requests, with :exception, :reset_session or :null_session as the failure strategy. [security](https://guides.rubyonrails.org/security.html)
+- [x] **CSRF protection** (R): protect_from_forgery checks authenticity tokens on non-GET requests, with :exception, :reset_session or :null_session as the failure strategy. [security](https://guides.rubyonrails.org/security.html)
 - [ ] **csrf_meta_tags** (R): Puts the CSRF token in meta tags so JavaScript requests can send it. [security](https://guides.rubyonrails.org/security.html)
 - [ ] **Clearing persistent cookies on CSRF failure** (R): Overriding handle_unverified_request can clear persistent cookies such as remember-me tokens when a CSRF check fails. [security](https://guides.rubyonrails.org/security.html)
 - [ ] **Safe redirects** (R): redirect_to raises on redirects to other hosts unless allow_other_host: true is given; url_from accepts a URL only if it points to this app. [security](https://guides.rubyonrails.org/security.html)
@@ -601,13 +601,13 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [ ] **Host authorization** (R): config.hosts and the HostAuthorization middleware block DNS rebinding and Host header attacks; paths can be excluded with the host_authorization exclude option. [security](https://guides.rubyonrails.org/security.html)
 - [ ] **Response splitting protection** (R): Header values used in redirects and responses are cleaned of CRLF sequences. [security](https://guides.rubyonrails.org/security.html)
 - [ ] **Unsafe query generation protection** (R): Parameter deep munging stops nil or empty-array values from being injected into queries. [security](https://guides.rubyonrails.org/security.html)
-- [ ] **Default security headers** (R): config.action_dispatch.default_headers sets X-Frame-Options, X-XSS-Protection, X-Content-Type-Options, X-Permitted-Cross-Domain-Policies and Referrer-Policy. [security](https://guides.rubyonrails.org/security.html)
-- [ ] **force_ssl / HSTS** (R): config.force_ssl redirects to HTTPS, marks cookies secure and sends Strict-Transport-Security, configurable through ssl_options. [security](https://guides.rubyonrails.org/security.html)
+- [x] **Default security headers** (R): config.action_dispatch.default_headers sets X-Frame-Options, X-XSS-Protection, X-Content-Type-Options, X-Permitted-Cross-Domain-Policies and Referrer-Policy. [security](https://guides.rubyonrails.org/security.html)
+- [~] **force_ssl / HSTS** (R): config.force_ssl redirects to HTTPS, marks cookies secure and sends Strict-Transport-Security, configurable through ssl_options. [security](https://guides.rubyonrails.org/security.html)
 - [ ] **Content Security Policy** (R): A DSL in the content_security_policy initializer sets the policy globally, with per-controller overrides and a report-only mode. [security](https://guides.rubyonrails.org/security.html)
 - [ ] **CSP violation reporting** (R): The report_uri and report_to directives collect reports of policy violations. [security](https://guides.rubyonrails.org/security.html)
 - [ ] **CSP nonces** (R): content_security_policy_nonce_generator plus nonce: true on javascript_tag and asset tags add nonces; csp_meta_tag exposes the nonce to JavaScript. [security](https://guides.rubyonrails.org/security.html)
 - [ ] **Permissions Policy** (R): A DSL in the permissions_policy initializer, with per-controller overrides, sets the Permissions-Policy (formerly Feature-Policy) header. [security](https://guides.rubyonrails.org/security.html)
-- [ ] **CORS** (R): Cross-origin resource sharing is configured through the rack-cors middleware in a cors initializer. [security](https://guides.rubyonrails.org/security.html)
+- [x] **CORS** (R): Cross-origin resource sharing is configured through the rack-cors middleware in a cors initializer. [security](https://guides.rubyonrails.org/security.html)
 - [ ] **Encrypted credentials** (R): config/credentials.yml.enc is decrypted with the master key (or RAILS_MASTER_KEY) and read through Rails.application.credentials. [security](https://guides.rubyonrails.org/security.html)
 - [ ] **Custom credentials** (R): Per-environment credentials files and custom encrypted configuration that is read through the credentials API. [security](https://guides.rubyonrails.org/security.html)
 - [ ] **Dependency and code scanning** (R): Brakeman and bundler-audit are set up by default to find code vulnerabilities and gems with known CVEs. [security](https://guides.rubyonrails.org/security.html)
@@ -968,7 +968,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** `ocre` CLI: non-interactive with `--json`, wizard in a terminal. D1 commands wrap wrangler.
 
-118 features: 14 done, 6 partial, 89 to do, 9 not applicable.
+118 features: 16 done, 7 partial, 86 to do, 9 not applicable.
 
 ### CLI
 
@@ -991,7 +991,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [ ] **cargo loco db entities** (L): Regenerates the Sea-ORM entity files in src/models/_entities from the live database schema (debug builds only). [loco/reference/cli](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/cli.md)
 - [ ] **cargo loco db truncate** (L): Deletes all rows from the tables but keeps the tables. [loco/reference/cli](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/cli.md)
 - [ ] **cargo loco db schema** (L): Dumps the current database schema. [loco/reference/cli](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/cli.md)
-- [ ] **cargo loco routes** (L): Prints every registered endpoint as a tree, with its HTTP method and full path. [loco/reference/cli](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/cli.md)
+- [x] **cargo loco routes** (L): Prints every registered endpoint as a tree, with its HTTP method and full path. [loco/reference/cli](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/cli.md)
 - [ ] **cargo loco middleware [--config]** (L): Lists every middleware and whether it is enabled; with --config it also prints each one's resolved JSON config. [loco/reference/middleware](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/middleware.md)
 - [ ] **cargo loco task** (L): Runs a registered task by name with key:value arguments, or lists all registered tasks with their descriptions when no name is given. [loco/how-to/write-task](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/write-task.md)
 - [ ] **cargo loco jobs cancel** (L): Marks queued jobs that match a worker name as cancelled. [loco/reference/cli](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/cli.md)
@@ -1016,7 +1016,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [ ] **bin/rails destroy** (R): Reverses a generator by removing the files it created. [command_line](https://guides.rubyonrails.org/command_line.html)
 - [ ] **bin/rails runner** (R): Runs Ruby code or a script with the app loaded, with -e for the environment and --skip-executor. [command_line](https://guides.rubyonrails.org/command_line.html)
 - [ ] **bin/rails boot** (R): Boots the application and exits, to check that it loads. [command_line](https://guides.rubyonrails.org/command_line.html)
-- [ ] **bin/rails routes** (R): Lists all routes, with filters (-c controller, -g grep), an --expanded format and --unused route detection. [command_line](https://guides.rubyonrails.org/command_line.html)
+- [~] **bin/rails routes** (R): Lists all routes, with filters (-c controller, -g grep), an --expanded format and --unused route detection. [command_line](https://guides.rubyonrails.org/command_line.html)
 - [ ] **bin/rails about** (R): Prints the Ruby, Rails, middleware, database adapter and environment details. [command_line](https://guides.rubyonrails.org/command_line.html)
 - [ ] **bin/rails initializers** (R): Lists initializers in the order they run. [command_line](https://guides.rubyonrails.org/command_line.html)
 - [ ] **bin/rails middleware** (R): Lists the Rack middleware stack. [command_line](https://guides.rubyonrails.org/command_line.html)
@@ -1037,7 +1037,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [ ] **bin/rails notes** (R): Lists FIXME, OPTIMIZE and TODO comments in the code; custom tags can be added (--annotations or config.annotations.register_tags), as can more directories and file extensions. [command_line](https://guides.rubyonrails.org/command_line.html)
 - [ ] **bin/rails tmp:*** (R): tmp:clear, tmp:cache:clear, tmp:sockets:clear, tmp:screenshots:clear and tmp:create manage the tmp directory. [command_line](https://guides.rubyonrails.org/command_line.html)
 - [ ] **bin/rails dev:cache** (R): Turns caching on or off in the development environment. [command_line](https://guides.rubyonrails.org/command_line.html)
-- [ ] **bin/rails secret** (R): Generates a cryptographically secure secret key. [command_line](https://guides.rubyonrails.org/command_line.html)
+- [x] **bin/rails secret** (R): Generates a cryptographically secure secret key. [command_line](https://guides.rubyonrails.org/command_line.html)
 - [ ] **bin/rails credentials** (R): credentials:edit, credentials:show and credentials:diff manage encrypted credentials, including separate files per environment. [command_line](https://guides.rubyonrails.org/command_line.html)
 - [ ] **Custom Rake tasks** (R): Tasks defined in lib/tasks/*.rake, with namespaces, descriptions, arguments and an :environment dependency, run through bin/rails. [command_line](https://guides.rubyonrails.org/command_line.html)
 - [-] **Database choice at generation (--db)** (L): Chooses sqlite (default), postgres or none; picking a database also turns on the auth and mailer scaffolding, while none generates a DB-less app built with default-features=false. *Not applicable: D1 is SQLite.* [loco/reference/cli](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/cli.md)
@@ -1185,7 +1185,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** `ocre deploy` replaces Kamal/Docker: one command, free plan. Solid Queue/Cache/Cable map to Queues, Cache API/KV and Durable Objects.
 
-33 features: 1 done, 0 partial, 27 to do, 5 not applicable.
+33 features: 2 done, 0 partial, 26 to do, 5 not applicable.
 
 ### Deployment
 
@@ -1209,7 +1209,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [ ] **db:migrate loads schema on a fresh database** (R): On an empty database, db:migrate loads the schema first and then runs any pending migrations. [8_0_release_notes](https://guides.rubyonrails.org/8_0_release_notes.html)
 - [ ] **Rails::CodeStatistics.register_directory** (R): Adds directories to the bin/rails stats report. [8_0_release_notes](https://guides.rubyonrails.org/8_0_release_notes.html)
 - [ ] **Default Regexp.timeout** (R): Regexp.timeout defaults to 1 second to limit regular-expression denial-of-service attacks. [8_0_release_notes](https://guides.rubyonrails.org/8_0_release_notes.html)
-- [ ] **Health check endpoint** (R): The default /up route (Rails::HealthController) returns 200 once the app has booted, for load balancers and Kamal. [8_0_release_notes](https://guides.rubyonrails.org/8_0_release_notes.html)
+- [x] **Health check endpoint** (R): The default /up route (Rails::HealthController) returns 200 once the app has booted, for load balancers and Kamal. [8_0_release_notes](https://guides.rubyonrails.org/8_0_release_notes.html)
 - [ ] **PWA manifest and service worker** (R): New apps include a web app manifest and a service worker, rendered as views and served through routes, for Progressive Web App support. [8_0_release_notes](https://guides.rubyonrails.org/8_0_release_notes.html)
 - [-] **Thruster** (R): The generated Dockerfile runs Thruster in front of Puma for X-Sendfile acceleration, asset caching and compression. *Not applicable: deployment is `ocre deploy` to Workers.* [8_0_release_notes](https://guides.rubyonrails.org/8_0_release_notes.html)
 

@@ -70,8 +70,10 @@ fn guided_setup_logs_in_and_deploys() {
             "whoami --json",
             "login",
             "whoami --json",
+            "secret list --format json",
             "d1 list --json",
-            "deploy",
+            "deploy --secrets-file .wrangler/ocre-secrets.env",
+            "secrets file ok",
             "build --release",
             "d1 migrations apply blog --remote"
         ]
@@ -180,7 +182,7 @@ fn a_failing_deploy_shows_the_captured_wrangler_output() {
     let (output, code) = finish(s);
 
     assert_eq!(code, 1);
-    assert!(output.contains("error: `wrangler deploy` failed"), "{output}");
+    assert!(output.contains("error: `wrangler deploy --secrets-file .wrangler/ocre-secrets.env` failed"), "{output}");
     assert!(output.contains("stdout before failure") && output.contains("[ERROR] deploy_fails"), "{output}");
 }
 

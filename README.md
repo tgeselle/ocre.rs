@@ -44,7 +44,9 @@ free-plan limits an agent needs.
 | `ocre db reset` | Local only: delete `.wrangler/state/v3/d1`, apply migrations, run `db/seeds.sql` if present |
 | `ocre sql "<query>" [--remote]` | Run SQL and print the rows as a table; `--json` returns wrangler's results in `rows` |
 | `ocre dev [--port N]` | Local migrations, then `wrangler dev` |
-| `ocre deploy` | Existing database: migrate, then deploy. New database: deploy (creates it), then migrate |
+| `ocre deploy` | Existing database: migrate, then deploy. New database: deploy (creates it), then migrate. Uploads a new `SECRET_KEY_BASE` only when the Worker has none (an existing one is never rotated) |
+| `ocre routes [filter]` | The app's routes (method, path, handler), read from `src/lib.rs` and the modules it merges; `--json` returns `routes` |
+| `ocre secret` | New random `SECRET_KEY_BASE` value (128 hex characters), like `rails secret` |
 
 `ocre new` flags:
 
@@ -117,6 +119,33 @@ prompt, and stdout carries exactly one JSON object, `{"ok": true, "command",
 "hint"}`; wrangler output goes to stderr. Exit code is 0 on success, 1 on
 failure. Generators never overwrite files.
 
+## Web
+
+`ocre::serve` wraps every app with:
+
+- **Sessions** in an encrypted cookie (AES-256-GCM, key derived from the
+  `SECRET_KEY_BASE` secret), like Rails' cookie store: no database rows or KV
+  operations. Handlers take `session: ocre::Session` (`get`, `insert`,
+  `remove`, `clear`). `ocre new` writes a local secret to `.dev.vars` (git
+  ignored); `ocre deploy` creates the production one.
+- **Flash**: `session.flash("notice", "...")` before a redirect; the next page
+  takes `flash: ocre::Flash`. Scaffolds show "Post was successfully created."
+- **CSRF protection** without tokens: unsafe requests (POST, PUT, PATCH,
+  DELETE) that a browser sends from another site (`Sec-Fetch-Site`, or
+  `Origin` against `Host` for older browsers) get 403, the check Go 1.25 ships
+  as `http.CrossOriginProtection`. Cookies are `SameSite=Lax`.
+- **CORS** for the origins in the `ALLOWED_ORIGINS` Worker variable
+  (comma-separated), which are also trusted by the CSRF check.
+- **Security headers**: `X-Content-Type-Options: nosniff`,
+  `X-Frame-Options: SAMEORIGIN`, `Referrer-Policy:
+  strict-origin-when-cross-origin`, `X-XSS-Protection: 0`,
+  `X-Permitted-Cross-Domain-Policies: none`, and HSTS on HTTPS. A handler's own
+  value wins.
+
+Generated apps also have `GET /up` (health check) and `public/`, served by
+Workers Static Assets before the Worker runs, so static files cost no Worker
+request or CPU.
+
 ## Rules the framework enforces
 
 - Handlers are plain [axum](https://docs.rs/axum) handlers. Every Ocre type is
@@ -157,6 +186,9 @@ private items without mixing with production code.
 | `Page { limit, offset }` | `?limit=&offset=` extractor with bounds; `Page::new` for GraphQL |
 | `ocre::graphql::routes(schema)` | `/graphql` endpoint and GraphiQL (feature `graphql`) |
 | `#[serde(deserialize_with = "ocre::bool_from_sql")]` | Read SQLite INTEGER 0/1 as `bool` |
+| `session: Session` | Encrypted cookie session: `get::<T>`, `insert`, `remove`, `clear`, `flash(kind, msg)` |
+| `flash: Flash` | Previous request's flash: `notice()`, `alert()`, `get(kind)`, `iter()` |
+| `Validator`, `FieldError` | Collect field errors; `finish()?` returns `Error::Invalid` (422) |
 
 ## Requirements
 

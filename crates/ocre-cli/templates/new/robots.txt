@@ -1,0 +1,4 @@
+# Served by Cloudflare straight from public/, before the Worker runs.
+# Allows every crawler everywhere; add `Disallow: /path` lines to keep pages out of search engines.
+User-agent: *
+Disallow:
