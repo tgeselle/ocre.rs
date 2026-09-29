@@ -109,16 +109,10 @@ impl Validator {
     }
 
     /// Looks like an e-mail address: one `@`, text on both sides, a dot in
-    /// the domain. Delivery is the only real check.
+    /// the domain, no spaces or `<>,`. Delivery is the only real check.
+    /// [`mail::send`](crate::mail::send) applies the same rule.
     pub fn email(&mut self, field: &str, value: &str) -> &mut Self {
-        let valid = value.split_once('@').is_some_and(|(local, domain)| {
-            !local.is_empty()
-                && !domain.contains('@')
-                && domain.contains('.')
-                && !domain.starts_with('.')
-                && !domain.ends_with('.')
-        });
-        self.check(field, !valid, "is invalid")
+        self.check(field, !is_email(value), "is invalid")
     }
 
     /// Parses a required number typed as text (HTML forms). Adds
@@ -165,6 +159,19 @@ impl Validator {
     pub fn finish(&mut self) -> Result<(), Error> {
         if self.errors.is_empty() { Ok(()) } else { Err(Error::Invalid(std::mem::take(&mut self.errors))) }
     }
+}
+
+/// The address rule behind [`Validator::email`] and outgoing mail.
+pub(crate) fn is_email(value: &str) -> bool {
+    let forbidden = |c: char| c.is_whitespace() || c.is_control() || matches!(c, '<' | '>' | ',');
+    !value.contains(forbidden)
+        && value.split_once('@').is_some_and(|(local, domain)| {
+            !local.is_empty()
+                && !domain.contains('@')
+                && domain.contains('.')
+                && !domain.starts_with('.')
+                && !domain.ends_with('.')
+        })
 }
 
 fn digits(text: &str) -> Option<u32> {

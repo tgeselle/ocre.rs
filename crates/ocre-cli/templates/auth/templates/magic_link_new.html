@@ -1,0 +1,16 @@
+{% extends "layout.html" %}
+
+{% block title %}Sign in by email{% endblock %}
+
+{% block content %}
+<h1>Sign in by email</h1>
+{% if let Some(notice) = flash.notice() %}<p class="notice">{{ notice }}</p>{% endif %}
+{% if let Some(alert) = flash.alert() %}<p class="alert">{{ alert }}</p>{% endif %}
+
+<form action="/magic_link" method="post">
+  <label>Email <input type="email" name="email" required autofocus autocomplete="username"></label>
+  <button type="submit">Email me a sign-in link</button>
+</form>
+
+<p><a href="/login">Log in with a password</a></p>
+{% endblock %}

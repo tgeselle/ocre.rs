@@ -13,6 +13,11 @@ pub enum Error {
     NotFound,
     /// 400 with a message shown to the user.
     BadRequest(String),
+    /// 401: missing or invalid credentials (password, session, token).
+    /// JSON responses add `WWW-Authenticate: Bearer`.
+    Unauthorized,
+    /// 403: signed in, but not allowed to do this.
+    Forbidden,
     /// 422: failed validations, one entry per field error (see [`Validator`](crate::Validator)).
     Invalid(Vec<FieldError>),
     /// 500; the message goes to the Worker logs only.
@@ -53,6 +58,8 @@ impl Error {
         let (status, message, fields) = match self {
             Self::NotFound => (StatusCode::NOT_FOUND, "Not found".to_owned(), vec![]),
             Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message, vec![]),
+            Self::Unauthorized => (StatusCode::UNAUTHORIZED, "Unauthorized".to_owned(), vec![]),
+            Self::Forbidden => (StatusCode::FORBIDDEN, "Forbidden".to_owned(), vec![]),
             Self::Invalid(fields) => (StatusCode::UNPROCESSABLE_ENTITY, "Validation failed".to_owned(), fields),
             Self::Internal(message) => {
                 log_internal(&message);
@@ -68,6 +75,8 @@ impl std::fmt::Display for Error {
         match self {
             Self::NotFound => f.write_str("not found"),
             Self::BadRequest(message) => write!(f, "bad request: {message}"),
+            Self::Unauthorized => f.write_str("unauthorized"),
+            Self::Forbidden => f.write_str("forbidden"),
             Self::Invalid(fields) => {
                 let messages: Vec<String> = fields.iter().map(FieldError::full_message).collect();
                 write!(f, "invalid: {}", messages.join(", "))

@@ -51,6 +51,17 @@ fn add_model(edits: &mut Edits, names: &ModelNames, fields: &[Field], command: &
         })?;
         edits.update(&path, updated);
     }
+    register_model(edits, &names.singular)?;
+    if !edits.has_create_migration(&names.plural)? {
+        let path = next_migration_path(edits, &format!("create_{}", names.plural))?;
+        edits.create(&path, table_sql(&names.plural, fields))?;
+    }
+    edits.create(&model_path(names), model_rs(names, fields, command))
+}
+
+/// Adds `pub mod <module>;` to src/models/mod.rs, creating it (and `mod models;`
+/// in src/lib.rs) for the first model.
+pub(super) fn register_model(edits: &mut Edits, module: &str) -> Result<(), CliError> {
     let registry = match edits.read("src/models/mod.rs")? {
         Some(source) => source,
         None => {
@@ -65,14 +76,10 @@ fn add_model(edits: &mut Edits, names: &ModelNames, fields: &[Field], command: &
             )
         }
     };
-    let registry = insert_after_marker(&registry, MODELS_MARKER, &format!("pub mod {};", names.singular))
+    let registry = insert_after_marker(&registry, MODELS_MARKER, &format!("pub mod {module};"))
         .ok_or_else(|| CliError::new(format!("src/models/mod.rs is missing the `{MODELS_MARKER}` marker")))?;
     edits.update("src/models/mod.rs", registry);
-    if !edits.has_create_migration(&names.plural)? {
-        let path = next_migration_path(edits, &format!("create_{}", names.plural))?;
-        edits.create(&path, table_sql(&names.plural, fields))?;
-    }
-    edits.create(&model_path(names), model_rs(names, fields, command))
+    Ok(())
 }
 
 /// `CREATE TABLE` with the generated columns, plus its indexes.

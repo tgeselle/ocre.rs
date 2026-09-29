@@ -99,7 +99,9 @@ fn every_failure_is_collected_with_rails_messages() {
 
 #[test]
 fn email_shape() {
-    for bad in ["", "a", "@b.co", "a@", "a@b", "a@@b.co", "a@.co", "a@b."] {
+    let bad =
+        ["", "a", "@b.co", "a@", "a@b", "a@@b.co", "a@.co", "a@b.", "a b@c.co", "a@c.co\r\nBcc: x@y.z", "<a@b.co>"];
+    for bad in bad {
         let mut v = Validator::new();
         assert!(!v.email("email", bad).is_valid(), "{bad}");
     }

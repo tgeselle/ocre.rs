@@ -8,7 +8,7 @@ use crate::{
 };
 
 /// Names that would clash with generated columns, Rust keywords or SQL keywords.
-const RESERVED: &[&str] = &[
+pub(super) const RESERVED: &[&str] = &[
     "id",
     "created_at",
     "updated_at",

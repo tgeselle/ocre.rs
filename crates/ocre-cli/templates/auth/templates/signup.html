@@ -1,0 +1,20 @@
+{% extends "layout.html" %}
+
+{% block title %}Sign up{% endblock %}
+
+{% block content %}
+<h1>Sign up</h1>
+
+<form action="/signup" method="post">
+{% if !errors.is_empty() %}
+  <ul class="errors">
+    {% for error in errors %}<li>{{ error.full_message() }}</li>{% endfor %}
+  </ul>
+{% endif %}
+  <label>Email <input type="email" name="email" value="{{ email }}" required autofocus autocomplete="username"></label>
+  <label>Password (8 characters or more) <input type="password" name="password" required minlength="8" autocomplete="new-password"></label>
+  <button type="submit">Sign up</button>
+</form>
+
+<p>Already have an account? <a href="/login">Log in</a></p>
+{% endblock %}

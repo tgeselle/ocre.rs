@@ -12,6 +12,13 @@ fn json_of(response: Response) -> (u16, serde_json::Value) {
 fn errors_are_json_and_hide_internal_details() {
     let (status, body) = json_of(ApiError::from(Error::NotFound).into_response());
     assert_eq!((status, body), (404, serde_json::json!({"error": {"status": 404, "message": "Not found"}})));
+    let unauthorized = ApiError::from(Error::Unauthorized).into_response();
+    assert_eq!(unauthorized.headers()["www-authenticate"], "Bearer");
+    let (status, body) = json_of(unauthorized);
+    assert_eq!((status, body), (401, serde_json::json!({"error": {"status": 401, "message": "Unauthorized"}})));
+    let forbidden = ApiError::from(Error::Forbidden).into_response();
+    assert!(!forbidden.headers().contains_key("www-authenticate"));
+    assert_eq!(json_of(forbidden).0, 403);
     let (status, body) = json_of(ApiError::from(worker::Error::RustError("secret".into())).into_response());
     assert_eq!((status, body["error"]["message"].as_str()), (500, Some("Internal server error")));
     let (status, body) = json_of(ApiError::from(Error::bad_request("<b>")).into_response());

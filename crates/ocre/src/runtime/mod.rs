@@ -2,11 +2,17 @@
 //! workerd, so it is exercised by the end-to-end tests
 //! (`crates/ocre-cli/tests/e2e.rs`) rather than by native unit tests.
 
+#[cfg(target_arch = "wasm32")]
+mod crypto;
 mod ctx;
 mod d1;
 #[cfg(feature = "graphql")]
 mod graphql;
+pub(crate) mod jwt;
+pub(crate) mod mail;
 
+#[cfg(target_arch = "wasm32")]
+pub(crate) use crypto::{pbkdf2_sha256, unix_millis};
 pub use ctx::Ctx;
 pub use d1::Db;
 #[cfg(feature = "graphql")]

@@ -1339,15 +1339,21 @@ dependencies = [
  "askama",
  "async-graphql",
  "axum",
+ "base64 0.22.1",
  "cookie",
  "getrandom 0.2.17",
+ "hmac",
+ "js-sys",
+ "pbkdf2",
  "pollster",
  "serde",
  "serde_json",
  "serde_urlencoded",
+ "sha2",
  "tower-http",
  "tower-service",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "worker",
 ]
 
@@ -1388,6 +1394,16 @@ name = "parking"
 version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f38d5652c16fde515bb1ecef450ab0f6a219d619a7274976324d5e377f7dceba"
+
+[[package]]
+name = "pbkdf2"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8ed6a7761f76e3b9f92dfb0a60a6a6477c61024b775147ff0973a02653abaf2"
+dependencies = [
+ "digest",
+ "hmac",
+]
 
 [[package]]
 name = "percent-encoding"

@@ -8,6 +8,7 @@
 //!   that name the fix.
 
 mod api;
+mod clock;
 mod error;
 mod fields;
 /// GraphQL support (feature `graphql`).
@@ -15,18 +16,27 @@ mod fields;
 pub mod graphql;
 #[cfg(feature = "html")]
 mod htmx;
+/// JSON Web Tokens (HS256) for API clients.
+pub mod jwt;
+/// Email: send with adapters (log, Resend, Cloudflare), receive from Email Routing.
+pub mod mail;
 mod names;
+/// Password hashing (PBKDF2-HMAC-SHA256).
+pub mod password;
 mod protect;
 mod runtime;
 mod session;
 mod sql;
 #[cfg(test)]
 mod test_util;
+/// Random tokens for emailed links and API keys, stored as digests.
+pub mod token;
 mod validate;
 #[cfg(feature = "html")]
 mod view;
 
 pub use api::{ApiError, ApiResult, Created, Json, Page};
+pub use clock::now;
 pub use error::{Error, OptionExt, Result};
 pub use fields::{optional, patch};
 #[cfg(feature = "html")]

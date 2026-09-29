@@ -166,8 +166,10 @@ impl Plan {
             std::fs::write(&path, contents)?;
             report.created.push(format!("{name}/{relative}"));
         }
-        // Local secrets for `wrangler dev`, git-ignored. Deploys create the production one.
-        std::fs::write(self.root.join(".dev.vars"), format!("{SECRET_KEY_BASE}={}\n", secret::generate()))?;
+        // Local secrets and overrides for `wrangler dev`, git-ignored. Deploys create
+        // the production secret; MAIL_ADAPTER=log makes `ocre dev` print email instead of sending it.
+        let dev_vars = format!("{SECRET_KEY_BASE}={}\nMAIL_ADAPTER=log\n", secret::generate());
+        std::fs::write(self.root.join(".dev.vars"), dev_vars)?;
         report.created.push(format!("{name}/.dev.vars"));
         if self.starter == Starter::Blog {
             let fields = ["title:string", "body:text", "published:boolean"].map(String::from);

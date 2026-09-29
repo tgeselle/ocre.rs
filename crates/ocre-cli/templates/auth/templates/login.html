@@ -1,0 +1,18 @@
+{% extends "layout.html" %}
+
+{% block title %}Log in{% endblock %}
+
+{% block content %}
+<h1>Log in</h1>
+{% if let Some(notice) = flash.notice() %}<p class="notice">{{ notice }}</p>{% endif %}
+{% if let Some(alert) = flash.alert() %}<p class="alert">{{ alert }}</p>{% endif %}
+{% if let Some(alert) = alert %}<p class="alert">{{ alert }}</p>{% endif %}
+
+<form action="/login" method="post">
+  <label>Email <input type="email" name="email" value="{{ email }}" required autofocus autocomplete="username"></label>
+  <label>Password <input type="password" name="password" required autocomplete="current-password"></label>
+  <button type="submit">Log in</button>
+</form>
+
+<p><a href="/magic_link">Email me a sign-in link</a> · <a href="/passwords/new">Forgot your password?</a> · <a href="/signup">Sign up</a></p>
+{% endblock %}

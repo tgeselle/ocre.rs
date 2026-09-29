@@ -18,6 +18,9 @@ on stdout (`"ok": true|false`, plus `error` and `hint` on failure).
 | Add columns (SQL inferred from the name) | `ocre g migration add_slug_to_posts slug:string?` |
 | Remove a column | `ocre g migration remove_slug_from_posts` |
 | Empty migration (data changes, custom SQL) | `ocre g migration backfill_slugs` |
+| Authentication (users, login, magic link, password reset, JWT, API keys; once) | `ocre g auth` |
+| Emails to send (one function per email) | `ocre g mailer User welcome password_reset` |
+| Receive email (Email Routing) | `ocre g mailbox` |
 | Apply migrations locally | `ocre migrate` |
 | Pending migrations | `ocre migrate --status` |
 | Load seed data (`db/seeds.sql`) | `ocre db seed` |
@@ -46,11 +49,15 @@ src/models/<model>.rs  the model: struct, New<Model>/<Model>Changes, validate(),
 src/<plural>.rs     HTML resource: form parsing, handlers, routes (calls the model)
 src/<plural>_api.rs JSON resource: REST handlers and GraphQL resolvers (call the model)
 src/graphql.rs      GraphQL schema (when used); keep the `// ocre:graphql-*` markers
+src/auth.rs         after `ocre g auth`: CurrentUser/OptionalUser extractors, sign_in/sign_out (HTML apps)
+src/auth_api.rs     after `ocre g auth`: BearerUser extractor, /api/auth/* (token, me, keys)
+src/mailers/<name>.rs  functions building `ocre::mail::Email`; templates in templates/mailers/<name>/<action>.{txt,html}
+src/mailbox.rs      incoming email handler, called by the `email` event in src/lib.rs
 templates/          askama templates, compiled into the binary
 public/             static files (CSS, images, robots.txt), served by Cloudflare before the Worker runs
 migrations/         numbered D1 SQL migrations, applied in order
-wrangler.toml       Cloudflare config; the D1 binding must be named DB
-.dev.vars           local secrets for `ocre dev` (SECRET_KEY_BASE); never commit it
+wrangler.toml       Cloudflare config; the D1 binding must be named DB; MAIL_FROM under [vars]
+.dev.vars           local secrets and overrides for `ocre dev` (SECRET_KEY_BASE, MAIL_ADAPTER=log); never commit it
 ```
 
 ## Rules
@@ -100,6 +107,48 @@ wrangler.toml       Cloudflare config; the D1 binding must be named DB
 - Security headers (nosniff, SAMEORIGIN framing, referrer policy, HSTS on
   HTTPS) are added to every response; a handler that sets one keeps its value.
 - `GET /up` is the health check; keep it cheap (no database).
+- Email: build it in a mailer (`src/mailers/`), send it from the handler with
+  `ocre::mail::send(&ctx, mailers::user::welcome(&address)?).await?`. Validate
+  user-typed addresses first with `v.email(..)`. `MAIL_ADAPTER` picks the
+  delivery: `log` (`ocre dev`: the email is printed in the dev output between
+  `[ocre mail]` lines, links included; read them there), `resend` (secret
+  `RESEND_API_KEY`; free plan: any recipient, 100/day) or `cloudflare`
+  (`[[send_email]]` binding `EMAIL`; free plan: only verified addresses of the
+  account). Unset in production = `send` fails with an error naming the fix.
+  Put data in the template structs; `.txt` templates are not HTML-escaped.
+- Incoming email: `src/mailbox.rs` `receive(ctx, email)`; `email.to()`,
+  `subject()`, `text()`, `header(..)`; `email.reject("reason")` bounces,
+  `email.forward("verified@address").await?` forwards; an `Err` bounces.
+  Test locally with `curl 'http://localhost:8787/cdn-cgi/local/email?from=a@example.com&to=b@example.com' --data-binary @message.eml`
+  (the message needs a `Message-ID` header).
+
+- Authentication (after `ocre g auth`):
+  - Protect an HTML page: take `CurrentUser(user): CurrentUser` (from
+    `crate::auth`); visitors are redirected to /login and come back after.
+    Optional: `OptionalUser(user): OptionalUser` gives `Option<User>`.
+  - Protect a JSON route: take `BearerUser(user): BearerUser` (from
+    `crate::auth_api`); it accepts `Authorization: Bearer <JWT or API key>`
+    and answers 401 JSON otherwise. Put it before `Json(..)` in the arguments.
+  - Ownership: filter queries by `user.id` (`WHERE user_id = ?1`) and return
+    `Error::NotFound` (or `Error::Forbidden`) for other users' records.
+  - Sign in only through `auth::sign_in(&session, &user)?` (it resets the
+    session) and out with `auth::sign_out(&session)?`; never store more than
+    the user id in the session.
+  - Passwords: `ocre::password::hash` / `verify` only (PBKDF2 via WebCrypto,
+    about 5 ms CPU per call: one per request at most). Never log or return
+    passwords, tokens or digests; `User` never serializes `password_digest`.
+  - Secret tokens (links, keys): `ocre::token::generate()`, store only
+    `ocre::token::digest(&token)`, look rows up by digest.
+  - JWT: `POST /api/auth/token` with `{"email", "password"}`; issue others
+    with `ocre::jwt::encode(&ctx, &Claims::new(user.id.to_string(), ttl))?`.
+    The key comes from `SECRET_KEY_BASE`; no other secret is needed.
+  - API keys: `POST /api/auth/keys` `{"name"}` with a Bearer token returns
+    `{"key", "api_key"}`: the key is shown once. List with `GET`, revoke with
+    `DELETE /api/auth/keys/{id}`. In code: `models::api_key::create(&ctx, user.id, NewApiKey { name })`.
+  - Magic-link and reset emails print in the `ocre dev` output
+    (`[ocre mail]`); open the link from there.
+  - No rate limiting: before going public, add Cloudflare rate limiting rules
+    for /login, /signup, /magic_link, /passwords and /api/auth/*.
 
 ## Free-plan limits (design for them)
 

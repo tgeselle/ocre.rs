@@ -3,7 +3,7 @@
 
 use axum::{
     extract::{FromRequest, FromRequestParts, Query, Request},
-    http::{StatusCode, request::Parts},
+    http::{HeaderValue, StatusCode, header, request::Parts},
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -38,7 +38,12 @@ impl IntoResponse for ApiError {
         if let Some(fields) = fields {
             error["fields"] = fields;
         }
-        (public.status, axum::Json(serde_json::json!({ "error": error }))).into_response()
+        let mut response = (public.status, axum::Json(serde_json::json!({ "error": error }))).into_response();
+        if public.status == StatusCode::UNAUTHORIZED {
+            // RFC 9110: a 401 names the scheme the client should use.
+            response.headers_mut().insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+        }
+        response
     }
 }
 

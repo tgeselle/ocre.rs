@@ -16,3 +16,22 @@ directory = "public"
 binding = "DB"
 database_name = "__APP_NAME__"
 migrations_dir = "migrations"
+
+# Plain-text Worker variables. Secrets go in .dev.vars for `ocre dev` and in
+# `npx wrangler secret put NAME` for production; .dev.vars overrides [vars] locally.
+[vars]
+# Sender for `ocre::mail::send`: "noreply@yourdomain.com" or "Name <noreply@yourdomain.com>".
+MAIL_FROM = "__APP_NAME__ <noreply@example.com>"
+# How production sends mail (`ocre dev` only prints it: MAIL_ADAPTER=log in .dev.vars):
+# "resend" needs the RESEND_API_KEY secret (free: 100 emails/day, 3,000/month);
+# "cloudflare" needs the [[send_email]] binding below (any recipient needs the
+# Workers Paid plan; the free plan only reaches verified addresses of the account).
+# MAIL_ADAPTER = "resend"
+
+# Cloudflare Email Service binding, for MAIL_ADAPTER = "cloudflare". `ocre dev`
+# simulates it and prints each message.
+# [[send_email]]
+# name = "EMAIL"
+
+# Receiving email: run `ocre g mailbox`, deploy, then in the Cloudflare dashboard
+# Email Routing > Routing rules, send an address to this Worker. Nothing to add here.

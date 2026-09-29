@@ -167,6 +167,14 @@ enum GenerateCommand {
         #[arg(long)]
         graphql: bool,
     },
+    /// Authentication, generated into the app: users (email + password), and in
+    /// full-stack apps sign-up/login/logout pages, password reset and magic-link
+    /// login by email, `CurrentUser`/`OptionalUser` extractors (src/auth.rs);
+    /// in every app a JSON API with JWTs and API keys and the `BearerUser`
+    /// extractor (src/auth_api.rs). Runs once per app.
+    ///
+    /// Example: `ocre g auth`, then `ocre migrate`.
+    Auth,
     /// Numbered SQL migration. `create_<table>`, `add_<columns>_to_<table>` and
     /// `remove_<columns>_from_<table>` names get their SQL from the fields.
     ///
@@ -177,6 +185,23 @@ enum GenerateCommand {
         /// Columns, as `name:type` (see `ocre g model --help`).
         fields: Vec<String>,
     },
+    /// `src/mailers/<name>.rs`: one function per action building an
+    /// `ocre::mail::Email`, from askama templates in
+    /// `templates/mailers/<name>/<action>.{txt,html}` (text only in API-only apps).
+    ///
+    /// Example: `ocre g mailer User welcome password_reset`.
+    Mailer {
+        /// Mailer name, PascalCase or snake_case (e.g. `User`; a `Mailer` suffix is dropped).
+        name: String,
+        /// Email names in snake_case (e.g. `welcome`), one function each.
+        #[arg(required = true)]
+        actions: Vec<String>,
+    },
+    /// `src/mailbox.rs` for incoming email (Cloudflare Email Routing), wired to
+    /// the Worker's `email` event in src/lib.rs. One per app.
+    ///
+    /// Example: `ocre g mailbox`.
+    Mailbox,
 }
 
 #[derive(Subcommand)]
@@ -245,12 +270,17 @@ fn main() -> ExitCode {
         Command::Generate(GenerateCommand::Api { name, fields, graphql }) => {
             Project::find().and_then(|project| generate::api(&project, &name, &fields, graphql))
         }
+        Command::Generate(GenerateCommand::Auth) => Project::find().and_then(|project| generate::auth(&project)),
         Command::Generate(GenerateCommand::Migration { name, fields }) => {
             Project::find().and_then(|project| generate::migration(&project, &name, &fields))
         }
         Command::Generate(GenerateCommand::Model { name, fields }) => {
             Project::find().and_then(|project| generate::model(&project, &name, &fields))
         }
+        Command::Generate(GenerateCommand::Mailer { name, actions }) => {
+            Project::find().and_then(|project| generate::mailer(&project, &name, &actions))
+        }
+        Command::Generate(GenerateCommand::Mailbox) => Project::find().and_then(|project| generate::mailbox(&project)),
         Command::Migrate { remote, status: true } => db::status(remote, json),
         Command::Migrate { remote, status: false } => wrangler::migrate(remote, json),
         Command::Db(DbCommand::Seed { remote }) => db::seed(remote, json),

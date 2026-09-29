@@ -47,12 +47,17 @@ const FLASH_KEY: &str = "_flash";
 
 /// Derives the cookie encryption key from `SECRET_KEY_BASE`.
 pub(crate) fn key_from_secret(secret: Option<String>) -> std::result::Result<Key, String> {
+    checked_secret(secret).map(|secret| Key::derive_from(secret.as_bytes()))
+}
+
+/// `SECRET_KEY_BASE` when it is set and long enough, or an error naming the fix.
+pub(crate) fn checked_secret(secret: Option<String>) -> std::result::Result<String, String> {
     let fix = "Fix: run `ocre secret`, put the value in .dev.vars as SECRET_KEY_BASE=... for `ocre dev` \
                (`ocre new` does this), and deploy with `ocre deploy`, which uploads it";
     match secret {
         None => Err(format!("the {SECRET_KEY_BASE} secret is not set. {fix}")),
         Some(secret) if secret.len() < 64 => Err(format!("{SECRET_KEY_BASE} is shorter than 64 characters. {fix}")),
-        Some(secret) => Ok(Key::derive_from(secret.as_bytes())),
+        Some(secret) => Ok(secret),
     }
 }
 

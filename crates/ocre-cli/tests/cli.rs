@@ -38,11 +38,14 @@ fn new_creates_an_app_without_touching_cloudflare_by_default() {
     assert!(sandbox.calls().is_empty(), "no wrangler call without --login/--deploy");
 }
 
-/// `.dev.vars` holds a fresh 128-hex SECRET_KEY_BASE for `wrangler dev`.
+/// `.dev.vars` holds a fresh 128-hex SECRET_KEY_BASE and MAIL_ADAPTER=log for `wrangler dev`.
 fn assert_dev_secret(root: &std::path::Path) {
     let vars = fs::read_to_string(root.join(".dev.vars")).unwrap();
-    let secret = vars.strip_prefix("SECRET_KEY_BASE=").and_then(|rest| rest.strip_suffix('\n')).unwrap();
+    let secret =
+        vars.strip_prefix("SECRET_KEY_BASE=").and_then(|rest| rest.strip_suffix("\nMAIL_ADAPTER=log\n")).unwrap();
     assert!(secret.len() == 128 && secret.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')), "{vars}");
+    let wrangler = fs::read_to_string(root.join("wrangler.toml")).unwrap();
+    assert!(wrangler.contains("[vars]\n# Sender") && wrangler.contains("\nMAIL_FROM = \""), "{wrangler}");
 }
 
 #[test]

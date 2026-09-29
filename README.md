@@ -37,7 +37,10 @@ free-plan limits an agent needs.
 | `ocre g model <Model> field:type...` | Migration and `src/models/<model>.rs`: struct, validations, queries, associations |
 | `ocre g scaffold <Model> field:type...` | Model (unless it exists) plus HTML CRUD: handlers, routes, templates; registers modules in `src/lib.rs`. In an API-only app: same as `ocre g api` |
 | `ocre g api <Model> field:type... [--graphql]` | Model (unless it exists) plus JSON REST resource under `/api/<plural>`; `--graphql` also exposes it on `/graphql` |
+| `ocre g auth` | Authentication generated into the app: users, sign-up/login/logout pages, password reset and magic links by email, JWTs and API keys (see [Authentication](#authentication)). Runs once |
 | `ocre g migration <name> [field:type...]` | Numbered migration; `create_<table>`, `add_<x>_to_<table>` and `remove_<x>_from_<table>` get their SQL from the name and fields |
+| `ocre g mailer <Name> action...` | `src/mailers/<name>.rs`, one function per action returning an `ocre::mail::Email`, with `templates/mailers/<name>/<action>.{txt,html}` (text built with `format!` in API-only apps) |
+| `ocre g mailbox` | `src/mailbox.rs` for incoming email, wired to the Worker's `email` event in `src/lib.rs` |
 | `ocre migrate [--remote]` | Apply D1 migrations |
 | `ocre migrate --status [--remote]` | Show wrangler's pending-migrations table; `--json` lists them in `pending` |
 | `ocre db seed [--remote]` | Run `db/seeds.sql` |
@@ -146,6 +149,141 @@ Generated apps also have `GET /up` (health check) and `public/`, served by
 Workers Static Assets before the Worker runs, so static files cost no Worker
 request or CPU.
 
+## Email
+
+`ocre::mail::send(&ctx, Email::new(to, subject, text).html(html)).await?`
+sends from the `MAIL_FROM` variable (`noreply@yourdomain.com` or
+`Name <noreply@yourdomain.com>`; `ocre new` puts a placeholder under `[vars]`
+in `wrangler.toml`). The `MAIL_ADAPTER` variable names the adapter; nothing is
+guessed from which keys happen to be set, so a development machine holding a
+real API key still never sends by accident:
+
+| `MAIL_ADAPTER` | Delivery | Configuration | Free-plan limits (September 2026) |
+|---|---|---|---|
+| `log` | Prints the whole email (headers, text, HTML) to the Worker console between `[ocre mail]` lines, like Rails' letter_opener. `ocre new` writes `MAIL_ADAPTER=log` to `.dev.vars`, which overrides `[vars]` in `ocre dev` | none | none |
+| `resend` | `POST https://api.resend.com/emails` | `RESEND_API_KEY` secret (`npx wrangler secret put RESEND_API_KEY`), `MAIL_FROM` on a domain verified in Resend | [Resend free plan](https://resend.com/docs/knowledge-base/account-quotas-and-limits): 100 emails a day, 3,000 a month, one domain; any recipient |
+| `cloudflare` | Cloudflare Email Service through the `EMAIL` [send_email binding](https://developers.cloudflare.com/email-service/api/send-emails/workers-api/) (uncomment `[[send_email]]` in `wrangler.toml`; `ocre dev` simulates it) | `MAIL_FROM` on a domain onboarded to Email Service | [Workers Free](https://developers.cloudflare.com/email-service/platform/pricing/): only verified destination addresses of the account (fine for mail to yourself); any recipient needs Workers Paid (3,000 a month included, then $0.35 per 1,000) |
+
+With `MAIL_ADAPTER` unset, `send` fails with an internal error that names the
+fix, so a production Worker never drops mail silently. For signup and
+password-reset mail on the free plan, use Resend. An invalid recipient
+(`Validator::email`'s rule) is a 400; a missing `MAIL_FROM`, key or binding is
+a 500 whose log says what to add.
+
+`ocre g mailer User welcome password_reset` writes `src/mailers/user.rs` with
+`welcome(to) -> Result<Email>` and `password_reset(to)`, rendering
+`templates/mailers/user/<action>.txt` (not HTML-escaped) and `.html` with
+askama; add fields to the template structs for the data an email needs.
+
+Receiving uses [Email Routing](https://developers.cloudflare.com/email-service/local-development/routing/)
+(free and unlimited on every plan): `ocre g mailbox` writes `src/mailbox.rs`
+and this entry point in `src/lib.rs`:
+
+```rust
+#[worker::event(email)]
+async fn email(message: worker::ForwardableEmailMessage, env: worker::Env, _ctx: worker::Context) -> worker::Result<()> {
+    ocre::mail::receive(message, env, mailbox::receive).await
+}
+```
+
+`mailbox::receive(ctx, email)` gets an `InboundEmail`: envelope `from()` and
+`to()`, decoded `subject()`, `header(name)`, `headers()`, `text()` and
+`html()` (parsed from multipart, quoted-printable, base64 and RFC 2047
+headers; attachments are skipped), `raw()` bytes, plus `reject(reason)`
+(bounce) and `forward(address).await` (to a verified destination address).
+An `Err` from the handler is logged and bounces the email. In the dashboard,
+Email Routing > Routing rules sends an address to the Worker. Locally, while
+`ocre dev` runs, POST a raw message (it needs a `Message-ID` header):
+
+```sh
+curl 'http://localhost:8787/cdn-cgi/local/email?from=ada@example.com&to=support@example.com' \
+  --data-binary $'From: ada@example.com\r\nTo: support@example.com\r\nSubject: Hi\r\nMessage-ID: <1@example.com>\r\n\r\nHello'
+```
+
+## Authentication
+
+`ocre g auth` writes authentication into the app, like Rails 8's
+authentication generator: every query and rule is app code an agent can read
+and change, and the framework only provides small primitives.
+
+| File | Full-stack | API-only | Contents |
+|---|---|---|---|
+| `migrations/*_create_users.sql` | yes | yes | `users`: `email` (unique, `COLLATE NOCASE`), `password_digest` |
+| `migrations/*_create_auth_tokens.sql` | yes | | single-use emailed tokens (`purpose`, `digest`, `expires_at`) |
+| `migrations/*_create_api_keys.sql` | yes | yes | `api_keys`: `user_id`, `name`, `digest` (unique), `last_used_at` |
+| `src/models/user.rs` | yes | yes | `User`, `NewUser` (email format, password 8 to 128 characters), `create`, `authenticate`, `update_password`; emails trimmed and lowercased |
+| `src/models/auth_token.rs` | yes | | `issue`, `peek`, `consume` (15 minutes, single use) |
+| `src/models/api_key.rs` | yes | yes | `create` (returns the key once), `for_user`, `revoke`, `authenticate` |
+| `src/auth.rs` | yes | | `CurrentUser` (redirects to `/login`, then back), `OptionalUser`, `sign_in`, `sign_out` |
+| `src/registrations.rs` | yes | | `GET/POST /signup`, `GET /account` (an example protected page) |
+| `src/sessions.rs` | yes | | `GET/POST /login`, `POST /logout`, `GET/POST /magic_link`, `GET/POST /magic_link/{token}` |
+| `src/passwords.rs` | yes | | `GET /passwords/new`, `POST /passwords`, `GET/POST /passwords/{token}` |
+| `templates/auth/*.html` | yes | | the pages |
+| `src/auth_api.rs` | yes | yes | `BearerUser`; `POST /api/auth/signup`, `POST /api/auth/token` (JWT, 1 hour), `GET /api/auth/me`, `GET/POST /api/auth/keys`, `DELETE /api/auth/keys/{id}` |
+
+```rust
+use crate::auth::CurrentUser;        // HTML: visitors are redirected to /login
+use crate::auth_api::BearerUser;     // JSON: 401 without a valid JWT or API key
+
+async fn dashboard(CurrentUser(user): CurrentUser) -> ocre::Result<Html<String>> { ... }
+async fn my_posts(BearerUser(user): BearerUser, State(ctx): State<Ctx>) -> ApiResult<Json<Vec<Post>>> { ... }
+```
+
+Framework primitives: `ocre::password::{hash, verify}`,
+`ocre::token::{generate, digest, constant_time_eq}`,
+`ocre::jwt::{encode, decode, Claims}`, `ocre::now()` and
+`Error::Unauthorized` (401, with `WWW-Authenticate: Bearer` in JSON) /
+`Error::Forbidden` (403).
+
+Security choices:
+
+- **Passwords**: PBKDF2-HMAC-SHA256 through WebCrypto
+  (`crypto.subtle.deriveBits`), which runs natively in workerd instead of in
+  WebAssembly; bcrypt or argon2 compiled to WebAssembly would not fit in 10 ms.
+  100,000 iterations, the most Workers accept (OWASP recommends 600,000 for
+  this algorithm; the cap is the platform's). Digests are self-describing,
+  `pbkdf2_sha256$100000$<salt>$<hash>` (16-byte random salt, base64), so the
+  count can grow later; `ocre::password::iterations(digest)` reads it back.
+  Native builds compute the same function in pure Rust (`pbkdf2` crate) for
+  tests. Comparison is constant-time; passwords are never logged. A login
+  with an unknown email runs a hash too, so timing does not reveal accounts.
+- **Measured cost of one hash**: 5.5 ms (100 hashes in 550 ms, timed with
+  `Date.now()` around `crypto.subtle.deriveBits` in `wrangler dev`, workerd on
+  an Apple M5 Max). A login request takes 9.5 ms in `wrangler dev` against 3.5
+  ms for `GET /up`. Sign-up, login and password changes therefore use about
+  half of the free plan's 10 ms CPU budget, and only those requests hash.
+- **Sessions**: the encrypted cookie holds only `user_id`. Login empties the
+  session before storing the id (no state carries over; with a cookie store
+  there is no server-side session id to fixate), logout clears it.
+  `CurrentUser` remembers the page (GET only, local paths only: no open
+  redirect) and returns there after login.
+- **Emailed tokens** (password reset, magic link): 256 random bits,
+  URL-safe; the database keeps only their SHA-256 digest; valid 15 minutes;
+  consumed with one `DELETE ... RETURNING` so they work once, even under
+  concurrent use; a new request cancels the previous link. The link opens a
+  page with a button that POSTs, so mail scanners that follow links do not use
+  it up. The request forms answer the same whether or not the email has an
+  account. Links use the request's origin; Cloudflare routes by host name, so
+  it is always one of the app's own hosts. Mail goes through `ocre::mail`: in
+  `ocre dev` the link appears in the console; in production set
+  `MAIL_ADAPTER` (see [Email](#email)) or these forms answer 500.
+- **JWT**: HS256 only (a token naming `none` or any other `alg` is refused),
+  `sub` = user id, `iat`, `exp`. The key is derived from `SECRET_KEY_BASE`
+  (HMAC-SHA256 with a fixed label, so it differs from the cookie key) rather
+  than a separate `JWT_SECRET`: one secret to create, upload and rotate, and
+  rotating it signs everyone out of sessions and tokens at once. JWTs cannot
+  be revoked before they expire (1 hour); use API keys for long-lived access.
+- **API keys**: 256 random bits shown once; stored as SHA-256 digests (a fast
+  hash is enough for random secrets and costs no CPU), revocable,
+  `last_used_at` written at most once an hour to save D1 writes.
+
+Not included yet: **rate limiting** (login, sign-up, token and email routes
+accept unlimited attempts; put [Cloudflare rate limiting
+rules](https://developers.cloudflare.com/waf/rate-limiting-rules/) in front of
+them before going public), email confirmation, "sign out everywhere" (sessions
+last until logout or until `SECRET_KEY_BASE` changes) and roles
+(`Error::Forbidden` is there for app checks).
+
 ## Rules the framework enforces
 
 - Handlers are plain [axum](https://docs.rs/axum) handlers. Every Ocre type is
@@ -189,6 +327,13 @@ private items without mixing with production code.
 | `session: Session` | Encrypted cookie session: `get::<T>`, `insert`, `remove`, `clear`, `flash(kind, msg)` |
 | `flash: Flash` | Previous request's flash: `notice()`, `alert()`, `get(kind)`, `iter()` |
 | `Validator`, `FieldError` | Collect field errors; `finish()?` returns `Error::Invalid` (422) |
+| `ocre::password::hash(pw).await?` / `verify(pw, digest).await?` | PBKDF2-HMAC-SHA256 digest (WebCrypto on Workers) / constant-time check |
+| `ocre::token::generate()` / `digest(token)` | 256-bit URL-safe random token / SHA-256 hex to store |
+| `ocre::jwt::encode(&ctx, &Claims::new(sub, ttl))?` / `decode(&ctx, token)?` | HS256 JWT signed with a key derived from `SECRET_KEY_BASE`; `decode` fails with 401 |
+| `ocre::now()` | Unix seconds, on Workers and natively |
+| `Error::Unauthorized` / `Error::Forbidden` | 401 / 403 |
+| `ocre::mail::send(&ctx, email)` | Send an `Email` (`Email::new(to, subject, text).html(..).reply_to(..)`) with the `MAIL_ADAPTER` adapter |
+| `ocre::mail::receive(message, env, handler)` | Worker `email` entry point; `handler(ctx, InboundEmail)` |
 
 ## Requirements
 
@@ -249,6 +394,9 @@ Production, free plan (`wrangler tail`, 55 requests):
 | `GET /` (list, 1 D1 query) | 2 ms | 23 ms (1 of 40, likely a new isolate) | 18 ms |
 | `GET /posts/:id` | 2 ms | 4 ms | 16.5 ms |
 | `POST /posts` (insert) | 3 ms | 6 ms | 28 ms |
+
+Password hashing (PBKDF2-HMAC-SHA256, 100,000 iterations, WebCrypto in
+workerd under `wrangler dev`, Apple M5 Max): 5.5 ms per hash.
 
 The free-plan limit is 10 ms CPU per request; Cloudflare tolerates infrequent
 overruns per isolate, and kills requests only when overruns become frequent.

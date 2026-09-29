@@ -142,7 +142,20 @@ fn api_only_app_serves_rest_and_graphql_on_workerd() {
     let (report, ok) =
         sandbox.json(&["g", "api", "Book", "title:string", "pages:integer", "available:boolean", "--graphql"], &root);
     assert!(ok, "{report}");
+    let (report, ok) = sandbox.json(&["g", "auth"], &root);
+    assert!(ok, "{report}");
     let server = start(&sandbox, &root);
+
+    // Authentication, JSON only: sign up, then a JWT.
+    let credentials = r#"{"email": "Ada@Example.com", "password": "correct horse"}"#;
+    let (status, user) = json(&server, "POST", "/api/auth/signup", credentials);
+    assert_eq!((status, user["email"].as_str()), (201, Some("ada@example.com")), "{user}");
+    assert_eq!(json(&server, "POST", "/api/auth/signup", credentials).0, 422, "email taken");
+    let (status, token) = json(&server, "POST", "/api/auth/token", credentials);
+    assert_eq!(status, 200, "{token}");
+    let (status, me) = bearer_json(&server, "GET", "/api/auth/me", token["token"].as_str().unwrap(), "");
+    assert_eq!((status, me["id"].as_i64()), (200, user["id"].as_i64()));
+    assert_eq!(get(&server, "/login").status, 404, "no HTML pages in API-only apps");
 
     assert_eq!(json(&server, "GET", "/", ""), (200, serde_json::json!({"app": "e2e-api", "status": "ok"})));
 
@@ -262,4 +275,321 @@ fn generated_app_serves_full_crud_on_workerd() {
     let deleted = post(&server, "/posts/1/delete", &[]);
     assert_eq!((deleted.status, deleted.location.as_str()), (303, "/posts"));
     assert_eq!(get(&server, "/posts/1").status, 404);
+}
+
+/// Waits until the `ocre dev` log contains `needle` (workerd logs asynchronously).
+fn wait_for_log(sandbox: &Sandbox, needle: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let log = std::fs::read_to_string(sandbox.work.join("dev.log")).unwrap();
+        if log.contains(needle) {
+            return log;
+        }
+        assert!(Instant::now() < deadline, "the dev log never showed {needle:?}:\n{log}");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Delivers a raw email through wrangler dev's local Email Routing endpoint.
+fn deliver(server: &Server, from: &str, to: &str, raw: &str) -> (u16, String) {
+    let url = format!("{}/cdn-cgi/local/email?from={from}&to={to}", server.base);
+    let mut response = agent().post(&url).send(raw).unwrap();
+    (response.status().as_u16(), response.body_mut().read_to_string().unwrap())
+}
+
+#[test]
+#[ignore = "builds WebAssembly and runs wrangler dev; run with --ignored"]
+fn generated_app_sends_and_receives_email_on_workerd() {
+    let sandbox = Sandbox::new();
+    sandbox.use_real_wrangler();
+    let root = sandbox.new_app("e2e-mail", &[]);
+    for args in [&["g", "mailer", "User", "welcome"][..], &["g", "mailbox"]] {
+        let (report, ok) = sandbox.json(args, &root);
+        assert!(ok, "{report}");
+    }
+    // A route sending the generated email, and a mailbox that bounces spam,
+    // fails on request and forwards the rest.
+    let lib = std::fs::read_to_string(root.join("src/lib.rs"))
+        .unwrap()
+        .replace("// ocre:routes", "// ocre:routes\n        .route(\"/welcome\", axum::routing::post(send_welcome))")
+        + r#"
+async fn send_welcome(
+    axum::extract::State(ctx): axum::extract::State<Ctx>,
+    axum::Form(form): axum::Form<std::collections::HashMap<String, String>>,
+) -> Result<&'static str> {
+    let to = form.get("email").map_or("", String::as_str);
+    ocre::mail::send(&ctx, mailers::user::welcome(to)?).await?;
+    Ok("sent")
+}
+"#;
+    std::fs::write(root.join("src/lib.rs"), lib).unwrap();
+    let mailbox = r#"use ocre::{Ctx, Error, Result, mail::InboundEmail};
+
+pub async fn receive(_ctx: Ctx, email: InboundEmail) -> Result<()> {
+    match email.subject() {
+        "spam" => email.reject("Spam is not welcome"),
+        "fail" => return Err(Error::internal("boom")),
+        _ => {
+            worker::console_log!("[e2e] text: {} html: {}", email.text().unwrap_or("-"), email.html().unwrap_or("-"));
+            email.forward("team@example.com").await?;
+        }
+    }
+    Ok(())
+}
+"#;
+    std::fs::write(root.join("src/mailbox.rs"), mailbox).unwrap();
+    // Production would use Resend; MAIL_ADAPTER=log from .dev.vars wins in `ocre dev`.
+    let wrangler = std::fs::read_to_string(root.join("wrangler.toml")).unwrap();
+    std::fs::write(root.join("wrangler.toml"), wrangler.replace("# MAIL_ADAPTER = ", "MAIL_ADAPTER = ")).unwrap();
+    let server = start(&sandbox, &root);
+
+    // Sending, logged.
+    let sent = post(&server, "/welcome", &[("email", "ada@example.com")]);
+    assert_eq!((sent.status, sent.body.as_str()), (200, "sent"));
+    let log = wait_for_log(&sandbox, "[ocre mail] end");
+    assert!(log.contains("[ocre mail] not sent (MAIL_ADAPTER = \"log\")"), "{log}");
+    let expected = "From: e2e-mail <noreply@example.com>\nTo: ada@example.com\nSubject: Welcome\n\n\
+                    Hello ada@example.com,\n\nThis is the welcome email.";
+    assert!(log.contains(expected), "{log}");
+    assert!(log.contains("[ocre mail] HTML version:\n<!DOCTYPE html>"), "{log}");
+    assert_eq!(post(&server, "/welcome", &[("email", "not an address")]).status, 400);
+
+    // Receiving: parsed, forwarded, bounced.
+    let raw = "From: Ada <ada@example.com>\r\nTo: support@example.com\r\nSubject: =?UTF-8?Q?Caf=C3=A9?=\r\n\
+               Message-ID: <1@example.com>\r\nMIME-Version: 1.0\r\nContent-Type: multipart/alternative; boundary=\"b\"\r\n\r\n\
+               --b\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n\
+               Cr=C3=A8me br=C3=BBl=C3=A9e\r\n--b\r\nContent-Type: text/html; charset=utf-8\r\n\
+               Content-Transfer-Encoding: base64\r\n\r\nPGI+aGk8L2I+\r\n--b--\r\n";
+    let (status, body) = deliver(&server, "ada@example.com", "support@example.com", raw);
+    assert_eq!((status, body.as_str()), (200, "Worker successfully processed email"));
+    let log = wait_for_log(&sandbox, "rcptTo: team@example.com");
+    assert!(log.contains("[ocre mail] received from ada@example.com to support@example.com: Café"), "{log}");
+    assert!(log.contains("[e2e] text: Crème brûlée html: <b>hi</b>"), "{log}");
+    let simple = |subject: &str, id: u8| {
+        format!(
+            "From: ada@example.com\r\nTo: support@example.com\r\nSubject: {subject}\r\nMessage-ID: <{id}@example.com>\r\n\r\nHi\r\n"
+        )
+    };
+    let (status, body) = deliver(&server, "ada@example.com", "support@example.com", &simple("spam", 2));
+    assert_eq!((status, body.as_str()), (400, "Worker rejected email with the following reason: Spam is not welcome"));
+    let (status, body) = deliver(&server, "ada@example.com", "support@example.com", &simple("fail", 3));
+    assert_eq!(
+        (status, body.as_str()),
+        (400, "Worker rejected email with the following reason: The message could not be processed")
+    );
+    wait_for_log(&sandbox, "[ocre mail] the mailbox failed: internal error: boom");
+    drop(server);
+
+    // Cloudflare Email Service: wrangler dev simulates the send_email binding.
+    let wrangler = std::fs::read_to_string(root.join("wrangler.toml"))
+        .unwrap()
+        .replace("# [[send_email]]\n# name = \"EMAIL\"", "[[send_email]]\nname = \"EMAIL\"");
+    std::fs::write(root.join("wrangler.toml"), wrangler).unwrap();
+    let vars = std::fs::read_to_string(root.join(".dev.vars")).unwrap().replace("=log", "=cloudflare");
+    std::fs::write(root.join(".dev.vars"), vars).unwrap();
+    let server = start(&sandbox, &root);
+    let sent = post(&server, "/welcome", &[("email", "ada@example.com")]);
+    assert_eq!((sent.status, sent.body.as_str()), (200, "sent"));
+    // One log entry: headers, then the files holding the text and HTML bodies.
+    let log = wait_for_log(&sandbox, "send_email binding called with MessageBuilder:");
+    assert!(log.contains("To: ada@example.com\nSubject: Welcome"), "{log}");
+    let text_file = log.split("Text: ").nth(1).and_then(|rest| rest.lines().next()).unwrap().trim();
+    let text = std::fs::read_to_string(text_file).unwrap();
+    assert!(text.starts_with("Hello ada@example.com,"), "{text}");
+}
+
+/// Tracks the session cookie across requests, like a browser.
+struct Browser<'a> {
+    server: &'a Server,
+    cookie: String,
+}
+
+impl<'a> Browser<'a> {
+    fn new(server: &'a Server) -> Self {
+        Self { server, cookie: String::new() }
+    }
+
+    fn get(&mut self, path: &str) -> Page {
+        self.send("GET", path, &[])
+    }
+
+    fn post(&mut self, path: &str, form: &[(&str, &str)]) -> Page {
+        self.send("POST", path, form)
+    }
+
+    fn send(&mut self, method: &str, path: &str, form: &[(&str, &str)]) -> Page {
+        let page = send(self.server, method, path, &[("cookie", self.cookie.as_str())], form);
+        if !page.cookie.is_empty() {
+            self.cookie = page.cookie.clone();
+        }
+        page
+    }
+}
+
+/// Size of the dev log, to look only at what a request logs after it.
+fn log_len(log: &Path) -> usize {
+    std::fs::read_to_string(log).unwrap().len()
+}
+
+/// The token of the first link `<prefix><token>` logged after byte `since`
+/// of the dev log by an email that `ocre::mail` printed instead of sending.
+fn mailed_token(log: &Path, since: usize, prefix: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let text = std::fs::read_to_string(log).unwrap();
+        let new = &text[since.min(text.len())..];
+        if let (Some(mail), Some(start)) = (new.find("[ocre mail]"), new.find(prefix)) {
+            assert!(mail < start, "the link comes from a logged email:\n{new}");
+            let token: String = new[start + prefix.len()..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                .collect();
+            assert_eq!(token.len(), 43, "{new}");
+            return token;
+        }
+        assert!(Instant::now() < deadline, "no email with {prefix} in the dev log:\n{new}");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// JSON request with `Authorization: Bearer <token>`.
+fn bearer_json(server: &Server, method: &str, path: &str, token: &str, body: &str) -> (u16, serde_json::Value) {
+    let url = format!("{}{path}", server.base);
+    let authorization = format!("Bearer {token}");
+    let agent = agent();
+    let response = match method {
+        "POST" => agent.post(&url).header("authorization", &authorization).content_type("application/json").send(body),
+        "DELETE" => agent.delete(&url).header("authorization", &authorization).call(),
+        _ => agent.get(&url).header("authorization", &authorization).call(),
+    };
+    let page = page(response.unwrap());
+    (
+        page.status,
+        if page.body.is_empty() { serde_json::Value::Null } else { serde_json::from_str(&page.body).unwrap() },
+    )
+}
+
+#[test]
+#[ignore = "builds WebAssembly and runs wrangler dev; run with --ignored"]
+fn generated_auth_signs_users_in_on_workerd() {
+    let sandbox = Sandbox::new();
+    sandbox.use_real_wrangler();
+    let root = sandbox.new_app("e2e-auth", &[]);
+    let (report, ok) = sandbox.json(&["g", "auth"], &root);
+    assert!(ok, "{report}");
+    // A digest made by another PBKDF2 implementation (Python's hashlib, and
+    // Ocre's native build in its unit tests) verifies with WebCrypto.
+    let native = "pbkdf2_sha256$100000$b2NyZS1lMmUtc2FsdC0xNg$+YK85drz1qhfp9cYahe/+p4WE+lEWkjCL7PbkzXNN+A";
+    let server = start(&sandbox, &root);
+    let insert = format!("INSERT INTO users (email, password_digest) VALUES ('native@example.com', '{native}')");
+    let (report, ok) = sandbox.json(&["sql", &insert], &root);
+    assert!(ok, "{report}");
+    let log = sandbox.work.join("dev.log");
+    let mut browser = Browser::new(&server);
+
+    // A protected page sends visitors to /login.
+    let visitor = browser.get("/account");
+    assert_eq!((visitor.status, visitor.location.as_str()), (303, "/login"));
+    assert!(browser.get("/login").body.contains("Please log in to continue."));
+
+    // Sign up (validation, then success), back to the page that asked.
+    let short = browser.post("/signup", &[("email", "Ada@Example.com"), ("password", "short")]);
+    assert_eq!(short.status, 422);
+    assert!(short.body.contains("<li>Password is too short (minimum is 8 characters)</li>"), "{}", short.body);
+    browser.get("/account");
+    let signed_up = browser.post("/signup", &[("email", " Ada@Example.com"), ("password", "correct horse")]);
+    assert_eq!((signed_up.status, signed_up.location.as_str()), (303, "/account"));
+    let account = browser.get("/account");
+    assert_eq!(account.status, 200);
+    assert!(account.body.contains("<dd>ada@example.com</dd>"), "email normalized: {}", account.body);
+    assert!(account.body.contains("Welcome! Your account is ready."));
+    let taken = browser.post("/signup", &[("email", "ADA@example.com"), ("password", "another one")]);
+    assert!(taken.status == 422 && taken.body.contains("<li>Email has already been taken</li>"), "{}", taken.body);
+
+    // Log out, then the wrong password (or an unknown email) is rejected.
+    let logged_out = browser.post("/logout", &[]);
+    assert_eq!((logged_out.status, logged_out.location.as_str()), (303, "/"));
+    assert_eq!(browser.get("/account").status, 303);
+    for (email, password) in [("ada@example.com", "wrong password"), ("nobody@example.com", "correct horse")] {
+        let rejected = browser.post("/login", &[("email", email), ("password", password)]);
+        assert_eq!(rejected.status, 422);
+        assert!(rejected.body.contains("Invalid email or password."), "{}", rejected.body);
+    }
+    assert_eq!(browser.get("/account").status, 303, "still signed out");
+
+    // Log in with a password (email case ignored), back to /account.
+    let logged_in = browser.post("/login", &[("email", "ADA@example.com"), ("password", "correct horse")]);
+    assert_eq!((logged_in.status, logged_in.location.as_str()), (303, "/account"));
+    assert!(browser.get("/account").body.contains("<dd>ada@example.com</dd>"));
+    browser.post("/logout", &[]);
+
+    // Magic link: emailed (logged in dev), shown as a button, single use.
+    let since = log_len(&log);
+    let requested = browser.post("/magic_link", &[("email", "ada@example.com")]);
+    assert_eq!((requested.status, requested.location.as_str()), (303, "/login"));
+    let link = format!("/magic_link/{}", mailed_token(&log, since, &format!("{}/magic_link/", server.base)));
+    assert_eq!(browser.get("/account").status, 303, "opening the email does not sign in by itself");
+    assert!(browser.get(&link).body.contains(&format!("<form action=\"{link}\" method=\"post\">")));
+    let used = browser.post(&link, &[]);
+    assert_eq!((used.status, used.location.as_str()), (303, "/account"), "back to the page that asked");
+    assert!(browser.get("/account").body.contains("<dd>ada@example.com</dd>"));
+    browser.post("/logout", &[]);
+    let reused = browser.post(&link, &[]);
+    assert_eq!((reused.status, reused.location.as_str()), (303, "/magic_link"));
+    assert_eq!(browser.get("/account").status, 303);
+
+    // Password reset by emailed link.
+    let since = log_len(&log);
+    browser.post("/passwords", &[("email", "ada@example.com")]);
+    let link = format!("/passwords/{}", mailed_token(&log, since, &format!("{}/passwords/", server.base)));
+    assert_eq!(browser.get(&link).status, 200);
+    let mismatch = browser.post(&link, &[("password", "new password"), ("password_confirmation", "other")]);
+    assert!(mismatch.status == 422 && mismatch.body.contains("doesn&#39;t match Password"), "{}", mismatch.body);
+    let reset = browser.post(&link, &[("password", "new password"), ("password_confirmation", "new password")]);
+    assert_eq!((reset.status, reset.location.as_str()), (303, "/login"));
+    assert_eq!(browser.get(&link).location, "/passwords/new", "reset links work once");
+    let old = browser.post("/login", &[("email", "ada@example.com"), ("password", "correct horse")]);
+    assert_eq!(old.status, 422);
+    assert_eq!(browser.post("/login", &[("email", "ada@example.com"), ("password", "new password")]).status, 303);
+    browser.post("/logout", &[]);
+    let native_login = browser.post("/login", &[("email", "native@example.com"), ("password", "native digest")]);
+    assert_eq!(native_login.status, 303, "{}", native_login.body);
+
+    // JWT for API clients; wrong passwords get a JSON 401.
+    let credentials = r#"{"email": "ada@example.com", "password": "correct horse"}"#;
+    assert_eq!(
+        json(&server, "POST", "/api/auth/token", credentials),
+        (401, serde_json::json!({"error": {"status": 401, "message": "Unauthorized"}}))
+    );
+    let (status, token) =
+        json(&server, "POST", "/api/auth/token", r#"{"email": "ada@example.com", "password": "new password"}"#);
+    assert_eq!((status, token["token_type"].as_str(), token["expires_in"].as_i64()), (200, Some("Bearer"), Some(3600)));
+    let jwt = token["token"].as_str().unwrap();
+    let (status, me) = bearer_json(&server, "GET", "/api/auth/me", jwt, "");
+    assert_eq!((status, me["email"].as_str()), (200, Some("ada@example.com")));
+    assert!(me.get("password_digest").is_none(), "{me}");
+    let anonymous = get(&server, "/api/auth/me");
+    assert_eq!((anonymous.status, anonymous.headers["www-authenticate"].to_str().unwrap()), (401, "Bearer"));
+    let tampered = format!("{}x", &jwt[..jwt.len() - 1]);
+    for bad in [tampered.as_str(), "not-a-key", "a.b.c"] {
+        assert_eq!(bearer_json(&server, "GET", "/api/auth/me", bad, "").0, 401, "{bad}");
+    }
+
+    // API keys: created with the JWT, shown once, usable, revocable.
+    let (status, created) = bearer_json(&server, "POST", "/api/auth/keys", jwt, r#"{"name": "CI"}"#);
+    assert_eq!((status, created["api_key"]["name"].as_str()), (201, Some("CI")), "{created}");
+    let key = created["key"].as_str().unwrap();
+    assert_eq!(bearer_json(&server, "POST", "/api/auth/keys", jwt, r#"{"name": " "}"#).0, 422);
+    let (status, me) = bearer_json(&server, "GET", "/api/auth/me", key, "");
+    assert_eq!((status, me["email"].as_str()), (200, Some("ada@example.com")));
+    let (status, keys) = bearer_json(&server, "GET", "/api/auth/keys", key, "");
+    assert_eq!((status, keys.as_array().map(Vec::len)), (200, Some(1)));
+    assert!(keys[0]["last_used_at"].is_string() && keys[0].get("digest").is_none(), "{keys}");
+    let id = created["api_key"]["id"].as_i64().unwrap();
+    assert_eq!(
+        bearer_json(&server, "DELETE", &format!("/api/auth/keys/{id}"), jwt, ""),
+        (204, serde_json::Value::Null)
+    );
+    assert_eq!(bearer_json(&server, "DELETE", &format!("/api/auth/keys/{id}"), jwt, "").0, 404);
+    assert_eq!(bearer_json(&server, "GET", "/api/auth/me", key, "").0, 401, "revoked");
 }

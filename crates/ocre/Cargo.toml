@@ -19,6 +19,11 @@ cookie = { version = "0.18.2", features = ["private", "key-expansion", "percent-
 tower-http = { version = "0.7.1", default-features = false, features = ["cors"] }
 # `custom-error-conversion` lets Ocre map its errors so internal details never reach clients.
 async-graphql = { version = "7.2.1", default-features = false, features = ["graphiql", "custom-error-conversion"], optional = true }
+# Password hashing, random tokens and JWT (HS256).
+base64 = "0.22.1"
+getrandom = "0.2.17"
+hmac = "0.12.1"
+sha2 = "0.10.9"
 
 [features]
 default = ["html"]
@@ -31,6 +36,14 @@ graphql = ["dep:async-graphql"]
 pollster = "1.0.1"
 serde_urlencoded = "0.7.1"
 
-# Random nonces for cookie encryption come from WebCrypto on Workers.
+# Random bytes (cookie nonces, salts, tokens) come from WebCrypto on Workers.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2.17", features = ["js"] }
+# WebCrypto (PBKDF2) and the JavaScript clock.
+js-sys = "0.3"
+wasm-bindgen-futures = "0.4"
+
+# Workers hash passwords with WebCrypto; native builds (tests) use the same
+# algorithm in pure Rust.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pbkdf2 = { version = "0.12.2", default-features = false, features = ["hmac"] }

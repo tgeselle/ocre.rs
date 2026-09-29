@@ -1,10 +1,13 @@
-//! `ocre generate model|scaffold|api|migration`.
+//! `ocre generate model|scaffold|api|migration|mailer|mailbox`.
 //!
 //! Generators collect every change in [`Edits`] and write nothing until the
 //! whole generation succeeded, so a failure never leaves half a resource.
 
 mod api;
+mod auth;
 mod fields;
+mod mailbox;
+mod mailer;
 mod migration;
 mod model;
 mod scaffold;
@@ -12,6 +15,9 @@ mod scaffold;
 use std::path::PathBuf;
 
 pub use api::api;
+pub use auth::auth;
+pub use mailbox::mailbox;
+pub use mailer::mailer;
 pub use migration::migration;
 pub use model::model;
 pub use scaffold::scaffold;
