@@ -4,7 +4,7 @@ Feature-level inventory of Rails 8.1 and Loco 1.2, with what Ocre has and how
 each part maps to Cloudflare's free plan. Collected from the official Rails
 guides and the Loco documentation source; every item links to its page.
 
-993 features: 49 done, 51 partial, 869 to do, 24 not applicable on Workers.
+993 features: 69 done, 63 partial, 837 to do, 24 not applicable on Workers.
 
 Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason given).
 (R) Rails, (L) Loco.
@@ -550,43 +550,43 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** Sessions in signed cookies (HMAC with WebCrypto), CSRF tokens, security headers. Password hashing must fit the 10 ms CPU budget: PBKDF2 through WebCrypto (runs natively, outside WebAssembly), never argon2/bcrypt in Rust. JWT and API keys with WebCrypto. Rate limiting through the Workers rate-limiting binding (free-plan availability not verified) or a Durable Object counter.
 
-54 features: 5 done, 3 partial, 46 to do, 0 not applicable.
+54 features: 18 done, 6 partial, 30 to do, 0 not applicable.
 
 ### Auth
 
-- [ ] **JWT configuration** (L): auth.jwt sets a base64 secret and an expiration in seconds; tokens are signed with HS512 by default, and the algorithm can be changed in code with JWT::algorithm. [loco/how-to/jwt-auth](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/jwt-auth.md)
-- [ ] **JWT token generation** (L): JWT::new(secret).generate_token(expiration, pid, custom_claims) mints a signed token whose custom claims are flattened in next to pid. [loco/how-to/jwt-auth](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/jwt-auth.md)
-- [ ] **auth::JWT extractor** (L): A handler parameter that validates the token and exposes its claims (pid and custom claims), rejecting missing, invalid or expired tokens with 401 before the handler runs; it needs no database. [loco/how-to/jwt-auth](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/jwt-auth.md)
-- [ ] **auth::JWTWithUser<T> extractor** (L): Validates the JWT and also loads the user record through Authenticable::find_by_claims_key, returning 401 if the user is not found and 500 on a DB error. [loco/how-to/jwt-auth](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/jwt-auth.md)
-- [ ] **JWT token locations** (L): auth.jwt.location reads the token from the Bearer header (default), a named query parameter, or a named cookie. [loco/how-to/jwt-locations](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/jwt-locations.md)
+- [~] **JWT configuration** (L): auth.jwt sets a base64 secret and an expiration in seconds; tokens are signed with HS512 by default, and the algorithm can be changed in code with JWT::algorithm. [loco/how-to/jwt-auth](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/jwt-auth.md)
+- [x] **JWT token generation** (L): JWT::new(secret).generate_token(expiration, pid, custom_claims) mints a signed token whose custom claims are flattened in next to pid. [loco/how-to/jwt-auth](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/jwt-auth.md)
+- [x] **auth::JWT extractor** (L): A handler parameter that validates the token and exposes its claims (pid and custom claims), rejecting missing, invalid or expired tokens with 401 before the handler runs; it needs no database. [loco/how-to/jwt-auth](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/jwt-auth.md)
+- [x] **auth::JWTWithUser<T> extractor** (L): Validates the JWT and also loads the user record through Authenticable::find_by_claims_key, returning 401 if the user is not found and 500 on a DB error. [loco/how-to/jwt-auth](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/jwt-auth.md)
+- [~] **JWT token locations** (L): auth.jwt.location reads the token from the Bearer header (default), a named query parameter, or a named cookie. [loco/how-to/jwt-locations](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/jwt-locations.md)
 - [ ] **Multiple JWT locations with fallback** (L): A list of locations is tried in order until one yields a token, so for example browser cookies and API Bearer headers can both be accepted. [loco/how-to/jwt-locations](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/jwt-locations.md)
-- [ ] **API key auth (ApiToken<T>)** (L): An extractor that reads a per-user API key from the Authorization Bearer header and loads the user through Authenticable::find_by_api_key, with no JWT config needed. [loco/how-to/api-key-auth](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/api-key-auth.md)
+- [x] **API key auth (ApiToken<T>)** (L): An extractor that reads a per-user API key from the Authorization Bearer header and loads the user through Authenticable::find_by_api_key, with no JWT config needed. [loco/how-to/api-key-auth](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/api-key-auth.md)
 - [ ] **Authenticable trait** (L): A trait the user model implements (find_by_api_key, find_by_claims_key) so the auth extractors can look up the caller. [loco/reference/query-pagination](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/query-pagination.md)
-- [ ] **Password hashing (hash_password)** (L): Hashes passwords with Argon2id and a fresh random salt on every call, with no feature flag required. [loco/how-to/hash-passwords](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/hash-passwords.md)
-- [ ] **Password verification (verify_password)** (L): Returns a plain bool that is false for both a wrong password and a malformed hash, so bad data fails closed. [loco/how-to/hash-passwords](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/hash-passwords.md)
-- [ ] **Random token generation (random_string)** (L): Generates alphanumeric strings of a given length for reset tokens or API keys. [loco/how-to/hash-passwords](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/hash-passwords.md)
-- [ ] **Built-in authentication suite** (L): Apps generated with a DB ship a users model and /api/auth endpoints for register (with a response that does not reveal whether the email exists), email verification, login, forgot and reset password, current user, magic link, and resend verification mail. [loco/tutorials/saas-with-auth](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/tutorials/saas-with-auth.md)
+- [x] **Password hashing (hash_password)** (L): Hashes passwords with Argon2id and a fresh random salt on every call, with no feature flag required. [loco/how-to/hash-passwords](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/hash-passwords.md)
+- [x] **Password verification (verify_password)** (L): Returns a plain bool that is false for both a wrong password and a malformed hash, so bad data fails closed. [loco/how-to/hash-passwords](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/hash-passwords.md)
+- [x] **Random token generation (random_string)** (L): Generates alphanumeric strings of a given length for reset tokens or API keys. [loco/how-to/hash-passwords](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/hash-passwords.md)
+- [x] **Built-in authentication suite** (L): Apps generated with a DB ship a users model and /api/auth endpoints for register (with a response that does not reveal whether the email exists), email verification, login, forgot and reset password, current user, magic link, and resend verification mail. [loco/tutorials/saas-with-auth](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/tutorials/saas-with-auth.md)
 - [ ] **SPA auth client scaffolding** (L): The generated React frontend attaches the bearer token to every request, handles 401 centrally, and protects routes with a RequireAuth component. [loco/how-to/build-a-spa](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/build-a-spa.md)
 
 ### Security
 
 - [x] **Automatic HTML escaping** (R): ERB output is escaped by default; html_safe and raw opt out. [security](https://guides.rubyonrails.org/security.html)
-- [ ] **Authentication generator** (R): `bin/rails generate authentication` creates User and Session models, a sessions controller, an Authentication concern and a password reset flow. [security](https://guides.rubyonrails.org/security.html)
-- [ ] **Password reset** (R): A generated PasswordsController and mailer reset passwords using signed tokens that expire. [security](https://guides.rubyonrails.org/security.html)
-- [ ] **has_secure_password** (R): Stores a bcrypt password digest and adds password/password_confirmation attributes, validations and an authenticate method. [security](https://guides.rubyonrails.org/security.html)
-- [ ] **authenticate_by** (R): Finds a record by its credentials and checks the password in one call, resistant to timing attacks. [security](https://guides.rubyonrails.org/security.html)
+- [x] **Authentication generator** (R): `bin/rails generate authentication` creates User and Session models, a sessions controller, an Authentication concern and a password reset flow. [security](https://guides.rubyonrails.org/security.html)
+- [x] **Password reset** (R): A generated PasswordsController and mailer reset passwords using signed tokens that expire. [security](https://guides.rubyonrails.org/security.html)
+- [~] **has_secure_password** (R): Stores a bcrypt password digest and adds password/password_confirmation attributes, validations and an authenticate method. [security](https://guides.rubyonrails.org/security.html)
+- [x] **authenticate_by** (R): Finds a record by its credentials and checks the password in one call, resistant to timing attacks. [security](https://guides.rubyonrails.org/security.html)
 - [ ] **Database-backed session management** (R): A generated Session model records each session's IP and user agent behind a signed permanent cookie; allow_unauthenticated_access skips authentication for chosen actions. [security](https://guides.rubyonrails.org/security.html)
 - [x] **Session storage (CookieStore)** (R): Sessions are stored in encrypted, signed cookies by default, and other session stores can be configured. [security](https://guides.rubyonrails.org/security.html)
 - [~] **Encrypted and signed cookies** (R): cookies.encrypted and cookies.signed keep cookie values confidential and tamper-proof. [security](https://guides.rubyonrails.org/security.html)
 - [ ] **Cookie configuration rotation** (R): config.action_dispatch.cookies_rotations changes cookie secrets, digests or ciphers without logging users out. [security](https://guides.rubyonrails.org/security.html)
-- [ ] **secret_key_base** (R): The application secret from which keys for cookies, message verifiers and encryptors are derived. [security](https://guides.rubyonrails.org/security.html)
+- [x] **secret_key_base** (R): The application secret from which keys for cookies, message verifiers and encryptors are derived. [security](https://guides.rubyonrails.org/security.html)
 - [ ] **Replay attack countermeasures** (R): Guidance on keeping sensitive state (such as balances or nonces) out of the cookie session so an old cookie can't be replayed. [security](https://guides.rubyonrails.org/security.html)
-- [~] **reset_session** (R): Issues a fresh session, typically after login, to prevent session fixation. [security](https://guides.rubyonrails.org/security.html)
+- [x] **reset_session** (R): Issues a fresh session, typically after login, to prevent session fixation. [security](https://guides.rubyonrails.org/security.html)
 - [ ] **Session expiry** (R): Sessions can be expired through cookie expiry and timestamps stored on the server. [security](https://guides.rubyonrails.org/security.html)
 - [x] **CSRF protection** (R): protect_from_forgery checks authenticity tokens on non-GET requests, with :exception, :reset_session or :null_session as the failure strategy. [security](https://guides.rubyonrails.org/security.html)
 - [ ] **csrf_meta_tags** (R): Puts the CSRF token in meta tags so JavaScript requests can send it. [security](https://guides.rubyonrails.org/security.html)
 - [ ] **Clearing persistent cookies on CSRF failure** (R): Overriding handle_unverified_request can clear persistent cookies such as remember-me tokens when a CSRF check fails. [security](https://guides.rubyonrails.org/security.html)
-- [ ] **Safe redirects** (R): redirect_to raises on redirects to other hosts unless allow_other_host: true is given; url_from accepts a URL only if it points to this app. [security](https://guides.rubyonrails.org/security.html)
+- [~] **Safe redirects** (R): redirect_to raises on redirects to other hosts unless allow_other_host: true is given; url_from accepts a URL only if it points to this app. [security](https://guides.rubyonrails.org/security.html)
 - [ ] **send_file / send_data** (R): Sends files or in-memory data as downloads, with guidance on validating file paths. [security](https://guides.rubyonrails.org/security.html)
 - [ ] **File upload filename sanitization** (R): Guidance on sanitizing uploaded filenames and keeping uploads out of public/ so they can't be executed. [security](https://guides.rubyonrails.org/security.html)
 - [ ] **rate_limit** (R): Limits the request rate for controller actions such as login, using the cache store, with to:, within:, by: and with: options. [security](https://guides.rubyonrails.org/security.html)
@@ -669,39 +669,39 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** Receiving: Email Routing + Email Workers (free). Sending: Cloudflare Email Sending (free-plan terms not verified) or an HTTP provider such as Resend. Templates with askama.
 
-43 features: 0 done, 0 partial, 43 to do, 0 not applicable.
+43 features: 6 done, 9 partial, 28 to do, 0 not applicable.
 
 ### Mailer
 
-- [ ] **Mailer trait with templated emails** (L): Mailers render emails from template directories containing subject.t, html.t and text.t (Tera, rendered with locals) that are embedded at compile time, with shared partials. [loco/how-to/send-email](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/send-email.md)
+- [~] **Mailer trait with templated emails** (L): Mailers render emails from template directories containing subject.t, html.t and text.t (Tera, rendered with locals) that are embedded at compile time, with shared partials. [loco/how-to/send-email](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/send-email.md)
 - [ ] **Background email delivery** (L): mail and mail_template enqueue a MailerWorker job on the mailer queue (default priority 100) and return immediately, so SMTP delivery happens off the request. [loco/how-to/send-email](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/send-email.md)
 - [ ] **SMTP configuration** (L): mailer.smtp sets host, port, username/password auth and an EHLO hello_name. [loco/reference/configuration](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/configuration.md)
 - [ ] **SMTP TLS modes** (L): tls: starttls, implicit (SMTPS on port 465) or none, which overrides the legacy secure boolean. [loco/how-to/send-email](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/send-email.md)
 - [ ] **Mailer default options** (L): Overriding opts() sets a mailer's default from-address and job priority. [loco/how-to/send-email](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/send-email.md)
 - [ ] **CC, BCC and threading headers** (L): Args and Email accept cc, bcc, and EmailHeaders (References, In-Reply-To, Message-ID) for threading. [loco/how-to/send-email](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/send-email.md)
-- [ ] **Stub mailer and deliveries capture** (L): mailer.stub: true captures emails instead of sending them, and deliveries() exposes them for test assertions. [loco/how-to/send-email](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/send-email.md)
-- [ ] **Mailer generator** (R): `bin/rails generate mailer` scaffolds a mailer class, views, previews and tests. [action_mailer_basics](https://guides.rubyonrails.org/action_mailer_basics.html)
-- [ ] **Mailer classes and actions** (R): Subclass ApplicationMailer and define action methods that build messages via `mail(to:, from:, subject:, ...)` with instance variables exposed to views. [action_mailer_basics](https://guides.rubyonrails.org/action_mailer_basics.html)
-- [ ] **Mailer defaults** (R): `default from:, reply_to:, ...` sets class-wide header defaults for all messages. [action_mailer_basics](https://guides.rubyonrails.org/action_mailer_basics.html)
+- [~] **Stub mailer and deliveries capture** (L): mailer.stub: true captures emails instead of sending them, and deliveries() exposes them for test assertions. [loco/how-to/send-email](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/send-email.md)
+- [x] **Mailer generator** (R): `bin/rails generate mailer` scaffolds a mailer class, views, previews and tests. [action_mailer_basics](https://guides.rubyonrails.org/action_mailer_basics.html)
+- [x] **Mailer classes and actions** (R): Subclass ApplicationMailer and define action methods that build messages via `mail(to:, from:, subject:, ...)` with instance variables exposed to views. [action_mailer_basics](https://guides.rubyonrails.org/action_mailer_basics.html)
+- [~] **Mailer defaults** (R): `default from:, reply_to:, ...` sets class-wide header defaults for all messages. [action_mailer_basics](https://guides.rubyonrails.org/action_mailer_basics.html)
 - [ ] **Parameterized mailers** (R): `Mailer.with(params).action` passes a `params` hash into the mailer for use in actions and callbacks. [action_mailer_basics](https://guides.rubyonrails.org/action_mailer_basics.html)
-- [ ] **Mailer view templates** (R): HTML and text templates per action rendered as the message body, using the full Action View stack. [action_mailer_basics](https://guides.rubyonrails.org/action_mailer_basics.html)
+- [x] **Mailer view templates** (R): HTML and text templates per action rendered as the message body, using the full Action View stack. [action_mailer_basics](https://guides.rubyonrails.org/action_mailer_basics.html)
 - [ ] **deliver_now / deliver_later** (R): Send a message synchronously or enqueue it via Active Job, with `wait:`/`wait_until:`/queue options for later delivery. [action_mailer_basics](https://guides.rubyonrails.org/action_mailer_basics.html)
 - [ ] **File attachments** (R): `attachments['name'] = content` (with optional mime type/encoding hash) attaches files to an email. [action_mailer_basics](https://guides.rubyonrails.org/action_mailer_basics.html)
 - [ ] **Inline attachments** (R): `attachments.inline[...]` embeds images referenced in the HTML body via `image_tag attachments['x'].url`. [action_mailer_basics](https://guides.rubyonrails.org/action_mailer_basics.html)
-- [ ] **Multipart emails** (R): Text and HTML templates are automatically combined into multipart/alternative, with explicit `format.html`/`format.text` blocks and part ordering control. [action_mailer_basics](https://guides.rubyonrails.org/action_mailer_basics.html)
+- [x] **Multipart emails** (R): Text and HTML templates are automatically combined into multipart/alternative, with explicit `format.html`/`format.text` blocks and part ordering control. [action_mailer_basics](https://guides.rubyonrails.org/action_mailer_basics.html)
 - [ ] **Custom template paths and names** (R): `template_path:`/`template_name:` options, `format` blocks with inline render, and `prepend_view_path`/`append_view_path` customize which view is used. [action_mailer_basics](https://guides.rubyonrails.org/action_mailer_basics.html)
 - [ ] **URL generation in mailer views** (R): `url_for`/named `_url` helpers generate absolute URLs using configured `default_url_options[:host]`. [action_mailer_basics](https://guides.rubyonrails.org/action_mailer_basics.html)
 - [ ] **Images in mailer views** (R): `image_tag` with `asset_host` config produces absolute image URLs in emails. [action_mailer_basics](https://guides.rubyonrails.org/action_mailer_basics.html)
 - [ ] **Mailer view fragment caching** (R): `cache` blocks can be used in mailer templates when `perform_caching` is enabled. [action_mailer_basics](https://guides.rubyonrails.org/action_mailer_basics.html)
 - [ ] **Mailer layouts** (R): Mailer layouts (e.g. `mailer.html.erb`) wrap message templates, selectable per mailer via `layout` or per format. [action_mailer_basics](https://guides.rubyonrails.org/action_mailer_basics.html)
 - [ ] **Multiple recipients, cc and bcc** (R): `to`, `cc`, `bcc` accept arrays or comma-separated lists of addresses. [action_mailer_basics](https://guides.rubyonrails.org/action_mailer_basics.html)
-- [ ] **Named email addresses** (R): `email_address_with_name` formats addresses as `"Name" <email>`. [action_mailer_basics](https://guides.rubyonrails.org/action_mailer_basics.html)
+- [~] **Named email addresses** (R): `email_address_with_name` formats addresses as `"Name" <email>`. [action_mailer_basics](https://guides.rubyonrails.org/action_mailer_basics.html)
 - [ ] **Subject translation** (R): Omitting `subject` looks up `<mailer_scope>.<action>.subject` in I18n, with `default_i18n_subject` supporting interpolation. [action_mailer_basics](https://guides.rubyonrails.org/action_mailer_basics.html)
-- [ ] **Bodies without templates** (R): `mail(body:, content_type:)` or `render plain:` in format blocks sends email without a template file. [action_mailer_basics](https://guides.rubyonrails.org/action_mailer_basics.html)
+- [x] **Bodies without templates** (R): `mail(body:, content_type:)` or `render plain:` in format blocks sends email without a template file. [action_mailer_basics](https://guides.rubyonrails.org/action_mailer_basics.html)
 - [ ] **Dynamic delivery options** (R): `delivery_method_options:` on `mail` overrides SMTP settings per message. [action_mailer_basics](https://guides.rubyonrails.org/action_mailer_basics.html)
 - [ ] **Mailer callbacks** (R): `before_action`, `after_action`, `around_action`, and `before/after/around_deliver` hooks on mailers for headers, delivery toggling, and post-delivery logging. [action_mailer_basics](https://guides.rubyonrails.org/action_mailer_basics.html)
 - [ ] **Mailer view helpers** (R): Helpers such as `message`, `attachments`, `mailer.action_name`, `format_paragraph`, and `helper` inclusion are available in mailer views. [action_mailer_basics](https://guides.rubyonrails.org/action_mailer_basics.html)
-- [ ] **Delivery methods configuration** (R): Configure `delivery_method` (:smtp, :sendmail, :file, :test), `smtp_settings`, `raise_delivery_errors`, `perform_deliveries`, `deliveries`, `deliver_later_queue_name` and more. [action_mailer_basics](https://guides.rubyonrails.org/action_mailer_basics.html)
+- [~] **Delivery methods configuration** (R): Configure `delivery_method` (:smtp, :sendmail, :file, :test), `smtp_settings`, `raise_delivery_errors`, `perform_deliveries`, `deliveries`, `deliver_later_queue_name` and more. [action_mailer_basics](https://guides.rubyonrails.org/action_mailer_basics.html)
 - [ ] **Mailer previews** (R): Preview classes rendered at `/rails/mailers` let developers view emails in the browser without sending. [action_mailer_basics](https://guides.rubyonrails.org/action_mailer_basics.html)
 - [ ] **rescue_from in mailers** (R): `rescue_from` handles exceptions raised in mailer actions and in deliver_later jobs. [action_mailer_basics](https://guides.rubyonrails.org/action_mailer_basics.html)
 - [ ] **Email interceptors** (R): Registered interceptors can modify or suppress messages before they are delivered. [action_mailer_basics](https://guides.rubyonrails.org/action_mailer_basics.html)
@@ -710,11 +710,11 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 ### Mailbox
 
-- [ ] **Action Mailbox installation** (R): `action_mailbox:install` sets up the InboundEmail table and ApplicationMailbox. [action_mailbox_basics](https://guides.rubyonrails.org/action_mailbox_basics.html)
-- [ ] **Inbound email ingresses** (R): Built-in ingress endpoints for Exim, Mailgun, Mandrill, Postfix, Postmark, Qmail and SendGrid with authenticated webhooks/relay. [action_mailbox_basics](https://guides.rubyonrails.org/action_mailbox_basics.html)
-- [ ] **Mailbox routing** (R): `routing` in ApplicationMailbox maps recipients (regex, string, proc, `:all`) to mailbox classes. [action_mailbox_basics](https://guides.rubyonrails.org/action_mailbox_basics.html)
-- [ ] **Mailbox classes** (R): Mailboxes implement `process` with access to the parsed `mail` object to handle incoming emails. [action_mailbox_basics](https://guides.rubyonrails.org/action_mailbox_basics.html)
-- [ ] **Mailbox callbacks and bouncing** (R): `before_processing`/`after_processing`/`around_processing` callbacks and `bounce_with` to reject email with a reply. [action_mailbox_basics](https://guides.rubyonrails.org/action_mailbox_basics.html)
+- [~] **Action Mailbox installation** (R): `action_mailbox:install` sets up the InboundEmail table and ApplicationMailbox. [action_mailbox_basics](https://guides.rubyonrails.org/action_mailbox_basics.html)
+- [~] **Inbound email ingresses** (R): Built-in ingress endpoints for Exim, Mailgun, Mandrill, Postfix, Postmark, Qmail and SendGrid with authenticated webhooks/relay. [action_mailbox_basics](https://guides.rubyonrails.org/action_mailbox_basics.html)
+- [~] **Mailbox routing** (R): `routing` in ApplicationMailbox maps recipients (regex, string, proc, `:all`) to mailbox classes. [action_mailbox_basics](https://guides.rubyonrails.org/action_mailbox_basics.html)
+- [x] **Mailbox classes** (R): Mailboxes implement `process` with access to the parsed `mail` object to handle incoming emails. [action_mailbox_basics](https://guides.rubyonrails.org/action_mailbox_basics.html)
+- [~] **Mailbox callbacks and bouncing** (R): `before_processing`/`after_processing`/`around_processing` callbacks and `bounce_with` to reject email with a reply. [action_mailbox_basics](https://guides.rubyonrails.org/action_mailbox_basics.html)
 - [ ] **Inbound email status tracking** (R): InboundEmail records track status (pending, processing, delivered, failed, bounced) through processing. [action_mailbox_basics](https://guides.rubyonrails.org/action_mailbox_basics.html)
 - [ ] **Conductor for local development** (R): A local web UI at `/rails/conductor/action_mailbox/inbound_emails` lets developers compose and submit test inbound emails. [action_mailbox_basics](https://guides.rubyonrails.org/action_mailbox_basics.html)
 - [ ] **Mailbox testing helpers** (R): `receive_inbound_email_from_mail` and related helpers exercise mailboxes in tests. [action_mailbox_basics](https://guides.rubyonrails.org/action_mailbox_basics.html)
@@ -968,7 +968,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** `ocre` CLI: non-interactive with `--json`, wizard in a terminal. D1 commands wrap wrangler.
 
-118 features: 16 done, 7 partial, 86 to do, 9 not applicable.
+118 features: 17 done, 7 partial, 85 to do, 9 not applicable.
 
 ### CLI
 
@@ -1063,7 +1063,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [ ] **Task generator** (L): `generate task <name>` creates a Task stub and registers it in register_tasks. [loco/how-to/write-task](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/write-task.md)
 - [ ] **Scheduler generator** (L): `generate scheduler` writes a starter config/scheduler.yaml. [loco/how-to/schedule-jobs](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/schedule-jobs.md)
 - [ ] **Worker generator** (L): `generate worker <name>` creates a BackgroundWorker stub with a WorkerArgs struct, registers it in connect_workers, and adds a worker test. [loco/how-to/add-worker](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/add-worker.md)
-- [ ] **Mailer generator** (L): `generate mailer <name>` creates a mailer struct with a welcome/ template directory (subject, html, text) and shared partials. [loco/how-to/send-email](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/send-email.md)
+- [x] **Mailer generator** (L): `generate mailer <name>` creates a mailer struct with a welcome/ template directory (subject, html, text) and shared partials. [loco/how-to/send-email](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/send-email.md)
 - [ ] **Data loader generator** (L): `generate data <name>` creates a typed data-loader module plus a data/<name>/data.json file. [loco/how-to/load-data](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/load-data.md)
 - [~] **Field-type mini-language** (L): `name:type` field specs cover about 50 base types (string, text, int=i64, small_int, unsigned, float, double, decimal, decimal_len, money, bool, tstz, date, time, date_time, uuid, json, jsonb, blob, binary_len, var_binary...), where no suffix means nullable, `!` means required and `^` means unique. [loco/reference/generators](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/generators.md)
 - [ ] **Enum field type** (L): `status:enum:draft,published` stores a string column and generates a Rust enum with serde and ts-rs support, rendered as a <select> in scaffolded forms. [loco/reference/generators](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/generators.md)

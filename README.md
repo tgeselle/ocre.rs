@@ -375,7 +375,7 @@ cargo llvm-cov --workspace --all-features \
 | `crates/ocre-cli/tests/integration/` | The `ocre` binary with a fake wrangler (`tests/support/fake_npx.sh`): every command, `--json` contract, every error hint; `ocre new` in a pseudo-terminal |
 | `crates/ocre-cli/tests/system/e2e.rs` | Generated apps built to WebAssembly (dev build, shared `target/e2e-app`), served by `wrangler dev`: CRUD, sessions, CSRF, auth, email over HTTP |
 
-CI runs lint, coverage and a generated-app build as parallel jobs, and requires
+CI (manual trigger for now) runs lint, coverage and a generated-app build as parallel jobs, and requires
 100% line coverage. The generated-app job runs `ocre new` and every generator,
 then compiles the result to WebAssembly.
 The e2e test is not part of CI (it needs Node.js and a full WebAssembly
