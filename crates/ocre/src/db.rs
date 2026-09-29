@@ -101,9 +101,11 @@ impl IntoParam for &String {
     }
 }
 
+/// SQLite has no boolean type: `true`/`false` are stored as INTEGER 1/0.
+/// Read them back with `#[serde(deserialize_with = "ocre::bool_from_sql")]`.
 impl IntoParam for bool {
     fn into_param(self) -> Param {
-        Param(JsValue::from_bool(self))
+        Param(JsValue::from_f64(if self { 1.0 } else { 0.0 }))
     }
 }
 
@@ -142,4 +144,36 @@ impl<T: IntoParam> IntoParam for Option<T> {
     fn into_param(self) -> Param {
         self.map_or(Param(JsValue::NULL), IntoParam::into_param)
     }
+}
+
+/// Deserializes a SQLite boolean column (INTEGER 0/1) into `bool`:
+/// `#[serde(deserialize_with = "ocre::bool_from_sql")]`.
+pub fn bool_from_sql<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    struct Visitor;
+
+    impl serde::de::Visitor<'_> for Visitor {
+        type Value = bool;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a boolean or the integer 0 or 1")
+        }
+
+        fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<bool, E> {
+            Ok(v)
+        }
+
+        fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<bool, E> {
+            Ok(v != 0)
+        }
+
+        fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<bool, E> {
+            Ok(v != 0)
+        }
+
+        fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<bool, E> {
+            Ok(v != 0.0)
+        }
+    }
+
+    deserializer.deserialize_any(Visitor)
 }

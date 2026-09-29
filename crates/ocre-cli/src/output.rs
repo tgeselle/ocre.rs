@@ -1,0 +1,93 @@
+use std::process::ExitCode;
+
+use serde::Serialize;
+
+/// Successful command result. Paths are relative to the app root.
+#[derive(Serialize, Default)]
+pub struct Report {
+    pub command: &'static str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub created: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub updated: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Commands to run next, in order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub next: Vec<String>,
+}
+
+impl Report {
+    pub fn new(command: &'static str) -> Self {
+        Self { command, ..Self::default() }
+    }
+}
+
+/// Failure with an optional hint that names the fix.
+#[derive(Debug)]
+pub struct CliError {
+    pub message: String,
+    pub hint: Option<String>,
+}
+
+impl CliError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self { message: message.into(), hint: None }
+    }
+
+    pub fn hint(mut self, hint: impl Into<String>) -> Self {
+        self.hint = Some(hint.into());
+        self
+    }
+}
+
+impl From<std::io::Error> for CliError {
+    fn from(err: std::io::Error) -> Self {
+        Self::new(err.to_string())
+    }
+}
+
+pub fn finish(result: Result<Report, CliError>, json: bool) -> ExitCode {
+    match result {
+        Ok(report) => {
+            if json {
+                let mut value = serde_json::to_value(&report).expect("report serializes");
+                value["ok"] = true.into();
+                println!("{value}");
+            } else {
+                print_human(&report);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            if json {
+                let value = serde_json::json!({ "ok": false, "error": err.message, "hint": err.hint });
+                println!("{value}");
+            } else {
+                eprintln!("error: {}", err.message);
+                if let Some(hint) = &err.hint {
+                    eprintln!("hint: {hint}");
+                }
+            }
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn print_human(report: &Report) {
+    for path in &report.created {
+        println!("  create  {path}");
+    }
+    for path in &report.updated {
+        println!("  update  {path}");
+    }
+    if let Some(url) = &report.url {
+        println!("\n{url}");
+    }
+    if !report.next.is_empty() {
+        println!("\nNext:");
+        for step in &report.next {
+            println!("  {step}");
+        }
+    }
+}

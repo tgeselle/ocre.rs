@@ -14,7 +14,7 @@ mod htmx;
 mod view;
 
 pub use ctx::Ctx;
-pub use db::{Db, IntoParam, Param};
+pub use db::{Db, IntoParam, Param, bool_from_sql};
 pub use error::{Error, OptionExt, Result};
 pub use htmx::Htmx;
 pub use view::render;

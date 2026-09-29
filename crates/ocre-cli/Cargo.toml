@@ -1,0 +1,17 @@
+[package]
+name = "ocre-cli"
+version = "0.1.0"
+description = "Command-line tool for Ocre: create, generate, migrate, run and deploy apps."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "ocre"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+serde.workspace = true
+serde_json = "1.0.151"
+toml = "1.1.6"

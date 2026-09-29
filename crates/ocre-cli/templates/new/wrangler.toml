@@ -1,0 +1,12 @@
+name = "__APP_NAME__"
+main = "build/index.js"
+compatibility_date = "2026-09-01"
+
+[build]
+command = "cargo install -q \"worker-build@^0.8\" && worker-build --release"
+
+# The first `ocre deploy` creates this database; no database_id needed.
+[[d1_databases]]
+binding = "DB"
+database_name = "__APP_NAME__"
+migrations_dir = "migrations"

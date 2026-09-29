@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}__APP_NAME__{% endblock %}</title>
+  <script src="https://unpkg.com/htmx.org@2.0.4" crossorigin="anonymous"></script>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 48rem; margin: 2rem auto; padding: 0 1rem; color: #2b2118; }
+    a { color: #b5651d; }
+    form { display: grid; gap: .75rem; max-width: 32rem; }
+    label { display: grid; gap: .25rem; }
+    input, textarea, button { font: inherit; padding: .5rem; }
+    input[type=checkbox] { justify-self: start; }
+    button { background: #cc7722; color: white; border: 0; cursor: pointer; justify-self: start; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { text-align: left; padding: .5rem; border-bottom: 1px solid #e8d8c4; }
+  </style>
+</head>
+<body>
+  <header><a href="/">__APP_NAME__</a></header>
+  <main>{% block content %}{% endblock %}</main>
+</body>
+</html>
