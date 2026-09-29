@@ -1,0 +1,13 @@
+{% extends "layout.html" %}
+
+{% block title %}{{ error.message }}{% endblock %}
+
+{% block content %}
+<h1>{{ error.message }}</h1>
+{% if !error.fields.is_empty() %}
+<ul class="errors">
+  {% for field in error.fields %}<li>{{ field.full_message() }}</li>{% endfor %}
+</ul>
+{% endif %}
+<p>Error {{ error.status.as_u16() }}. <a href="/">Back to the home page</a></p>
+{% endblock %}

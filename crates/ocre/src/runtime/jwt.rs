@@ -1,11 +1,21 @@
 use crate::{
-    Ctx, Result,
+    Ctx, Error, Result,
     jwt::{Claims, Key, decode_with, encode_with},
-    session::SECRET_KEY_BASE,
+    session::{SECRET_KEY_BASE, SECRET_KEY_BASE_PREVIOUS, previous_secrets},
 };
 
+fn secret(ctx: &Ctx, name: &str) -> Option<String> {
+    ctx.env().secret(name).ok().map(|secret| secret.to_string())
+}
+
 fn key(ctx: &Ctx) -> Result<Key> {
-    Key::from_secret(ctx.env().secret(SECRET_KEY_BASE).ok().map(|secret| secret.to_string()))
+    Key::from_secret(secret(ctx, SECRET_KEY_BASE))
+}
+
+/// Keys of `SECRET_KEY_BASE_PREVIOUS`, during a rotation.
+fn previous_keys(ctx: &Ctx) -> Result<Vec<Key>> {
+    let secrets = previous_secrets(secret(ctx, SECRET_KEY_BASE_PREVIOUS)).map_err(Error::Internal)?;
+    Ok(secrets.iter().map(|secret| Key::from_secret_key_base(secret)).collect())
 }
 
 /// Signs `claims` with the HS256 key derived from the `SECRET_KEY_BASE` Worker secret.
@@ -41,28 +51,39 @@ pub fn encode(ctx: &Ctx, claims: &Claims) -> Result<String> {
 ///
 /// Checks the signature, the algorithm ([`ALGORITHM`](crate::jwt::ALGORITHM)
 /// only) and the expiry against the current time ([`crate::now`]), like
-/// [`decode_with`](crate::jwt::decode_with). No D1 or KV operation.
+/// [`decode_with`](crate::jwt::decode_with). During a secret rotation, tokens
+/// signed with a key listed in
+/// [`SECRET_KEY_BASE_PREVIOUS`](crate::SECRET_KEY_BASE_PREVIOUS) still
+/// verify. No D1 or KV operation.
 ///
 /// # Errors
 ///
 /// - [`Error::Unauthorized`](crate::Error::Unauthorized) (401) for any
 ///   invalid token: malformed, other algorithm, bad signature, expired.
 /// - [`Error::Internal`](crate::Error::Internal) (500) when `SECRET_KEY_BASE`
-///   is not set or is shorter than 64 characters (message names the fix).
+///   is not set or is shorter than 64 characters, or a previous secret is
+///   shorter than 64 characters (message names the fix).
 ///
 /// # Examples
 ///
 /// ```rust,no_run
-/// use axum::{extract::State, http::HeaderMap};
-/// use ocre::{Ctx, Error, Result};
+/// use axum::http::{HeaderMap, Uri};
+/// use axum::extract::State;
+/// use ocre::{Ctx, Error, Result, jwt::{self, Location}};
 ///
-/// async fn me(State(ctx): State<Ctx>, headers: HeaderMap) -> Result<String> {
-///     let bearer = headers.get("authorization").and_then(|value| value.to_str().ok());
-///     let token = bearer.and_then(|value| value.strip_prefix("Bearer ")).ok_or(Error::Unauthorized)?;
-///     let claims = ocre::jwt::decode(&ctx, token)?;
+/// async fn me(State(ctx): State<Ctx>, headers: HeaderMap, uri: Uri) -> Result<String> {
+///     let token = jwt::token_from(&headers, &uri, &[Location::Bearer]).ok_or(Error::Unauthorized)?;
+///     let claims = jwt::decode(&ctx, &token)?;
 ///     Ok(claims.sub)
 /// }
 /// ```
 pub fn decode(ctx: &Ctx, token: &str) -> Result<Claims> {
-    decode_with(&key(ctx)?, token, crate::now())
+    let now = crate::now();
+    match decode_with(&key(ctx)?, token, now) {
+        Err(Error::Unauthorized) => {
+            let previous = previous_keys(ctx)?;
+            previous.iter().find_map(|key| decode_with(key, token, now).ok()).ok_or(Error::Unauthorized)
+        }
+        result => result,
+    }
 }

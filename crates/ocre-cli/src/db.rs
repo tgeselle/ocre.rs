@@ -19,8 +19,17 @@ use crate::{
 /// Seed data, relative to the app root.
 pub const SEEDS: &str = "db/seeds.sql";
 
+/// Schema dump written by `ocre db schema`, relative to the app root.
+pub const SCHEMA: &str = "db/schema.sql";
+
+/// Every table, index, view and trigger of the app, without SQLite's and
+/// D1's own (`sqlite_*`, `_cf_*`, `d1_migrations`).
+const SCHEMA_QUERY: &str = "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL \
+     AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\' AND name != 'd1_migrations' \
+     ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 ELSE 2 END, tbl_name, name";
+
 /// Wrangler's local D1 databases, relative to the app root.
-const LOCAL_STATE: &str = ".wrangler/state/v3/d1";
+pub(crate) const LOCAL_STATE: &str = ".wrangler/state/v3/d1";
 
 /// `ocre migrate --status`: wrangler's table on screen, pending names in the report.
 pub fn status(remote: bool, json: bool) -> CliResult {
@@ -72,7 +81,7 @@ pub fn reset(json: bool) -> CliResult {
 
 /// `--yes` answers wrangler's "database unavailable during import" prompt,
 /// which would otherwise hang agents on remote imports.
-fn load_seeds(wrangler: &Wrangler, database: &str, remote: bool) -> Result<String, CliError> {
+pub(crate) fn load_seeds(wrangler: &Wrangler, database: &str, remote: bool) -> Result<String, CliError> {
     wrangler.run(&["d1", "execute", database, "--file", SEEDS, target(remote), "--yes"])?;
     Ok(format!("loaded {SEEDS} ({})", target(remote)))
 }
@@ -100,8 +109,50 @@ pub fn sql(query: &str, remote: bool, json: bool) -> CliResult {
     Ok(Report { rows: Some(rows), remote, ..Report::new("sql") })
 }
 
+/// `ocre db schema`: the database's current `CREATE` statements in
+/// `db/schema.sql` (Rails' `structure.sql`), for reading and for
+/// `ocre g migration rebuild_<table>`. Migrations stay the source of truth.
+pub fn schema(remote: bool, _json: bool) -> CliResult {
+    let project = Project::find()?;
+    let output = Wrangler::new(&project.root, Echo::Capture).run(&[
+        "d1",
+        "execute",
+        &project.database_name,
+        "--command",
+        SCHEMA_QUERY,
+        target(remote),
+        "--json",
+    ])?;
+    let statements: Vec<Statement> = serde_json::from_str(&output)
+        .map_err(|err| CliError::new(format!("unexpected `wrangler d1 execute --json` output: {err}")))?;
+    let path = project.root.join(SCHEMA);
+    let existed = path.exists();
+    std::fs::create_dir_all(project.root.join("db"))?;
+    std::fs::write(&path, schema_sql(&statements, remote))?;
+    let (created, updated) =
+        if existed { (vec![], vec![SCHEMA.to_owned()]) } else { (vec![SCHEMA.to_owned()], vec![]) };
+    Ok(Report { created, updated, remote, ..Report::new("db schema") })
+}
+
+/// The dump: a header, then one statement per paragraph.
+fn schema_sql(statements: &[Statement], remote: bool) -> String {
+    let source = if remote { "remote" } else { "local" };
+    let mut out = format!(
+        "-- Schema of the {source} D1 database, written by `ocre db schema` from sqlite_master.\n\
+         -- A snapshot for reading: migrations/ are the source of truth. Run `ocre db schema` again after `ocre migrate`.\n"
+    );
+    for row in statements.iter().flat_map(|statement| &statement.results) {
+        if let Some((_, Value::String(sql))) = row.0.first() {
+            out.push('\n');
+            out.push_str(sql);
+            out.push_str(";\n");
+        }
+    }
+    out
+}
+
 /// Names from the "Migrations to be applied" table of `wrangler d1 migrations list`.
-fn pending_migrations(output: &str) -> Vec<String> {
+pub(crate) fn pending_migrations(output: &str) -> Vec<String> {
     output
         .lines()
         .filter_map(|line| line.trim().strip_prefix('│')?.strip_suffix('│'))

@@ -12,7 +12,7 @@ This page describes every configuration file of an Ocre app (`wrangler.toml`, `.
 
 | File | Written by | Committed | Purpose |
 |---|---|---|---|
-| `wrangler.toml` | `ocre new`, then generators (`ocre g job`, `schedule`, `cache`, `--realtime`, attachments) and `ocre deploy` (KV ids) | yes | Worker name, build command, bindings (D1, R2, KV, Queues, Durable Objects, email), plain-text variables, cron schedules |
+| `wrangler.toml` | `ocre new`, then generators (`ocre g job`, `schedule`, `cache`, `auth`, `--realtime`, attachments) and `ocre deploy` (KV ids) | yes | Worker name, build command, logs, bindings (D1, R2, KV, Queues, Durable Objects, rate limiting, email), plain-text variables, cron schedules |
 | `.dev.vars` | `ocre new` | no (`.gitignore`) | Secrets and variable overrides for `ocre dev` only |
 | `Cargo.toml` | `ocre new`, then `ocre g api --graphql` and `--realtime` (features) | yes | Rust dependencies, Ocre features, API-only mode |
 | `rust-toolchain.toml` | `ocre new` | yes | Stable Rust with the `wasm32-unknown-unknown` target |
@@ -31,9 +31,17 @@ compatibility_date = "2026-09-01"
 command = "cargo install -q \"worker-build@^0.8\" && worker-build ${OCRE_BUILD:---release}"
 
 # Files in public/ (robots.txt, images, CSS...) are served by Cloudflare before
-# the Worker runs: free, and not counted as Worker requests.
+# the Worker runs: free, and not counted as Worker requests. public/_headers
+# sets their headers (e.g. long caching); a single-page app would add
+# not_found_handling = "single-page-application".
 [assets]
 directory = "public"
+
+# Workers Logs: every request (method, URL, status, CPU time) and every
+# console line, searchable in the dashboard. Free plan: 200,000 events a day,
+# kept 3 days; beyond that, logs are sampled, never billed.
+[observability]
+enabled = true
 
 # The first `ocre deploy` creates this database; no database_id needed.
 [[d1_databases]]
@@ -84,6 +92,10 @@ MAIL_FROM = "docs-app <noreply@example.com>"
 
 `directory = "public"`: files in `public/` are served by Workers Static Assets before the Worker runs. Requests that match a file cost no Worker request and no CPU ([billing](https://developers.cloudflare.com/workers/static-assets/billing-and-limitations/)). Limits on the free plan: 20,000 files per Worker version, 25 MiB per file ([limits](https://developers.cloudflare.com/workers/platform/limits/#static-assets), September 2026).
 
+### [observability]
+
+`enabled = true` turns on [Workers Logs](https://developers.cloudflare.com/workers/observability/logs/workers-logs/): each request (method, URL, status, CPU time) and each line the Worker logs, including Ocre's `[ocre]` error lines, is kept and searchable in the dashboard (Workers & Pages > your Worker > Logs). On the free plan: 200,000 log events a day, kept 3 days; above that, events are sampled, never billed (September 2026). Remove the table or set `enabled = false` to keep only `npx wrangler tail` (live logs, nothing stored). Ocre reads nothing from it. See [Deployment](../guides/deployment.md#logs).
+
 ### [[d1_databases]]
 
 | Key | Value |
@@ -107,7 +119,7 @@ If the Worker runs without the binding anyway (a hand-written `wrangler deploy`)
 
 ### [vars]
 
-Plain-text Worker variables, deployed with the code on every `ocre deploy`. `ocre new` sets [`MAIL_FROM`](#mail_from) and leaves [`MAIL_ADAPTER`](#mail_adapter) commented out. Add [`ALLOWED_ORIGINS`](#allowed_origins) here when another site calls the app, and your own variables (read them with `ctx.env().var("NAME")`, see [Reading your own variables](#reading-your-own-variables)). Never put secrets under `[vars]`: the file is committed.
+Plain-text Worker variables, deployed with the code on every `ocre deploy`. `ocre new` sets [`MAIL_FROM`](#mail_from) and leaves [`MAIL_ADAPTER`](#mail_adapter) commented out. Add [`ALLOWED_ORIGINS`](#allowed_origins) here when another site calls the app, [`ALLOWED_HOSTS`](#allowed_hosts) to answer only on your own host names, and your own variables (read them with `ctx.env().var("NAME")`, see [Reading your own variables](#reading-your-own-variables)). Never put secrets under `[vars]`: the file is committed.
 
 ### [[send_email]]
 
@@ -216,6 +228,29 @@ binding = "CACHE"
 
 `binding` must be `CACHE`. For each `[[kv_namespaces]]` entry without an `id`, `ocre deploy` looks for a namespace titled `<name>-<binding>` (lowercased, `_` becomes `-`: `docs-app-cache`), creates it when missing, and writes `id = "<id>"` after the `binding` line. Commit that change so every machine deploys to the same namespace. Without the binding, `ocre::cache` functions fail with a 500 whose log says ``KV binding `CACHE` is missing (...). Fix: run `ocre g cache`, which adds [[kv_namespaces]] binding = "CACHE" to wrangler.toml``. See [Caching](../guides/caching.md).
 
+### [[ratelimits]]
+
+Added by `ocre g auth`:
+
+```toml
+# `ocre g auth`: login, sign-up, token and emailed-link routes allow 10 attempts
+# a minute per IP address and Cloudflare location (Workers Rate Limiting,
+# free plan, no storage used). `period` is 10 or 60 seconds.
+[[ratelimits]]
+name = "AUTH_RATE_LIMITER"
+namespace_id = "2964407"
+simple = { limit = 10, period = 60 }
+```
+
+| Key | Value | Meaning |
+|---|---|---|
+| `name` | `AUTH_RATE_LIMITER` | The binding the generated `throttle` (in `src/auth_api.rs`) passes to `ocre::security::rate_limit` |
+| `namespace_id` | an integer, derived from the app name | Bindings with the same id share counters across the account's Workers: keep it unique per app |
+| `simple.limit` | `10` | Requests allowed per key and period; the next one gets `429 Too Many Requests` |
+| `simple.period` | `60` | The window in seconds: `10` or `60` only |
+
+Add more `[[ratelimits]]` entries with other names for your own routes and call `ocre::security::rate_limit(&ctx, "NAME", &key).await?` (see [Sessions, flash and security](../guides/security.md#rate-limiting)). The binding is on the free plan and uses no D1, KV or Durable Object operation; counters are per Cloudflare location and approximate; `ocre dev` simulates it. Without the binding, `rate_limit` fails with a 500 whose log says ``rate limiting binding `AUTH_RATE_LIMITER` is missing (...). Fix: add to wrangler.toml`` followed by the entry to add.
+
 ### Binding names Ocre requires
 
 | Binding | wrangler.toml entry | Used by | Added by |
@@ -228,6 +263,8 @@ binding = "CACHE"
 | `EMAIL` | `[[send_email]]` | `ocre::mail` with `MAIL_ADAPTER = "cloudflare"` | commented out by `ocre new` |
 
 The names are constants of the crate ([`ocre::storage::STORAGE_BINDING`](/api/ocre/storage/constant.STORAGE_BINDING.html), [`ocre::jobs::QUEUE_BINDING`](/api/ocre/jobs/constant.QUEUE_BINDING.html), [`ocre::cache::CACHE_BINDING`](/api/ocre/cache/constant.CACHE_BINDING.html), [`ocre::realtime::CHANNELS_BINDING`](/api/ocre/realtime/constant.CHANNELS_BINDING.html), [`ocre::mail::EMAIL_BINDING`](/api/ocre/mail/constant.EMAIL_BINDING.html)); they cannot be renamed. Every missing-binding error is an `Error::Internal`: the visitor gets a 500 page (or `{"error": {"status": 500, "message": ...}}` from JSON handlers), and the Worker log gets the full message prefixed with `[ocre]`, including the fix.
+
+Rate limiting bindings are the exception: `ocre::security::rate_limit` takes the binding name as an argument, so `AUTH_RATE_LIMITER` is only the name the `ocre g auth` code uses (`RATE_LIMITER` in `src/auth_api.rs`).
 
 ## .dev.vars
 
@@ -263,7 +300,7 @@ Cloudflare gives a Worker two kinds of text values, read the same way in code:
 | Where | `wrangler.toml`, committed | Encrypted on Cloudflare; never in the repository |
 | Set in production | edit `wrangler.toml`, then `ocre deploy` | `npx wrangler secret put NAME` (prompts for the value) |
 | Set for `ocre dev` | `[vars]`, or `.dev.vars` to override | `.dev.vars` |
-| Use for | Sender address, adapter names, allowed origins | `SECRET_KEY_BASE`, API keys |
+| Use for | Sender address, adapter names, allowed origins and hosts | `SECRET_KEY_BASE`, API keys, OAuth client secrets |
 
 ```sh
 npx wrangler secret put RESEND_API_KEY      # paste the key when asked
@@ -282,7 +319,7 @@ The `ocre` crate reads the following names.
 - Format: at least 64 characters. `ocre secret` prints a new random value of 128 hex characters (`--json`: `{"command":"secret","ok":true,"secret":"..."}`).
 - Development: `ocre new` writes one to `.dev.vars`.
 - Production: `ocre deploy` checks `wrangler secret list`; when the Worker has no `SECRET_KEY_BASE` (first deploy), it generates one and uploads it with the deploy (`wrangler deploy --secrets-file`, from a temporary `.wrangler/ocre-secrets.env` readable only by you and deleted afterwards) and prints `Created the SECRET_KEY_BASE secret on Cloudflare`. An existing secret is never replaced. If `wrangler secret list` fails for another reason than a missing Worker, the deploy stops rather than risk overwriting it.
-- Rotation: `ocre secret | npx wrangler secret put SECRET_KEY_BASE`. Every session cookie and JWT signed with the old value becomes invalid: everyone is signed out.
+- Rotation: `ocre secret | npx wrangler secret put SECRET_KEY_BASE` alone makes every session cookie and JWT signed with the old value invalid: everyone is signed out. To rotate without signing anyone out, keep the old value in [`SECRET_KEY_BASE_PREVIOUS`](#secret_key_base_previous) first.
 - Errors: when it is missing or shorter than 64 characters, requests that read an existing session cookie or change the session answer 500 and log (captured from `ocre dev` with the line removed from `.dev.vars`):
 
 ```text
@@ -290,6 +327,21 @@ The `ocre` crate reads the following names.
 ```
 
 The short-value message is `SECRET_KEY_BASE is shorter than 64 characters.` followed by the same fix. Requests that do not use the session (no cookie, no flash) still work, which is why a missing secret can go unnoticed until the first form submission. See [Sessions, flash and security](../guides/security.md).
+
+### SECRET_KEY_BASE_PREVIOUS
+
+- Kind: secret. Optional; set only while rotating `SECRET_KEY_BASE`.
+- Meaning: previous `SECRET_KEY_BASE` values (Rails' `cookies_rotations`). A session cookie encrypted with one of them is still read, then re-encrypted with the current key in the same response; a JWT signed with one of them still verifies until it expires.
+- Format: comma-separated, newest first; spaces around values are ignored; each value at least 64 characters.
+- Production: Worker secrets cannot be read back, so upload the value you are about to replace first:
+
+```sh
+npx wrangler secret put SECRET_KEY_BASE_PREVIOUS   # paste the current SECRET_KEY_BASE
+ocre secret | npx wrangler secret put SECRET_KEY_BASE
+```
+
+- Removal: `npx wrangler secret delete SECRET_KEY_BASE_PREVIOUS` once the longest session lifetime (two weeks for `ocre g auth`) and the JWT lifetime (one hour) have passed; visitors who did not come back by then start with an empty session.
+- Errors: a value shorter than 64 characters makes every request that uses the session or a JWT answer 500 and log `SECRET_KEY_BASE_PREVIOUS has a value shorter than 64 characters. Fix: list old SECRET_KEY_BASE values, comma-separated, newest first`.
 
 ### ALLOWED_ORIGINS
 
@@ -305,6 +357,31 @@ ALLOWED_ORIGINS = "https://app.example.com, https://admin.example.com"
 - Default: unset or empty, no CORS layer at all: only same-origin browser requests may change data.
 - Development: add it to `[vars]` (or `.dev.vars`) with the frontend's local origin, such as `http://localhost:5173`.
 - Errors: none; a malformed entry is dropped silently, so check the spelling when a request still gets 403. See [Sessions, flash and security](../guides/security.md).
+
+### ALLOWED_HOSTS
+
+- Kind: variable (`[vars]`). Optional.
+- Meaning: the host names the app answers to (Rails' `config.hosts`). A request for any other `Host` gets a plain-text `403 Forbidden: blocked host. Add it to ALLOWED_HOSTS to allow it.` before the session, CSRF check or any handler runs.
+- Format: comma-separated host names, case-insensitive, without scheme or port. An entry starting with `.` also allows every subdomain: `.example.com` allows `example.com` and `www.example.com`.
+
+```toml
+[vars]
+ALLOWED_HOSTS = "example.com, .example.com"
+```
+
+- Default: unset or empty, every host is allowed.
+- Always allowed: `localhost`, `127.0.0.1` and `[::1]`, with any port, so `ocre dev` keeps working.
+- Why on Workers: Cloudflare only routes your own host names to the Worker, but the same Worker also answers on `<name>.<subdomain>.workers.dev` and on preview URLs. Listing only your custom domain keeps visitors and search engines on it (list the `workers.dev` host too while you still use it).
+- Errors: none at startup; a typo blocks your own domain with the 403 above.
+
+### OAuth client secrets
+
+- Names: `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET`, `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` (`client_id_secret` and `client_secret_secret` of `ocre::oauth::GITHUB` and `GOOGLE`).
+- Kind: secrets. Required for each provider given to `ocre g auth --oauth`.
+- Values: the client id and secret of the OAuth app you register with the provider, with the callback URL `https://<your host>/auth/<provider>/callback` (and `http://localhost:8787/auth/<provider>/callback` for `ocre dev`, in a second OAuth app for GitHub).
+- Development: `ocre g auth --oauth` appends commented lines to `.dev.vars`; uncomment them and fill in the values.
+- Production: `npx wrangler secret put GITHUB_CLIENT_ID` and `npx wrangler secret put GITHUB_CLIENT_SECRET`, or `ocre secrets push GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET --file <env file>`; `ocre secrets list` shows which are set.
+- Errors (500, logged) when one is missing: pressing "Continue with GitHub" logs ``the GITHUB_CLIENT_ID secret is not set. Fix: add it to .dev.vars, and `npx wrangler secret put GITHUB_CLIENT_ID` ``; the callback logs ``the GITHUB_CLIENT_SECRET secret is not set. Fix: put it in .dev.vars for `ocre dev` and run `npx wrangler secret put GITHUB_CLIENT_SECRET` for production``. See [Authentication](../guides/authentication.md#continue-with-github-or-google).
 
 ### MAIL_ADAPTER
 

@@ -24,6 +24,8 @@ serde.workspace = true
 wasm-bindgen.workspace = true
 serde_json = "1.0.151"
 tower-service = "0.3.3"
+# `ocre::security::ContentSecurityPolicy` and `PermissionsPolicy` are tower layers.
+tower-layer = "0.3.3"
 # Encrypted session cookies (AES-256-GCM, key derived with HKDF).
 cookie = { version = "0.18.2", features = ["private", "key-expansion", "percent-encode"] }
 tower-http = { version = "0.7.1", default-features = false, features = ["cors"] }
@@ -39,6 +41,10 @@ sha2 = "0.10.9"
 memchr = "2.8.3"
 serde_urlencoded = "0.7.1"
 futures-util = { version = "0.3", default-features = false }
+# Encrypted model columns (`ocre::encryption`): AES-256-GCM with keys derived
+# by HKDF from SECRET_KEY_BASE; both crates already come with `cookie`.
+aes-gcm = { version = "0.10.3", default-features = false, features = ["aes", "alloc"] }
+hkdf = "0.12.4"
 
 [features]
 default = ["html"]

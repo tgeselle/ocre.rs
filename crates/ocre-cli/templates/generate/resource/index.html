@@ -1,0 +1,13 @@
+{% extends "layout.html" %}
+
+{% block title %}<%= human_plural %>{% endblock %}
+
+{% block content %}
+<h1><%= human_plural %></h1>
+
+<ul>
+  {% for <%= singular %> in <%= plural %> %}
+  <li><a href="{{ paths::show(<%= singular %>.id) }}"><%= human_singular %> {{ <%= singular %>.id }}</a></li>
+  {% endfor %}
+</ul>
+{% endblock %}

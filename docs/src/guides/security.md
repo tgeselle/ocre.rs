@@ -1,6 +1,6 @@
 # Sessions, flash and security
 
-This guide shows how an Ocre app keeps per-visitor state in an encrypted session cookie, shows one-time flash messages, and what `ocre::serve` does for every request to protect it: cross-site request (CSRF) checks, CORS, security headers and cookie flags. It ends with what is not included, so you know what to add yourself.
+This guide shows how an Ocre app keeps per-visitor state in an encrypted session cookie, shows one-time flash messages, and what `ocre::serve` does for every request to protect it: host checks, cross-site request (CSRF) checks, CORS, security headers and cookie flags. It then covers the helpers an app calls itself (rate limiting, safe queries and parameters, files, user HTML) and ends with what is not included, so you know what to add yourself.
 
 ## Before you start
 
@@ -10,16 +10,17 @@ This guide shows how an Ocre app keeps per-visitor state in an encrypted session
 
 ## What every request goes through
 
-`ocre::serve(routes(), req, env)` wraps the app's router with four layers, outermost first:
+`ocre::serve(routes(), req, env)` wraps the app's router with five layers, outermost first:
 
 | Order | Layer | Effect |
 |---|---|---|
 | 1 | Security headers | Adds `nosniff`, `SAMEORIGIN` framing, a referrer policy and more to every response; HSTS on HTTPS |
-| 2 | CORS | Only when `ALLOWED_ORIGINS` is set: answers preflights and adds `Access-Control-*` headers for those origins |
-| 3 | Cross-origin protection (CSRF) | Refuses unsafe requests a browser sends from another site, with 403 |
-| 4 | Session | Decrypts the session cookie on first use and sends `Set-Cookie` when the handler changed it |
+| 2 | Host authorization | Only when `ALLOWED_HOSTS` is set: requests for other host names get 403 |
+| 3 | CORS | Only when `ALLOWED_ORIGINS` is set: answers preflights and adds `Access-Control-*` headers for those origins |
+| 4 | Cross-origin protection (CSRF) | Refuses unsafe requests a browser sends from another site, with 403 |
+| 5 | Session | Decrypts the session cookie on first use and sends `Set-Cookie` when the handler changed it |
 
-None of these layers makes a D1, KV or network call: they cost a little CPU and no free-plan quota.
+None of these layers makes a D1, KV or network call: they cost a little CPU and no free-plan quota. Generated full-stack apps add a Content-Security-Policy and a Permissions-Policy layer in `src/lib.rs` (see [Content-Security-Policy and Permissions-Policy](#content-security-policy-and-permissions-policy)).
 
 ## Sessions
 
@@ -38,9 +39,9 @@ Every method returns `ocre::Result`, so use `?`. Changes are sent back as one `S
 
 The session is a cookie, like Rails' default cookie store: no D1 rows, no KV operations, nothing on the server.
 
-- **Encrypted and authenticated.** The cookie value is JSON encrypted with AES-256-GCM, with a key derived from `SECRET_KEY_BASE`. Clients can neither read nor change it. A cookie that does not decrypt (tampered, truncated, or encrypted with an older key) is ignored: the request starts with an empty session, no error.
+- **Encrypted and authenticated.** The cookie value is JSON encrypted with AES-256-GCM, with a key derived from `SECRET_KEY_BASE`. Clients can neither read nor change it. A cookie that does not decrypt (tampered, truncated, or encrypted with a key that is neither `SECRET_KEY_BASE` nor listed in `SECRET_KEY_BASE_PREVIOUS`) is ignored: the request starts with an empty session, no error.
 - **4 KB at most.** Browsers drop cookies over 4096 bytes (name, value and attributes). When a change would make the cookie larger, the response is a 500 and the log says `the session cookie would be <n> bytes; browsers drop cookies over 4096. Fix: store ids in the session, not records`. Store ids and short strings, never records, and never secrets such as tokens or passwords.
-- **Cookie flags.** The cookie is `_ocre_session`, `Path=/`, `HttpOnly` (JavaScript cannot read it), `SameSite=Lax`, and `Secure` when the request came over HTTPS (always on `*.workers.dev`; not on `http://localhost`). It has no `Max-Age`: it lasts until the browser session ends or the app clears it.
+- **Cookie flags.** The cookie is `_ocre_session`, `Path=/`, `HttpOnly` (JavaScript cannot read it), `SameSite=Lax`, and `Secure` when the request came over HTTPS (always on `*.workers.dev`; not on `http://localhost`). By default it has no `Max-Age`: it lasts until the browser session ends or the app clears it; `session.remember_for(seconds)` makes it persistent (see [Expiry and remember me](#expiry-and-remember-me)).
 - **Clearing.** When the session becomes empty, the cookie is deleted (`Max-Age=0`).
 
 ### Store a value in the session
@@ -197,13 +198,13 @@ Where it comes from:
 
 Two keys are derived from it: the session cookie key, and (with a fixed label) the HS256 key of `ocre::jwt` (see [Authentication](authentication.md#json-clients-jwts-and-api-keys)). When the secret is missing or shorter than 64 characters, requests that write the session, or read a session cookie they received, answer 500, and the log names the fix: ``the SECRET_KEY_BASE secret is not set. Fix: run `ocre secret`, put the value in .dev.vars as SECRET_KEY_BASE=... for `ocre dev` (`ocre new` does this), and deploy with `ocre deploy`, which uploads it``.
 
-**Rotating the secret signs everyone out.** Existing cookies no longer decrypt, so every visitor starts with an empty session, and every JWT fails to verify. This is the way to invalidate all sessions at once (there is no server-side session list). To rotate in production:
+**Replacing the secret alone signs everyone out.** Existing cookies no longer decrypt, so every visitor starts with an empty session, and every JWT fails to verify. This is the way to invalidate all cookie sessions at once, for example after a leak:
 
 ```sh
 ocre secret | npx wrangler secret put SECRET_KEY_BASE
 ```
 
-Changing the value in `.dev.vars` and restarting `ocre dev` shows the effect: a browser that was signed in is redirected to `/login` by the next `CurrentUser` page, and an old JWT gets `401 {"error":{"message":"Unauthorized","status":401}}`.
+Changing the value in `.dev.vars` and restarting `ocre dev` shows the effect: a browser that was signed in is redirected to `/login` by the next `CurrentUser` page, and an old JWT gets `401 {"error":{"message":"Unauthorized","status":401}}`. For a planned rotation that keeps everyone signed in, see [Rotating SECRET_KEY_BASE without signing everyone out](#rotating-secret_key_base-without-signing-everyone-out).
 
 ## Cross-site request forgery (CSRF)
 
@@ -263,8 +264,9 @@ Set-Cookie: _ocre_session=w+0WnN%2FE6WOBxLRb+F69geJp1HvSBUuO9%2FQlgsaoC1cNBkPpeg
 Consequences for app code:
 
 - Change data only in `POST`, `PUT`, `PATCH` and `DELETE` handlers. A `GET` handler that changes data is not protected. Generated scaffolds follow this (`POST /posts/{id}/delete`, `POST /logout`).
-- htmx requests (`hx-post`, `hx-delete`...) are same-origin fetches and pass.
+- htmx requests (`hx-post`, `hx-delete`...) and your own `fetch()` calls from the app's pages are same-origin and pass. There is no token to put in a `<meta>` tag or send in a header (Rails' `csrf_meta_tags`): the browser's `Sec-Fetch-Site` header does that job.
 - The session cookie is also `SameSite=Lax`: browsers do not send it with cross-site `POST`s at all, a second layer for the same attack.
+- A refused request never reaches a handler, so nothing needs undoing when the check fails: no session is read, and a "remember me" cookie cannot sign it in.
 
 ## ALLOWED_ORIGINS: another site calling the app
 
@@ -382,7 +384,7 @@ Rules:
 - HTML built with `format!` is not escaped. Build HTML in templates, or escape values yourself.
 - Values inside `<script>` or event attributes need JSON encoding, not HTML escaping; avoid putting user input there.
 
-## SQL parameters
+## SQL injection
 
 D1 queries take `?1, ?2` placeholders and a `params![...]` list; the values never become SQL text, so they cannot inject SQL:
 
@@ -390,26 +392,197 @@ D1 queries take `?1, ?2` placeholders and a `params![...]` list; the values neve
 ctx.db()?.first("SELECT * FROM users WHERE email = ?1", params![email]).await
 ```
 
-Never build SQL with `format!` from user input. When a column or sort order comes from the request, match it against a fixed list of allowed names first.
+The `Query` builder (`post::query().eq("published", true)...`) binds every value the same way, and takes column names, joins, `where_sql` fragments and sort terms as `&'static str`: they can only come from your code, never from request text. `is_in` with an empty list matches no row instead of writing invalid or unbounded SQL, and `contains`, `starts_with` and `ends_with` escape `%` and `_` in the searched text.
+
+Never build SQL with `format!` from user input. When a column or sort order comes from the request, `match` it onto a fixed column name:
+
+```rust,check
+// src/post_search.rs
+use axum::{
+    Json, Router,
+    extract::{Query as Params, State},
+    routing::get,
+};
+use ocre::{Ctx, Direction, Result};
+use serde::Deserialize;
+
+use crate::models::post::{self, Post};
+
+pub fn routes() -> Router<Ctx> {
+    Router::new().route("/posts/search", get(search))
+}
+
+/// The only two parameters read from the query string; others are ignored.
+#[derive(Deserialize)]
+struct SearchParams {
+    #[serde(default)]
+    q: String,
+    sort: Option<String>,
+}
+
+async fn search(State(ctx): State<Ctx>, Params(params): Params<SearchParams>) -> Result<Json<Vec<Post>>> {
+    // The column comes from this list, never from the request text.
+    let (column, direction) = match params.sort.as_deref() {
+        Some("title") => ("title", Direction::Asc),
+        _ => ("created_at", Direction::Desc),
+    };
+    let posts = post::query()
+        .eq("published", true)
+        .contains("title", &params.q)
+        .order_by(column, direction)
+        .limit(20)
+        .all(&ctx.db()?)
+        .await?;
+    Ok(Json(posts))
+}
+```
+
+`GET /posts/search?q=rust&sort=title` runs `SELECT * FROM posts WHERE published = ?1 AND title LIKE ?2 ESCAPE '\' ORDER BY title ASC LIMIT ?3`; `sort=id;DROP TABLE posts` sorts by `created_at`.
+
+## Only the fields you declare (strong parameters)
+
+Handlers read forms and JSON bodies into a struct (`Form<PostForm>`, `Json<NewPost>`, `Query<SearchParams>`). serde fills only the fields the struct declares and ignores the others, so the struct is the allowlist that Rails' `params.require(...).permit(...)` builds: a request that adds `user_id=1` or `"admin": true` changes nothing unless the struct has that field. Keep fields a visitor must not choose out of the form structs, and set them in the handler instead, like the owner from `CurrentUser` (see [Records that belong to a user](authentication.md#records-that-belong-to-a-user)). Add `#[serde(deny_unknown_fields)]` to a struct to reject such requests instead of ignoring the extra fields.
+
+Types do the rest of Rails' parameter checks: a missing field, or text where the struct wants a number, a `bool` or a list, is rejected before the handler runs (400 or 422), so a handler never receives `nil` or an array where it expected one value. Optional fields are `Option<T>` (or `#[serde(default)]`), which you handle explicitly.
+
+## Validating formats
+
+`Validator::format(field, value, |c| ...)` checks every character of the whole value against a predicate. There is no regular expression engine in Ocre, so Rails' pitfall of `^` and `$` matching at line breaks (a value with a newline and a script after a valid first line) does not exist: the whole value passes or it does not. For position rules, add a `check` (`value.starts_with("https://")`), and for common formats use `email`, `uuid`, `date`, `datetime`, `decimal` and the other `Validator` methods. If you add the `regex` crate yourself, anchor patterns with `\A` and `\z` (or `^`/`$` without the multi-line flag), which match only the start and end of the text.
+
+## Expiry and remember me
+
+`session.expire_in(seconds)?` stores an expiry time inside the encrypted cookie; after it the session starts empty (a copied or replayed cookie stops working too). `session.remember_for(seconds)?` does the same and makes the cookie persistent (`Max-Age`), for "Remember me". `session.expires_at()?` reads it; `session.clear()?` removes it. Keep balances, nonces and other state that must not be replayed in D1, not in the cookie. Server-side revocation of individual sessions is generated by `ocre g auth --db-sessions`.
+
+## Rotating SECRET_KEY_BASE without signing everyone out
+
+List old values (newest first, comma-separated) in the `SECRET_KEY_BASE_PREVIOUS` secret: cookies encrypted with them are still read and re-encrypted with the current key, and JWTs signed with them still verify. Worker secrets cannot be read back, so keep the value you replace:
+
+```sh
+npx wrangler secret put SECRET_KEY_BASE_PREVIOUS   # paste the current value
+ocre secret | npx wrangler secret put SECRET_KEY_BASE
+```
+
+Remove `SECRET_KEY_BASE_PREVIOUS` after the longest session lifetime. `ocre secrets list` shows which secrets are set locally and in production; `ocre secrets push NAME... --file <env file>` uploads values.
+
+## Content-Security-Policy and Permissions-Policy
+
+Generated apps add both in `src/lib.rs` (`content_security_policy()` and `permissions_policy()`): scripts only from the app and `unpkg.com` (htmx), no inline scripts or `on*=` handlers, `object-src 'none'`, `frame-ancestors 'self'`; camera, microphone, geolocation, payment and USB off. Policies are `ocre::security::ContentSecurityPolicy` and `PermissionsPolicy` values added with `.layer(...)`; a handler's own header, or a nested router's layer, overrides them for a route. `.report_only()` sends `Content-Security-Policy-Report-Only`; `.report_uri("/csp-reports")` / `.report_to("csp")` collect violations. For an inline script add `NONCE` to `script_src`, take `nonce: ocre::security::CspNonce` in the handler and write `<script nonce="{{ nonce }}">` (a new random nonce per request).
+
+## Rate limiting
+
+`ocre::security::rate_limit(&ctx, "BINDING", &key).await?` counts one request for `key` against a [Workers Rate Limiting binding](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/) and returns `Error::TooManyRequests` (429, "Too many requests. Try again later.") when the key is over the binding's limit. Rails' `rate_limit to:, within:, by:` maps onto the binding's `limit`, its `period` (10 or 60 seconds) and the key you build. `ocre g auth` already limits its login, sign-up, emailed-link, token and deletion routes with the `AUTH_RATE_LIMITER` binding (see [Authentication](authentication.md#rate-limiting)).
+
+For your own route, add a binding with its own name and `namespace_id` to `wrangler.toml`:
+
+```toml
+[[ratelimits]]
+name = "FEEDBACK_RATE_LIMITER"
+namespace_id = "4242"   # any integer, unique in your Cloudflare account
+simple = { limit = 3, period = 60 }
+```
+
+and call it before the expensive part of the handler:
+
+```rust,check
+// src/feedback.rs
+use axum::{
+    Form, Router,
+    extract::State,
+    http::HeaderMap,
+    response::Redirect,
+    routing::post,
+};
+use ocre::{Ctx, Error, Result, Session, security::rate_limit};
+use serde::Deserialize;
+
+pub fn routes() -> Router<Ctx> {
+    Router::new().route("/feedback", post(create))
+}
+
+#[derive(Deserialize)]
+struct FeedbackForm {
+    message: String,
+}
+
+async fn create(
+    State(ctx): State<Ctx>,
+    headers: HeaderMap,
+    session: Session,
+    Form(form): Form<FeedbackForm>,
+) -> Result<Redirect> {
+    // One counter per client IP address (Cloudflare's CF-Connecting-IP).
+    let ip = ocre::remote_ip(&headers).map_or_else(|| "unknown".to_owned(), |ip| ip.to_string());
+    rate_limit(&ctx, "FEEDBACK_RATE_LIMITER", &format!("feedback:{ip}")).await?;
+    if form.message.trim().is_empty() {
+        return Err(Error::bad_request("write a message"));
+    }
+    // ... store or email the message ...
+    session.flash("notice", "Thanks for your feedback.")?;
+    Ok(Redirect::to("/"))
+}
+```
+
+Past three requests a minute from the same address, `POST /feedback` gets the 429 error page (JSON handlers answer `{"error":{"status":429,"message":"Too many requests. Try again later."}}`). Key by user id (`format!("export:{}", user.id)`) for signed-in actions. The binding is on the free plan, costs no D1, KV or Durable Object operation, and `ocre dev` simulates it. Counters are per Cloudflare location and approximate, so it is a brake, not an exact quota. A missing binding is a 500 whose log names the `[[ratelimits]]` entry to add.
+
+## HTTPS and HSTS
+
+Workers are reached over HTTPS: `*.workers.dev` and custom domains get certificates from Cloudflare. On HTTPS requests Ocre adds `Strict-Transport-Security: max-age=63072000` (two years) and marks the session cookie `Secure`. What Rails' `force_ssl` does beyond that is configured outside the app or by hand:
+
+- **Redirect HTTP to HTTPS**: on a custom domain, turn on Always Use HTTPS in the Cloudflare dashboard (SSL/TLS > Edge Certificates); Cloudflare then redirects before the Worker runs.
+- **Other HSTS options** (`includeSubDomains`, `preload`): set the header yourself, in a handler or a layer in `src/lib.rs`; a header set by the app wins over Ocre's.
+
+## Files: downloads and uploads
+
+- **Sending data** (Rails' `send_data`): `ocre::storage::send_data(bytes, "report.csv", "text/csv", Disposition::Download)` sets `Content-Type`, `Content-Length` and a `Content-Disposition` with a cleaned file name. Types a browser could run (HTML, SVG, XML, JavaScript) are sent as `application/octet-stream`, even with `Disposition::Inline`. When cells come from users, prefix values starting with `=`, `+`, `-` or `@` with `'` so spreadsheets do not run them as formulas.
+- **Sending stored files** (Rails' `send_file`): files live in R2, not on a disk, so there is no path to traverse. `ocre::storage::serve(&ctx, &attachment, &headers, Disposition::Inline)` streams an attachment by its random key, with the same type rules, `Range` and `If-None-Match`.
+- **Upload names**: the uploader's file name loses its directories (`../../x`, `C:\x`) and control characters and is cut to 200 characters; it is only shown in `Content-Disposition`, never used as the storage key (`<prefix>/<22 random characters>`). The R2 bucket is not public and nothing in it is executed; files reach browsers only through your handlers, so check that the user may see the record first. See [File storage](files.md).
+
+## User-supplied CSS and markup
+
+- `ocre::security::sanitize` drops `style` attributes and `<style>` elements, so user HTML cannot restyle the page (CSS injection, as in the MySpace worm) or load images through `url(...)`. Keep `style` out of the lists you pass to `sanitize_with`.
+- Never put user text inside a `<style>` element or a `style="..."` attribute; offer choices from a fixed list instead (a theme name that selects one of your CSS classes).
+- Markup languages (Markdown, Textile): convert with a library of your choice, then pass the resulting HTML through `sanitize` before inserting it with `|safe`, since these converters let raw HTML through.
+- The generated Content-Security-Policy is a second layer if some HTML slips through: scripts only from the app and `unpkg.com`, no `javascript:` URLs or `on*=` handlers, and fonts only from the app, so injected CSS cannot run code or load remote fonts (it still allows inline styles, which the generated layout uses).
+
+## Shell commands
+
+A Worker cannot start processes: there is no `system`, `exec` or shell, so command-line injection has no target. Code that must call another program does it over HTTP (`worker::Fetch`) with arguments encoded as JSON or form data, never pasted into a command string on the other side.
+
+## Dependency and code scanning
+
+Rails runs Brakeman and bundler-audit by default. For an Ocre app, run in the app directory, for example in CI next to `cargo test`:
+
+```sh
+cargo install cargo-audit --locked
+cargo audit                              # dependencies with known vulnerabilities (RustSec advisory database)
+cargo clippy --target wasm32-unknown-unknown -- -D warnings   # Rust lints on the Worker code
+```
+
+`cargo deny check advisories` (from `cargo-deny`) does the same check as `cargo audit` and can also enforce licenses and banned crates. Enable Dependabot or Renovate on the repository to get pull requests for updated crates. Ocre does not set these up in new apps.
+
+## More helpers
+
+| Need | Use |
+|---|---|
+| Only answer on your own host names (Rails' `config.hosts`) | `ALLOWED_HOSTS = "example.com, .example.com"` under `[vars]`; other hosts get 403 (localhost always passes) |
+| Redirect to a URL taken from the request | `ocre::security::url_from(&uri, &target)` returns it only for paths or URLs of this app (no open redirect, no CR/LF) |
+| Show user HTML | `ocre::security::sanitize(&html)` (Rails' safe list) or `sanitize_with`, `strip_tags`; insert with `\|safe` |
+| Data in a `<script>` | `ocre::security::json_escape`, `escape_javascript` |
+| Log parameters | `ocre::security::filter_parameters(query)` / `filter_json(&value)` hide passwords, tokens, keys, emails |
+| Password-protect a staging page | `ocre::security::BasicAuth` extractor, `auth.matches(user, password)`, `BasicAuth::challenge()` |
 
 ## What is not included
 
-Checked against the `ocre` crate: these protections are not built in.
-
-| Missing | What to do |
-|---|---|
-| Rate limiting | Login, sign-up, password-reset and token routes accept unlimited attempts. Add [Cloudflare rate limiting rules](https://developers.cloudflare.com/waf/rate-limiting-rules/) for them before going public (see [Authentication](authentication.md#before-going-public)) |
-| Content-Security-Policy | No CSP header is sent. Set one per response in a handler, or with an axum middleware in `routes()`. Generated layouts load htmx from `unpkg.com`, so a CSP must allow that origin (or serve htmx from `public/`) |
-| Server-side session revocation | Sessions last until logout, the browser session ends, or `SECRET_KEY_BASE` changes (which signs everyone out). There is no "sign out everywhere" for one user |
-| Session expiry | The cookie has no expiry time inside it; store a timestamp in the session and check it if you need one |
-| `Permissions-Policy`, `Cross-Origin-*-Policy` | Not sent; add them like any header |
-| Authentication and authorization | Generated by [`ocre g auth`](authentication.md); records are protected only by the checks your handlers make |
+- **Encrypted or signed cookies other than the session** (Rails' `cookies.encrypted` and `cookies.signed`): store such values in the session, which is encrypted.
+- **A `force_ssl` switch**: see [HTTPS and HSTS](#https-and-hsts).
+- **Roles, two-factor authentication and account lockout**: see [Authentication](authentication.md#what-is-not-included).
+- **Dependency scanning in new apps**: see [Dependency and code scanning](#dependency-and-code-scanning).
 
 ## See also
 
 - [Authentication](authentication.md): users, login, JWTs, API keys, ownership checks.
 - [Security model](../explanations/security-model.md): why Ocre chose these defaults.
 - [Configuration](../reference/configuration.md): `SECRET_KEY_BASE`, `ALLOWED_ORIGINS` and other variables.
-- [Controllers, routing, views and htmx](controllers.md): handlers, templates and forms.
+- [Controllers and routing](controllers.md) and [Views, helpers and forms](views.md): handlers, templates and forms.
 - [`ocre secret`](../reference/cli.md#ocre-secret) and [`ocre deploy`](../reference/cli.md#ocre-deploy).
 - Rust API: [`Session`](/api/ocre/struct.Session.html), [`Flash`](/api/ocre/struct.Flash.html), [`ALLOWED_ORIGINS`](/api/ocre/constant.ALLOWED_ORIGINS.html), or the [API index](../api-index.md).

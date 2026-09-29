@@ -72,6 +72,15 @@ impl Sandbox {
         fs::write(self.state.join(name), contents).unwrap();
     }
 
+    /// JSON outputs of the next `d1 execute --command` calls, one per call, in order.
+    pub fn queue_execute(&self, outputs: &[&str]) {
+        let dir = self.state.join("execute_queue");
+        fs::create_dir_all(&dir).unwrap();
+        for (index, output) in outputs.iter().enumerate() {
+            fs::write(dir.join(format!("{index:03}.json")), output).unwrap();
+        }
+    }
+
     /// Makes the fake wrangler behave differently (see fake_npx.sh).
     pub fn set(&self, marker: &str) {
         self.write_state(marker, "");

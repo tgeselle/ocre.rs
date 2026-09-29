@@ -51,6 +51,7 @@ fn auth_generates_pages_json_api_and_models_in_a_full_stack_app() {
             "src/registrations.rs",
             "src/sessions.rs",
             "src/passwords.rs",
+            "src/confirmations.rs",
             "templates/auth/signup.html",
             "templates/auth/login.html",
             "templates/auth/account.html",
@@ -58,17 +59,18 @@ fn auth_generates_pages_json_api_and_models_in_a_full_stack_app() {
             "templates/auth/magic_link_show.html",
             "templates/auth/password_new.html",
             "templates/auth/password_edit.html",
+            "templates/auth/confirmation_show.html",
         ]),
         "numbered after the starter's migration"
     );
-    assert_eq!(report["updated"], serde_json::json!(["src/models/mod.rs", "src/lib.rs"]));
+    assert_eq!(report["updated"], serde_json::json!(["src/models/mod.rs", "src/lib.rs", "wrangler.toml"]));
     assert_eq!(report["next"], serde_json::json!(["ocre migrate", "ocre dev", "open http://localhost:8787/signup"]));
 
     let lib = read(&root, "src/lib.rs");
     for line in ["mod auth;", "mod auth_api;", "mod registrations;", "mod sessions;", "mod passwords;"] {
         assert!(lib.contains(&format!("\n{line}\n")), "{line} in {lib}");
     }
-    for module in ["auth_api", "registrations", "sessions", "passwords"] {
+    for module in ["auth_api", "registrations", "sessions", "passwords", "confirmations"] {
         assert!(lib.contains(&format!(".merge({module}::routes())")), "{module} in {lib}");
     }
     assert!(!lib.contains("auth::routes"), "src/auth.rs has extractors, no routes");
@@ -80,6 +82,12 @@ fn auth_generates_pages_json_api_and_models_in_a_full_stack_app() {
     assert!(read(&root, "src/auth.rs").contains("pub struct CurrentUser(pub User);"));
     assert!(read(&root, "src/auth_api.rs").contains("pub struct BearerUser(pub User);"));
     assert!(read(&root, "src/sessions.rs").contains("mail::send(&ctx, Email::new(&user.email"));
+    assert!(read(&root, "src/auth.rs").contains("pub const OAUTH_PROVIDERS: &[&str] = &[];"));
+    let account = read(&root, "templates/auth/account.html");
+    assert!(!account.contains("ocre:account-links") && !account.contains("/account/sessions"), "{account}");
+    let wrangler = read(&root, "wrangler.toml");
+    assert!(wrangler.contains("[[ratelimits]]\nname = \"AUTH_RATE_LIMITER\"\nnamespace_id = \""), "{wrangler}");
+    assert!(wrangler.contains("simple = { limit = 10, period = 60 }"), "{wrangler}");
 
     let (stdout, _) = text(&sandbox.ocre(&["routes", "login"], &root));
     assert!(
@@ -92,6 +100,13 @@ fn auth_generates_pages_json_api_and_models_in_a_full_stack_app() {
 fn auth_generates_only_the_json_api_in_an_api_only_app() {
     let sandbox = Sandbox::new();
     let root = sandbox.new_app("svc", &["--api"]);
+    for options in [&["--db-sessions"][..], &["--oauth", "github"]] {
+        let before = snapshot(&root);
+        let (report, ok) = sandbox.json(&[&["g", "auth"][..], options].concat(), &root);
+        assert!(!ok);
+        assert_eq!(report["error"], "--db-sessions and --oauth need HTML pages, and this app is API-only");
+        assert!(snapshot(&root) == before, "nothing written on failure");
+    }
     let output = sandbox.ocre(&["g", "auth"], &root);
     let (stdout, stderr) = text(&output);
     assert!(output.status.success(), "{stderr}");
@@ -113,6 +128,63 @@ fn auth_generates_only_the_json_api_in_an_api_only_app() {
     let lib = read(&root, "src/lib.rs");
     assert!(lib.contains("\nmod models;\n") && lib.contains(".merge(auth_api::routes())"), "{lib}");
     assert!(!lib.contains("mod auth;"), "{lib}");
+}
+
+#[test]
+fn auth_with_database_sessions_and_oauth() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    let (report, ok) = sandbox.json(&["g", "auth", "--oauth", "GitHub, google", "--oauth", "github"], &root);
+    assert!(ok, "{report}");
+    let auth = read(&root, "src/auth.rs");
+    assert!(auth.contains("pub const OAUTH_PROVIDERS: &[&str] = &[\"github\", \"google\"];"), "once each: {auth}");
+    assert!(auth.contains("pub const USER_ID: &str"), "the cookie sessions variant");
+    let root2 = sandbox.new_app("club", &[]);
+    let (report, ok) = sandbox.json(&["g", "auth", "--db-sessions", "--oauth", "google,github"], &root2);
+    assert!(ok, "{report}");
+    let created: Vec<&str> = report["created"].as_array().unwrap().iter().map(|path| path.as_str().unwrap()).collect();
+    for file in [
+        "migrations/0004_create_user_sessions.sql",
+        "migrations/0005_create_identities.sql",
+        "src/models/user_session.rs",
+        "src/models/identity.rs",
+        "src/user_sessions.rs",
+        "src/oauth.rs",
+        "templates/auth/user_sessions.html",
+    ] {
+        assert!(created.contains(&file), "{file} in {created:?}");
+    }
+    assert!(read(&root2, "src/auth.rs").contains("pub const OAUTH_PROVIDERS: &[&str] = &[\"google\", \"github\"];"));
+    assert!(read(&root2, "src/auth.rs").contains("user_session::start(ctx, new)"), "the D1 sessions variant");
+    assert!(
+        read(&root2, "templates/auth/account.html").contains("<a href=\"/account/sessions\">Signed-in devices</a>")
+    );
+    let dev_vars = read(&root2, ".dev.vars");
+    for name in ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET"] {
+        assert!(dev_vars.contains(&format!("# {name}=...\n")), "{name} in {dev_vars}");
+    }
+    let next = report["next"].as_array().unwrap();
+    assert!(next[3].as_str().unwrap().starts_with("register an OAuth app with google"), "{next:?}");
+    let lib = read(&root2, "src/lib.rs");
+    assert!(lib.contains(".merge(user_sessions::routes())") && lib.contains(".merge(oauth::routes())"), "{lib}");
+
+    // Unknown providers fail before anything is written.
+    let other = sandbox.new_app("guild", &[]);
+    let before = snapshot(&other);
+    let (report, ok) = sandbox.json(&["g", "auth", "--oauth", "github,myspace"], &other);
+    assert!(!ok);
+    assert_eq!(report["error"], "unknown OAuth provider `myspace`");
+    assert_eq!(report["hint"], "--oauth accepts github, google (comma-separated)");
+    assert!(snapshot(&other) == before);
+
+    // An existing rate limiter binding is kept; no .dev.vars is fine.
+    fs::remove_file(other.join(".dev.vars")).unwrap();
+    let wrangler = read(&other, "wrangler.toml");
+    fs::write(other.join("wrangler.toml"), format!("{wrangler}\n[[ratelimits]]\nname = \"AUTH_RATE_LIMITER\"\nnamespace_id = \"7\"\nsimple = {{ limit = 5, period = 10 }}\n")).unwrap();
+    let (report, ok) = sandbox.json(&["g", "auth", "--oauth", "github"], &other);
+    assert!(ok, "{report}");
+    assert_eq!(read(&other, "wrangler.toml").matches("[[ratelimits]]").count(), 1);
+    assert!(!other.join(".dev.vars").exists());
 }
 
 #[test]

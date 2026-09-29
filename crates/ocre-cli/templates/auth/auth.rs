@@ -2,22 +2,27 @@
 //!
 //! - `CurrentUser(user): CurrentUser` in a handler requires a signed-in user;
 //!   other visitors are redirected to /login, then back to the page.
+//! - `ConfirmedUser(user): ConfirmedUser` also requires a confirmed email.
 //! - `OptionalUser(user): OptionalUser` gives `Option<User>` (e.g. a menu).
-//! - `sign_in` / `sign_out` change the session; the login, sign-up and
-//!   magic-link handlers call them.
+//! - `sign_in` / `sign_out` change the session; the login, sign-up,
+//!   magic-link and OAuth handlers call them.
 //!
-//! The session (an encrypted cookie) holds only `user_id`. JSON clients use
-//! `BearerUser` from src/auth_api.rs instead.
+//! The session (an encrypted cookie) holds only `user_id` and its expiry:
+//! two weeks, in a cookie that survives browser restarts only when "Remember
+//! me" was ticked. Nothing is stored on the server, so a session cannot be
+//! revoked before it expires except by rotating SECRET_KEY_BASE (everyone
+//! is signed out); `ocre g auth --db-sessions` tracks sessions in D1 instead.
+//! JSON clients use `BearerUser` from src/auth_api.rs.
 
 // Extractors and helpers for the app's own pages; not all are used yet.
 #![allow(dead_code)]
 
 use axum::{
     extract::FromRequestParts,
-    http::{Method, Uri, request::Parts},
+    http::{HeaderMap, Method, Uri, request::Parts},
     response::{IntoResponse, Redirect, Response},
 };
-use ocre::{Ctx, Error, Result, Session};
+use ocre::{Ctx, Error, Result, Session, security::url_from};
 
 use crate::models::user::{self, User};
 
@@ -25,12 +30,20 @@ use crate::models::user::{self, User};
 pub const USER_ID: &str = "user_id";
 /// Session key holding the page to return to after logging in.
 const RETURN_TO: &str = "return_to";
+/// How long a sign-in lasts, remembered or not.
+pub const SESSION_SECONDS: i64 = 14 * 24 * 3600;
+/// OAuth providers offered on the login page (`ocre g auth --oauth github`).
+pub const OAUTH_PROVIDERS: &[&str] = &[];
 
 /// The signed-in user. Visitors are redirected to /login.
 pub struct CurrentUser(pub User);
 
 /// The signed-in user, if any.
 pub struct OptionalUser(pub Option<User>);
+
+/// The signed-in user with a confirmed email. Visitors are redirected to
+/// /login, unconfirmed users to /account (which offers a new email).
+pub struct ConfirmedUser(pub User);
 
 impl FromRequestParts<Ctx> for OptionalUser {
     type Rejection = Error;
@@ -56,6 +69,20 @@ impl FromRequestParts<Ctx> for CurrentUser {
     }
 }
 
+impl FromRequestParts<Ctx> for ConfirmedUser {
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, ctx: &Ctx) -> std::result::Result<Self, Response> {
+        let CurrentUser(user) = CurrentUser::from_request_parts(parts, ctx).await?;
+        if user.confirmed() {
+            return Ok(Self(user));
+        }
+        let session = Session::from_request_parts(parts, ctx).await.map_err(IntoResponse::into_response)?;
+        session.flash("alert", "Please confirm your email address first.").map_err(IntoResponse::into_response)?;
+        Err(Redirect::to("/account").into_response())
+    }
+}
+
 /// Redirects to /login, remembering the page for GET requests (a form
 /// submission cannot be replayed after a redirect).
 async fn to_login(parts: &mut Parts, ctx: &Ctx) -> Result<Response> {
@@ -69,27 +96,27 @@ async fn to_login(parts: &mut Parts, ctx: &Ctx) -> Result<Response> {
 
 /// Signs `user` in and returns where to go next: the page that asked for a
 /// login, or `/`. The session is emptied first (pending flash messages
-/// stay), so nothing from before the login carries over.
-pub fn sign_in(session: &Session, user: &User) -> Result<String> {
-    let return_to = session.get::<String>(RETURN_TO)?.filter(|path| is_local_path(path));
+/// stay), so nothing from before the login carries over (session fixation).
+/// `remember` keeps the cookie across browser restarts. `ctx` and `headers`
+/// are used by the `--db-sessions` variant of this file, which records the
+/// session in D1.
+pub async fn sign_in(_ctx: &Ctx, session: &Session, _headers: &HeaderMap, user: &User, remember: bool) -> Result<String> {
+    // Only paths of this app: never an open redirect.
+    let return_to = session.get::<String>(RETURN_TO)?.and_then(|path| url_from(&Uri::default(), &path));
     session.clear()?;
     session.insert(USER_ID, user.id)?;
+    if remember { session.remember_for(SESSION_SECONDS)? } else { session.expire_in(SESSION_SECONDS)? }
     Ok(return_to.unwrap_or_else(|| "/".to_owned()))
 }
 
 /// Signs out: empties the session.
-pub fn sign_out(session: &Session) -> Result<()> {
+pub async fn sign_out(_ctx: &Ctx, session: &Session) -> Result<()> {
     session.clear()
-}
-
-/// `/account` yes; `//evil.example` or `https://...` no (open redirects).
-fn is_local_path(path: &str) -> bool {
-    path.starts_with('/') && !path.starts_with("//") && !path.starts_with("/\\")
 }
 
 /// `https://app.example.com`: scheme and host of the current request, for
 /// links in emails. Cloudflare routes requests by host name, so this is always
-/// one of the app's own hosts.
+/// one of the app's own hosts (list them in ALLOWED_HOSTS to be sure).
 pub fn origin(uri: &Uri) -> String {
     let scheme = uri.scheme_str().unwrap_or("https");
     let host = uri.authority().map_or("localhost", |authority| authority.as_str());

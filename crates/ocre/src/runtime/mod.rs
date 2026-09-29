@@ -12,8 +12,11 @@ mod graphql;
 pub(crate) mod jobs;
 pub(crate) mod jwt;
 pub(crate) mod mail;
+pub(crate) mod oauth;
+mod query;
 #[cfg(feature = "realtime")]
 pub(crate) mod realtime;
+pub(crate) mod security;
 pub(crate) mod storage;
 
 #[cfg(target_arch = "wasm32")]
@@ -37,17 +40,24 @@ use crate::{protect, session};
 /// 1. Security headers on every response (`X-Content-Type-Options: nosniff`,
 ///    `X-Frame-Options: SAMEORIGIN`, `Referrer-Policy`, HSTS on HTTPS...); a
 ///    handler's own value wins.
-/// 2. CORS for the origins listed in the [`ALLOWED_ORIGINS`](crate::ALLOWED_ORIGINS)
+/// 2. Host authorization: when the [`ALLOWED_HOSTS`](crate::ALLOWED_HOSTS)
+///    Worker variable is set, other hosts get `403 Forbidden`.
+/// 3. CORS for the origins listed in the [`ALLOWED_ORIGINS`](crate::ALLOWED_ORIGINS)
 ///    Worker variable (no CORS layer when it is empty).
-/// 3. Cross-origin request protection (CSRF) without tokens: unsafe requests a
+/// 4. Cross-origin request protection (CSRF) without tokens: unsafe requests a
 ///    browser sends from another site (`Sec-Fetch-Site`, or `Origin` against
 ///    `Host`) get `403 Forbidden`.
-/// 4. The encrypted cookie [`Session`](crate::Session), keyed from the
-///    [`SECRET_KEY_BASE`](crate::SECRET_KEY_BASE) secret.
+/// 5. The encrypted cookie [`Session`](crate::Session), keyed from the
+///    [`SECRET_KEY_BASE`](crate::SECRET_KEY_BASE) secret (and, during a
+///    rotation, [`SECRET_KEY_BASE_PREVIOUS`](crate::SECRET_KEY_BASE_PREVIOUS)).
 ///
 /// A missing or short `SECRET_KEY_BASE` does not fail every request: only
 /// handlers that touch the session get [`Error::Internal`](crate::Error::Internal),
 /// naming the fix (`ocre secret`, `.dev.vars`).
+///
+/// The request also carries the [`Ctx`] as an extension, so the app's own
+/// middleware (`axum::middleware::from_fn`) can reach the bindings with an
+/// `Extension(ctx): Extension<Ctx>` argument, as handlers do with `State`.
 ///
 /// Files from [`storage::serve`](crate::storage::serve) go out as R2's own
 /// stream, so the Worker spends no CPU copying them and `Content-Length` is
@@ -87,11 +97,17 @@ use crate::{protect, session};
 /// # fn main() {}
 /// ```
 pub async fn serve(routes: Router<Ctx>, req: HttpRequest, env: Env) -> worker::Result<web_sys::Response> {
+    let var = |name: &str| env.var(name).ok().map(|var| var.to_string());
+    let secret = |name: &str| env.secret(name).ok().map(|secret| secret.to_string());
     let config = protect::Config {
-        key: session::key_from_secret(env.secret(session::SECRET_KEY_BASE).ok().map(|secret| secret.to_string())),
-        allowed_origins: protect::parse_origins(env.var(protect::ALLOWED_ORIGINS).ok().map(|var| var.to_string())),
+        keys: session::keys_from_secrets(secret(session::SECRET_KEY_BASE), secret(session::SECRET_KEY_BASE_PREVIOUS)),
+        allowed_origins: protect::parse_origins(var(protect::ALLOWED_ORIGINS)),
+        allowed_hosts: protect::parse_hosts(var(protect::ALLOWED_HOSTS)),
     };
-    let mut app = protect::wrap(routes.with_state(Ctx::new(env)), config);
+    let ctx = Ctx::new(env);
+    let mut req = req;
+    req.extensions_mut().insert(ctx.clone());
+    let mut app = protect::wrap(routes.with_state(ctx), config);
     let mut response = app.call(req).await?;
     match response.extensions_mut().remove::<storage::R2Stream>() {
         Some(stream) => storage::into_js_response(response, stream),

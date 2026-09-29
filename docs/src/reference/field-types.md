@@ -1,6 +1,6 @@
 # Field types
 
-This page lists every field type the `ocre g model`, `ocre g scaffold`, `ocre g api` and `ocre g migration` generators accept, with the SQL column, Rust types, serde attributes, form input, JSON and GraphQL representation and validations each one produces, plus the `?` (optional) and `^` (unique) modifiers and the names that are refused.
+This page lists every field type the `ocre g model`, `ocre g scaffold`, `ocre g api`, `ocre g resource` and `ocre g migration` generators accept, with the SQL column, Rust types, serde attributes, form input, JSON and GraphQL representation and validations each one produces, plus the `?` (optional) and `^` (unique) modifiers and the names that are refused.
 
 ## Before you start
 
@@ -33,11 +33,27 @@ Field names are snake_case identifiers starting with a letter (`published_at`). 
 | `boolean` | `INTEGER NOT NULL DEFAULT 0` | `bool` | `<input type="checkbox" value="true">` | `true` / `false` | `Boolean` | none; cannot be optional |
 | `date` | `TEXT` | `String` | `<input type="date">` | string `YYYY-MM-DD` | `String` | "is not a valid date" |
 | `datetime` | `TEXT` | `String` | `<input type="datetime-local">` | string `YYYY-MM-DD HH:MM[:SS]` (space or `T`) | `String` | "is not a valid date and time" |
+| `time` | `TEXT` | `String` | `<input type="time">` | string `HH:MM[:SS]` | `String` | "is not a valid time" |
+| `decimal` | `TEXT` | `String` | `<input inputmode="decimal">` | string such as `"19.99"` | `String` | "is not a decimal number" |
+| `uuid` | `TEXT` | `String` | `<input>` | string | `String` | "is not a valid UUID" |
 | `references` | `INTEGER REFERENCES <plural>(id) ON DELETE CASCADE`, named `<name>_id`, indexed | `i64` | `<input type="number" step="1">` | number | `Int` | "must exist" in `create`/`update` |
 | `attachment` | four columns: `<name>_key`, `_filename`, `_content_type` (`TEXT`), `_size` (`INTEGER`) | `ocre::storage::Upload` in inputs; four columns plus an `Attachment` accessor in the record | `<input type="file" accept="...">` | the four columns | the four columns (read only) | size and content type (`v.file`); "can't be blank" when required |
 | `json` | `TEXT CHECK (json_valid(<name>))` | `ocre::serde_json::Value` | `<textarea rows="5" spellcheck="false" placeholder="{}">` | the JSON value itself | `JSON` scalar | forms: "is not valid JSON"; cannot be unique |
+| `enum:<a>,<b>...` | `TEXT CHECK (<name> IN ('a', 'b'))` | a generated Rust enum (`Status`) | `<select>` with one `<option>` per value | string, one of the values | not supported (`--graphql` refuses it) | forms: "is not included in the list"; cannot be unique |
 
 Without `?`, every column is `NOT NULL`. The sections below give the exact generated code for each type.
+
+Aliases, for fields written the Loco or Rails way, produce exactly the same code as the type they name:
+
+| Alias | Same as | Why |
+|---|---|---|
+| `int`, `small_int`, `big_int` | `integer` | SQLite stores every integer in up to 8 bytes whatever the declared size; D1 returns them exactly within ±(2^53 - 1) |
+| `double` | `float` | SQLite `REAL` is a 64-bit float |
+| `bool` | `boolean` | |
+| `date_time` | `datetime` | |
+| `jsonb` | `json` | D1 stores JSON as text; `json_valid` checks it |
+
+SQLite has no array column: store a list as a `json` field (`tags:json`, e.g. `["rust", "wasm"]`).
 
 ## Generated code per role
 
@@ -141,6 +157,37 @@ ends_at TEXT,
 - Form: `<input type="datetime-local">`, which browsers submit as `2026-09-29T18:30`.
 - Values are not normalized: a record created with `2026-09-29T18:30` returns `"starts_at":"2026-09-29T18:30"`, while `created_at` uses SQLite's `2026-09-29 04:20:26`. Compare them as text only when they use the same format.
 
+## time
+
+```sql
+opens_at TEXT NOT NULL,
+closes_at TEXT,
+```
+
+- Rust `String`, stored as typed. Validation: `v.time("opens_at", &self.opens_at)` accepts `HH:MM` or `HH:MM:SS` from `00:00` to `23:59:59` ("is not a valid time"). No time zone.
+- Form: `<input type="time">`, which browsers submit as `HH:MM`.
+
+## decimal
+
+```sql
+price TEXT NOT NULL,
+discount TEXT,
+```
+
+- An exact number, for money: stored as its text (`"19.99"`), so no digit is lost. A `float` (`REAL`) would store `0.1 + 0.2` as `0.30000000000000004`.
+- Rust `String`. Validation: `v.decimal("price", &self.price)` accepts an optional sign, digits, then optionally a dot and digits (`19.99`, `-3`, `+0.5`); no exponent, no spaces, no thousands separator ("is not a decimal number").
+- Form: `<input inputmode="decimal">` (a numeric keyboard on phones). JSON: a string, `"price": "19.99"`.
+- SQL compares the text: `ORDER BY price` sorts `"10.00"` before `"9.50"`. Sort or sum with `CAST(price AS REAL)` when an approximation is fine, or do exact arithmetic in Rust (for example on integer cents).
+
+## uuid
+
+```sql
+token TEXT NOT NULL,
+```
+
+- Rust `String`. Validation: `v.uuid("token", &self.token)` accepts the hyphenated form, any case (`67e55044-10b1-426f-9247-bb680e5fe0c8`), "is not a valid UUID" otherwise.
+- The generator does not fill it: set it in the handler, e.g. from `crypto.randomUUID()` through `worker::js_sys` or from random bytes. Add `^` to make it unique.
+
 ## references
 
 `author:references` creates the column `author_id` pointing to the `authors` table; the referenced model (`src/models/author.rs`) must already exist, otherwise the generator stops with `error: src/models/author.rs does not exist` and ``hint: generate the referenced model first, e.g. `ocre g model Author name:string` ``.
@@ -151,10 +198,11 @@ author_id INTEGER NOT NULL REFERENCES authors(id) ON DELETE CASCADE,
 CREATE INDEX index_items_on_author_id ON items (author_id);
 ```
 
-- Rust `i64` (`Option<i64>` with `?`, which omits `NOT NULL`). Deleting an author deletes its items (`ON DELETE CASCADE`); files of the deleted items stay in R2.
+- Rust `i64` (`Option<i64>` with `?`, which omits `NOT NULL`). Deleting an author deletes its items (`ON DELETE CASCADE`); files of the deleted items stay in R2. An optional reference is set to `NULL` instead (`ON DELETE SET NULL`).
 - `create` and `update` check the row exists: `v.check("author_id", !db.exists("SELECT 1 FROM authors WHERE id = ?1 LIMIT 1", ..), "must exist")`.
 - Associations: `item.author(&ctx)` in the model, `author.items(&ctx, page)` added to `src/models/author.rs`. See [Models and migrations](../guides/models.md#associations).
 - Form: `<input type="number" step="1" name="author_id">` labelled "Author". JSON and GraphQL: `author_id` / `authorId`, a number.
+- Custom column: `author:references:writer_id` names the column `writer_id` (still pointing to `authors`); the association method is then `item.writer(&ctx)` and the form label "Writer". The column must be snake_case and end in `_id` (``invalid foreign key column `writer` for `author` `` with ``hint: name the column in snake_case ending in `_id`, e.g. `author:references:writer_id` `` otherwise). Modifiers go after the type or the column: `author:references?:writer_id` and `author:references:writer_id?` are the same. Only `references` and `enum` take such an argument: ``type `string` of `title` takes no `:long` ``.
 
 ## attachment
 
@@ -233,14 +281,47 @@ pub meta: Option<Option<ocre::serde_json::Value>>,
 - Cannot be unique: `data:json^` fails with ``hint: a unique index compares JSON text, where key order and spacing differ; drop the `^` ``.
 - Build values in Rust with `ocre::serde_json::json!({"color": "red"})`.
 
+## enum
+
+One of a fixed list of values, written after the type: `status:enum:todo,doing,done`. The values are distinct snake_case identifiers; the first one is the default.
+
+```sql
+status TEXT NOT NULL CHECK (status IN ('todo', 'doing', 'done')),
+```
+
+The model gets a Rust enum named after the field (`status` gives `Status`), stored as the value's text:
+
+```rust
+/// Values of `status`, stored as their text (a `CHECK` in the migration
+/// refuses others). Add a value: a variant here and a migration rebuilding
+/// the `CHECK` (`ocre g migration rebuild_<table>`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub enum Status {
+    #[default]
+    #[serde(rename = "todo")]
+    Todo,
+    #[serde(rename = "doing")]
+    Doing,
+    #[serde(rename = "done")]
+    Done,
+}
+```
+
+- `Status::ALL` lists the values in order, `status.as_str()` and `Display` give the stored text, `FromStr` parses it back (`"archived".parse::<Status>()` is an `Err`), and `ocre::IntoParam` binds it in `params![...]`. The record, `NewTask` and `TaskChanges` hold `Status` (`Option<Status>` with `?`).
+- Form: `<select name="status" required>` with an `<option>` per value, labelled with the humanized value (`Todo`); an optional enum starts with an empty option (`NULL`). The form struct keeps the text and parses it with `v.one_of("status", ...)` ("is not included in the list"), or `v.optional_one_of(..)`.
+- JSON: the value as a string, `"status": "doing"`. Another string is refused with a 400 by the JSON extractor (serde's `unknown variant`) before validation.
+- GraphQL: not supported yet: `ocre g api Ticket state:enum:open,closed --graphql` fails with ``error: enum `state` is not supported with --graphql yet`` and ``hint: use `state:string` checked with `v.inclusion(...)` in the model, or generate the JSON API without --graphql``.
+- Added to an existing table (`ocre g migration add_state_to_books state:enum:draft,live`), a required enum gets the first value as default: `ALTER TABLE books ADD COLUMN state TEXT NOT NULL CHECK (state IN ('draft', 'live')) DEFAULT 'draft';`.
+- Errors: `s:enum` gives ``enum `s` has no values`` (``hint: list them after the type, e.g. `s:enum:draft,published` ``); `s:enum:A,b` or `s:enum:a,a` give ``invalid values `A,b` for enum `s` `` (``hint: list distinct snake_case values after the type, e.g. `status:enum:draft,published` ``); `s:enum:a,b^` gives ``enum `s` cannot be unique`` (``hint: a few values cannot be unique across many rows; drop the `^` ``).
+
 ## Modifiers
 
 | Modifier | SQL | Rust | Validation | Not allowed for |
 |---|---|---|---|---|
 | none | `NOT NULL` | `T` | the type's checks, "can't be blank" for `string`/`text`/`attachment` | |
 | `?` | nullable column | `Option<T>`, `Option<Option<T>>` in `Changes` | the type's checks when a value is present | `boolean` |
-| `^` | `CREATE UNIQUE INDEX index_<table>_on_<column> ON <table> (<column>)` | same | "has already been taken" in `create` and `update` (one `SELECT 1 ... LIMIT 1` per unique field) | `attachment`, `json` |
-| `?^` / `^?` | nullable column with a unique index | `Option<T>` | uniqueness checked only when a value is given | `boolean`, `attachment`, `json` |
+| `^` | `CREATE UNIQUE INDEX index_<table>_on_<column> ON <table> (<column>)` | same | "has already been taken" in `create` and `update` (one `SELECT 1 ... LIMIT 1` per unique field) | `attachment`, `json`, `enum` |
+| `?^` / `^?` | nullable column with a unique index | `Option<T>` | uniqueness checked only when a value is given | `boolean`, `attachment`, `json`, `enum` |
 
 The index protects against races between two concurrent requests: the check in `create` gives the friendly message, the index guarantees the rule.
 
@@ -266,12 +347,12 @@ ALTER TABLE items ADD COLUMN photo_key TEXT;
 ALTER TABLE items ADD COLUMN photo_filename TEXT;
 ALTER TABLE items ADD COLUMN photo_content_type TEXT;
 ALTER TABLE items ADD COLUMN photo_size INTEGER;
-ALTER TABLE items ADD COLUMN owner_id INTEGER REFERENCES owners(id) ON DELETE CASCADE;
+ALTER TABLE items ADD COLUMN owner_id INTEGER REFERENCES owners(id) ON DELETE SET NULL;
 CREATE UNIQUE INDEX index_items_on_slug ON items (slug);
 CREATE INDEX index_items_on_owner_id ON items (owner_id);
 ```
 
-- Required text types get `DEFAULT ''`, numbers `DEFAULT 0`, `json` `DEFAULT '{}'`; optional columns get no default. A required unique column (`slug:string^`) gives every existing row the same `''`, so creating the unique index fails (`UNIQUE constraint failed: items.slug`) as soon as the table has two rows: add it as `slug:string?^` and fill it afterwards.
+- Required text types get `DEFAULT ''`, numbers `DEFAULT 0`, `json` `DEFAULT '{}'`, `enum` its first value; optional columns get no default. A required unique column (`slug:string^`) gives every existing row the same `''`, so creating the unique index fails (`UNIQUE constraint failed: items.slug`) as soon as the table has two rows: add it as `slug:string?^` and fill it afterwards.
 - `references` and `attachment` must be optional here: ``error: `owner_id` must be optional when added to an existing table`` (``hint: SQLite adds reference columns as NULL for existing rows: use `name:references?` ``), and ``error: `pic` must be optional when added to an existing table`` (``hint: existing rows have no file: use `name:attachment?` ``).
 - The migration generator does not check that the referenced model exists, and does not change the model: update the struct, `New<Model>`, `<Model>Changes`, `validate()` and the SQL of `create`/`update` yourself (the command says so in its `Next:` lines).
 
@@ -290,7 +371,7 @@ hint: use snake_case starting with a letter, e.g. `published_at`
 
 title:varchar
 error: unknown field type `varchar` for `title`
-hint: types: string, text, integer, float, boolean, date, datetime, references, attachment, json; add `?` for optional, `^` for unique
+hint: types: string, text, integer (int, small_int, big_int), float (double), decimal, boolean (bool), date, time, datetime (date_time), uuid, references, attachment, json (jsonb), enum:<value>,<value>...; add `?` for optional, `^` for unique
 
 type:string
 error: field name `type` is reserved
@@ -330,7 +411,7 @@ Reserved names (from `crates/ocre-cli/src/generate/fields.rs`):
 With `--json`, the same failure is one object on stdout, for example `ocre g model Thing x:strin --json`:
 
 ```json
-{"error":"unknown field type `strin` for `x`","hint":"types: string, text, integer, float, boolean, date, datetime, references, attachment, json; add `?` for optional, `^` for unique","ok":false}
+{"error":"unknown field type `strin` for `x`","hint":"types: string, text, integer (int, small_int, big_int), float (double), decimal, boolean (bool), date, time, datetime (date_time), uuid, references, attachment, json (jsonb), enum:<value>,<value>...; add `?` for optional, `^` for unique","ok":false}
 ```
 
 ## What a JSON API returns

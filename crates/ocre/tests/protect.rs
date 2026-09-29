@@ -12,7 +12,7 @@ use crate::{
 
 const SECRET: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-fn app(key: std::result::Result<Key, String>, origins: &str) -> Router {
+fn app(key: std::result::Result<Keys, String>, origins: &str) -> Router {
     let router = Router::new()
         .route("/", get(|| async { "home" }))
         .route(
@@ -23,7 +23,7 @@ fn app(key: std::result::Result<Key, String>, origins: &str) -> Router {
             }),
         )
         .route("/framed", get(|| async { ([(header::X_FRAME_OPTIONS, "DENY")], "custom") }));
-    wrap(router, Config { key, allowed_origins: parse_origins(Some(origins.to_owned())) })
+    wrap(router, Config { keys: key, allowed_origins: parse_origins(Some(origins.to_owned())), allowed_hosts: vec![] })
 }
 
 fn send(app: &mut Router, request: Request<Body>) -> Response {
@@ -38,8 +38,43 @@ fn request(method: &str, uri: &str, headers: &[(&str, &str)]) -> Request<Body> {
     builder.body(Body::empty()).unwrap()
 }
 
-fn key() -> std::result::Result<Key, String> {
+fn key() -> std::result::Result<Keys, String> {
     crate::session::key_from_secret(Some(SECRET.to_owned()))
+}
+
+#[test]
+fn parses_and_checks_allowed_hosts() {
+    assert_eq!(parse_hosts(None), Vec::<String>::new());
+    let allowed = parse_hosts(Some(" Example.com, .example.org ,".into()));
+    assert_eq!(allowed, ["example.com", ".example.org"]);
+    assert!(host_allowed(Some("example.com"), &allowed));
+    assert!(host_allowed(Some("EXAMPLE.com:443"), &allowed), "case and port ignored");
+    assert!(!host_allowed(Some("www.example.com"), &allowed), "no subdomains without a leading dot");
+    assert!(host_allowed(Some("example.org"), &allowed));
+    assert!(host_allowed(Some("a.b.example.org"), &allowed));
+    assert!(!host_allowed(Some("evilexample.org"), &allowed));
+    assert!(!host_allowed(Some("app.workers.dev"), &allowed));
+    assert!(!host_allowed(None, &allowed));
+    for local in ["localhost:8787", "127.0.0.1", "[::1]:8787", "[::1]"] {
+        assert!(host_allowed(Some(local), &allowed), "{local}");
+    }
+    assert!(host_allowed(Some("anything"), &[]), "unset: every host");
+}
+
+#[test]
+fn blocked_hosts_get_403_before_the_app() {
+    let router = Router::new().route("/", get(|| async { "home" }));
+    let config =
+        Config { keys: key(), allowed_origins: vec![], allowed_hosts: parse_hosts(Some("example.com".into())) };
+    let mut app = wrap(router, config);
+    let response = send(&mut app, request("GET", "https://evil.dev/", &[]));
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+    assert!(body_text(response).contains("ALLOWED_HOSTS"));
+    assert_eq!(send(&mut app, request("GET", "https://example.com/", &[])).status(), StatusCode::OK);
+    let by_header = request("GET", "/", &[("host", "example.com")]);
+    assert_eq!(send(&mut app, by_header).status(), StatusCode::OK, "Host header when the URI has none");
+    assert_eq!(send(&mut app, request("GET", "/", &[])).status(), StatusCode::FORBIDDEN, "no host at all");
 }
 
 #[test]
@@ -134,7 +169,7 @@ fn session_errors_become_responses() {
             Ok::<_, crate::Error>("ok")
         }),
     );
-    let mut app = wrap(router, Config { key: key(), allowed_origins: vec![] });
+    let mut app = wrap(router, Config { keys: key(), allowed_origins: vec![], allowed_hosts: vec![] });
     assert_eq!(send(&mut app, request("GET", "http://localhost/big", &[])).status(), 500);
 }
 

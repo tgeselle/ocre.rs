@@ -51,7 +51,7 @@ fn sql_columns() {
     assert_eq!(column("on:date"), "on TEXT NOT NULL");
     assert_eq!(column("at:datetime?"), "at TEXT");
     assert_eq!(column("author:references"), "author_id INTEGER NOT NULL REFERENCES authors(id) ON DELETE CASCADE");
-    assert_eq!(column("editor:references?"), "editor_id INTEGER REFERENCES editors(id) ON DELETE CASCADE");
+    assert_eq!(column("editor:references?"), "editor_id INTEGER REFERENCES editors(id) ON DELETE SET NULL");
     assert_eq!(
         column("avatar:attachment"),
         "avatar_key TEXT NOT NULL, avatar_filename TEXT NOT NULL, avatar_content_type TEXT NOT NULL, avatar_size INTEGER NOT NULL"
@@ -85,4 +85,27 @@ fn checks_per_type() {
     assert_eq!(checks("pages:integer"), ["v.safe_integer(\"pages\", x);"]);
     assert!(checks("rating:float").is_empty() && checks("done:boolean").is_empty());
     assert_eq!(checks("avatar:attachment"), ["v.file(\"avatar\", x, &AVATAR);"]);
+}
+
+#[test]
+fn enums_list_their_values() {
+    let field = Field::parse("review_state:enum:draft,in_review?").unwrap();
+    let enumeration = field.enumeration.clone().unwrap();
+    assert_eq!(
+        (enumeration.type_name.as_str(), enumeration.values.as_slice()),
+        ("ReviewState", &["draft".to_owned(), "in_review".to_owned()][..])
+    );
+    assert_eq!(Enumeration::variant("in_review"), "InReview");
+    assert_eq!(
+        (field.rust_type(), field.column_type().as_str(), field.optional),
+        ("ReviewState", "Option<ReviewState>", true)
+    );
+    assert_eq!(field.sql_columns(), ["review_state TEXT CHECK (review_state IN ('draft', 'in_review'))"]);
+    assert!(field.checks("x").is_empty());
+    let error = |spec: &str| Field::parse(spec).unwrap_err().message;
+    assert_eq!(error("status:enum"), "enum `status` has no values");
+    assert_eq!(error("status:enum:a,a"), "invalid values `a,a` for enum `status`");
+    assert_eq!(error("status:enum:a,B-c"), "invalid values `a,B-c` for enum `status`");
+    assert_eq!(error("status:enum:a,b^"), "enum `status` cannot be unique");
+    assert!(error("title:string:x").starts_with("type `string` of `title` takes no `:x`"));
 }

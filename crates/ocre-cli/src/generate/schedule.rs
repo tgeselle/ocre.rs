@@ -48,16 +48,17 @@ async fn scheduled(event: worker::ScheduledEvent, env: worker::Env, _ctx: worker
 }
 "#;
 
-pub fn schedule(project: &Project, name: &str, cron: &str) -> CliResult {
+pub fn schedule(project: &Project, name: &str, schedule: &str) -> CliResult {
     let module = split_words(name).join("_");
     if !is_identifier(&module) || RESERVED.contains(&module.as_str()) {
         return Err(CliError::new(format!("invalid schedule name `{name}`"))
             .hint("use snake_case starting with a letter, not a Rust keyword, e.g. `nightly_cleanup`"));
     }
-    let cron = parse_cron(cron)?;
+    let cron = parse_cron(schedule)?;
     let mut edits = Edits::new(project);
     let path = format!("src/schedules/{module}.rs");
-    edits.create(&path, task_rs(&module, &cron, name))?;
+    let phrase = schedule.split_whitespace().collect::<Vec<_>>().join(" ");
+    edits.create(&path, task_rs(&module, &cron, name, &phrase))?;
 
     let wrangler = edits.read("wrangler.toml")?.unwrap_or_default();
     let crons = with_cron(&wrangler, &cron)?;
@@ -94,8 +95,8 @@ pub fn schedule(project: &Project, name: &str, cron: &str) -> CliResult {
 
     let mut report = edits.apply("generate schedule")?;
     report.next = vec![
-        format!("ocre dev, then: curl '{LOCAL_ENDPOINT}?cron={}'", query_value(&cron)),
-        "ocre deploy (Cron Triggers only fire on the deployed Worker, in UTC)".to_owned(),
+        format!("ocre dev, then: ocre schedules run {module}"),
+        format!("ocre deploy (Cron Triggers only fire on the deployed Worker; this one runs at `{cron}`, UTC)"),
     ];
     if crons.count > FREE_CRONS {
         report.next.push(format!(
@@ -106,19 +107,119 @@ pub fn schedule(project: &Project, name: &str, cron: &str) -> CliResult {
     Ok(report)
 }
 
-/// Checks the five fields Cloudflare accepts (minute, hour, day of month,
-/// month, day of week) and joins them with single spaces.
-fn parse_cron(cron: &str) -> Result<String, CliError> {
-    let fields: Vec<&str> = cron.split_whitespace().collect();
-    let valid = fields.len() == 5
-        && fields.iter().all(|field| field.chars().all(|c| c.is_ascii_alphanumeric() || "*,-/#".contains(c)));
-    if !valid {
-        return Err(CliError::new(format!("invalid cron expression `{cron}`")).hint(
-            "quote five fields, in UTC: minute hour day-of-month month day-of-week, e.g. \"0 3 * * *\" (03:00 daily), \
-             \"*/15 * * * *\" (every 15 minutes) or \"0 9 * * MON\"",
-        ));
+/// A schedule as Cloudflare's five cron fields (minute, hour, day of month,
+/// month, day of week), from a cron expression or a plain-English phrase
+/// such as "every 15 minutes" or "every monday at 9am".
+pub(crate) fn parse_cron(schedule: &str) -> Result<String, CliError> {
+    let fields: Vec<&str> = schedule.split_whitespace().collect();
+    let cron_like = fields.len() == 5
+        && fields.iter().all(|field| field.chars().all(|c| c.is_ascii_alphanumeric() || "*,-/#".contains(c)))
+        && fields[0].chars().any(|c| c.is_ascii_digit() || c == '*');
+    if cron_like {
+        return Ok(fields.join(" "));
     }
-    Ok(fields.join(" "))
+    english(schedule).ok_or_else(|| {
+        CliError::new(format!("invalid schedule `{schedule}`")).hint(
+            "quote a phrase, in UTC: \"every 15 minutes\", \"every hour\", \"every 6 hours\", \"every day at 3am\", \
+             \"every monday at 9:30\", \"every weekday at 18:00\", \"midnight on tuesdays\", \"every month\"; or five \
+             cron fields: minute hour day-of-month month day-of-week, e.g. \"0 3 * * *\" or \"*/15 * * * *\". Cron \
+             Triggers run at most once a minute",
+        )
+    })
+}
+
+/// Plain English to cron, like Loco's scheduler: "every 5 minutes" is `*/5 * * * *`.
+/// `None` when the phrase is not understood. Cron Triggers run at most once
+/// a minute, so seconds are refused.
+fn english(phrase: &str) -> Option<String> {
+    let phrase = phrase.trim().to_lowercase().replace(',', " ");
+    let (frequency, time) = match phrase.split_once(" at ") {
+        Some((frequency, time)) => (frequency.to_owned(), Some(clock(time)?)),
+        None if phrase.starts_with("at ") => (String::new(), Some(clock(&phrase[3..])?)),
+        None => (phrase.clone(), None),
+    };
+    let mut words: Vec<&str> =
+        frequency.split_whitespace().filter(|word| !["every", "each", "on", "and", "the"].contains(word)).collect();
+    // "midnight on tuesdays", "noon every day": the time comes first.
+    let mut time = time;
+    if let Some(position) = words.iter().position(|word| ["midnight", "noon"].contains(word)) {
+        if time.is_some() {
+            return None;
+        }
+        time = Some(if words[position] == "noon" { (12, 0) } else { (0, 0) });
+        words.remove(position);
+    }
+    let (hour, minute) = time.unwrap_or((0, 0));
+    let at = |day_of_month: &str, day_of_week: &str| format!("{minute} {hour} {day_of_month} * {day_of_week}");
+    let every = |n: &str| n.parse::<u32>().ok();
+    match words.as_slice() {
+        [] if time.is_some() => Some(at("*", "*")),
+        ["day" | "days" | "daily"] => Some(at("*", "*")),
+        ["minute"] if time.is_none() => Some("* * * * *".to_owned()),
+        [n, "minute" | "minutes" | "mins"] if time.is_none() => match every(n)? {
+            1 => Some("* * * * *".to_owned()),
+            n @ 2..=59 => Some(format!("*/{n} * * * *")),
+            _ => None,
+        },
+        ["hour"] | ["hourly"] if time.is_none() => Some("0 * * * *".to_owned()),
+        [n, "hour" | "hours"] if time.is_none() => match every(n)? {
+            1 => Some("0 * * * *".to_owned()),
+            n @ 2..=23 => Some(format!("0 */{n} * * *")),
+            _ => None,
+        },
+        ["week"] | ["weekly"] => Some(at("*", "SUN")),
+        ["month"] | ["monthly"] => Some(at("1", "*")),
+        ["weekday" | "weekdays"] => Some(at("*", "MON-FRI")),
+        ["weekend" | "weekends"] => Some(at("*", "SAT,SUN")),
+        [] => None,
+        days => {
+            let days: Option<Vec<&str>> = days.iter().map(|day| weekday(day)).collect();
+            Some(at("*", &days?.join(",")))
+        }
+    }
+}
+
+/// `monday`, `mondays`, `mon` -> `MON`.
+fn weekday(word: &str) -> Option<&'static str> {
+    const DAYS: [(&str, &str); 7] = [
+        ("monday", "MON"),
+        ("tuesday", "TUE"),
+        ("wednesday", "WED"),
+        ("thursday", "THU"),
+        ("friday", "FRI"),
+        ("saturday", "SAT"),
+        ("sunday", "SUN"),
+    ];
+    let word = word.strip_suffix('s').filter(|w| w.ends_with("day")).unwrap_or(word);
+    DAYS.iter().find(|(name, short)| *name == word || short.eq_ignore_ascii_case(word)).map(|(_, short)| *short)
+}
+
+/// `4pm`, `4:30 pm`, `16:30`, `9`, `midnight`, `noon` -> (hour, minute), 24-hour.
+fn clock(text: &str) -> Option<(u32, u32)> {
+    let text = text.trim().replace(' ', "");
+    match text.as_str() {
+        "midnight" => return Some((0, 0)),
+        "noon" => return Some((12, 0)),
+        _ => {}
+    }
+    let (digits, meridiem) = match text.strip_suffix("am").or_else(|| text.strip_suffix("a.m.")) {
+        Some(rest) => (rest, Some(false)),
+        None => match text.strip_suffix("pm").or_else(|| text.strip_suffix("p.m.")) {
+            Some(rest) => (rest, Some(true)),
+            None => (text.as_str(), None),
+        },
+    };
+    let (hour, minute) = digits.split_once(':').unwrap_or((digits, "0"));
+    let (hour, minute): (u32, u32) = (hour.parse().ok()?, minute.parse().ok()?);
+    if minute > 59 {
+        return None;
+    }
+    let hour = match meridiem {
+        None if hour <= 23 => hour,
+        Some(pm) if (1..=12).contains(&hour) => hour % 12 + if pm { 12 } else { 0 },
+        _ => return None,
+    };
+    Some((hour, minute))
 }
 
 /// `0 3 * * *` -> `0+3+*+*+*`, for the local endpoint's query string.
@@ -126,20 +227,21 @@ fn query_value(cron: &str) -> String {
     cron.replace(' ', "+").replace('#', "%23")
 }
 
-fn task_rs(module: &str, cron: &str, name: &str) -> String {
+fn task_rs(module: &str, cron: &str, name: &str, schedule: &str) -> String {
+    let when = if schedule == cron { format!("`{cron}`") } else { format!("`{cron}` ({schedule})") };
     format!(
-        r#"//! {}: scheduled task. Generated by `ocre g schedule {name} "{cron}"`.
+        r#"//! {}: scheduled task. Generated by `ocre g schedule {name} "{schedule}"`.
 //!
-//! Runs at `{cron}` (UTC) on the deployed Worker, from `[triggers] crons` in
-//! wrangler.toml. Run it now while `ocre dev` runs:
-//! `curl '{LOCAL_ENDPOINT}?cron={}'`
+//! Runs at {when}, UTC, on the deployed Worker, from `[triggers] crons` in
+//! wrangler.toml. Run it now while `ocre dev` runs: `ocre schedules run {module}`
+//! (or `curl '{LOCAL_ENDPOINT}?cron={}'`).
 
 use ocre::{{Ctx, Result}};
 
 /// Does the work. Free plan: 10 ms of CPU per run, so keep it to a few
-/// queries and enqueue jobs (`ocre::jobs::enqueue`) for anything longer or
-/// per-row. An `Err` is logged (`[ocre cron]`); the task runs again at the
-/// next scheduled time.
+/// queries and enqueue jobs (`ocre::jobs::enqueue_all`) for anything longer
+/// or per-row. An `Err` is logged (`[ocre cron]`); the task runs again at
+/// the next scheduled time.
 pub async fn run(_ctx: &Ctx) -> Result<()> {{
     Ok(())
 }}
@@ -219,3 +321,7 @@ fn with_cron(text: &str, cron: &str) -> Result<Crons, CliError> {
     };
     Ok(Crons { text, count: crons.len() })
 }
+
+#[cfg(test)]
+#[path = "../../tests/generate/schedule.rs"]
+mod tests;

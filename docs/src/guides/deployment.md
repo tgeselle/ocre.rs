@@ -131,6 +131,9 @@ Total Upload: 790.66 KiB / gzip: 238.60 KiB
 | `MAIL_ADAPTER` | var | `[vars]`: `MAIL_ADAPTER = "resend"` or `"cloudflare"` | Sending email at all: unset, `ocre::mail::send` fails with a 500 whose log names the fix |
 | `RESEND_API_KEY` | secret | `npx wrangler secret put RESEND_API_KEY` | `MAIL_ADAPTER = "resend"` |
 | `ALLOWED_ORIGINS` | var | `[vars]`: `ALLOWED_ORIGINS = "https://app.example.com"` | A frontend on another origin calling the app from the browser (CORS, CSRF) |
+| `ALLOWED_HOSTS` | var | `[vars]`: `ALLOWED_HOSTS = "example.com, .example.com"` | Answering only on your own host names (other hosts get 403) |
+| `SECRET_KEY_BASE_PREVIOUS` | secret | `npx wrangler secret put SECRET_KEY_BASE_PREVIOUS` | Rotating `SECRET_KEY_BASE` without signing anyone out |
+| `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` (or `GOOGLE_...`) | secret | `npx wrangler secret put <NAME>` | `ocre g auth --oauth github` (or `google`) |
 
 ```toml
 # wrangler.toml
@@ -149,13 +152,14 @@ Without `MAIL_ADAPTER`, everything that sends email fails in production, includi
 
 ### Rotating SECRET_KEY_BASE
 
-`ocre deploy` never changes an existing `SECRET_KEY_BASE`. To rotate it yourself:
+`ocre deploy` never changes an existing `SECRET_KEY_BASE`. To rotate it without signing anyone out, keep the current value in `SECRET_KEY_BASE_PREVIOUS` first (Worker secrets cannot be read back, so paste the value you saved):
 
 ```sh
+npx wrangler secret put SECRET_KEY_BASE_PREVIOUS   # the current SECRET_KEY_BASE
 ocre secret | npx wrangler secret put SECRET_KEY_BASE
 ```
 
-Session cookies and JWTs are keyed from this secret, so every user is signed out and every JWT stops working at once. API keys and emailed links are stored as digests in D1 and keep working. See [Security model](../explanations/security-model.md).
+Cookies encrypted with the old value are read and re-encrypted with the new one, and JWTs signed with it verify until they expire. Delete `SECRET_KEY_BASE_PREVIOUS` (`npx wrangler secret delete SECRET_KEY_BASE_PREVIOUS`) after the longest session lifetime (two weeks with `ocre g auth`). Rotating without it signs every user out and stops every JWT at once, which is what you want after a leak. API keys and emailed links are stored as digests in D1 and keep working either way. See [Configuration](../reference/configuration.md#secret_key_base_previous) and [Security model](../explanations/security-model.md).
 
 ## Commands on the production database
 
@@ -218,14 +222,18 @@ and run `ocre deploy`. Cloudflare creates the DNS record and the certificate ([C
 A custom domain changes a few things in an Ocre app:
 
 - Links in emails from `ocre g auth` use the host of the request, so they follow whichever domain the user came from.
-- Cloudflare rate limiting rules (next section) apply to zones, so they need a custom domain.
+- Cloudflare WAF rate limiting rules (next section) apply to zones, so they need a custom domain.
+- `ALLOWED_HOSTS` (see [Configuration](../reference/configuration.md#allowed_hosts)) can then keep visitors off the `workers.dev` address: requests for unlisted hosts get 403.
 - The Cache API (`caches.default`) only stores responses on custom domains (see [Caching](caching.md)).
 
 ## Before going public: rate limiting
 
-Ocre has no rate limiting: the login, sign-up, magic-link, password-reset and token routes of `ocre g auth` accept unlimited attempts, and each password check costs about 5 ms of CPU. Before opening the app to the public, put a [Cloudflare rate limiting rule](https://developers.cloudflare.com/waf/rate-limiting-rules/) in front of `/login`, `/signup`, `/magic_link`, `/passwords` and `/api/auth/*` (Security > WAF > Rate limiting rules, on the zone of your custom domain).
+`ocre g auth` limits its login, sign-up, magic-link, password-reset, confirmation, token and account-deletion routes to 10 attempts a minute per client IP address and action: the generated `throttle` calls `ocre::security::rate_limit` against the `AUTH_RATE_LIMITER` [Workers Rate Limiting binding](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/) it adds to `wrangler.toml`, and over the limit the answer is `429 Too Many Requests`. The binding works on `workers.dev` and on custom domains, is on the free plan, and uses no D1 or KV operation. Its counters are per Cloudflare location and approximate, so treat it as a brake, not an exact quota. Before going public, check that:
 
-On the Free plan (September 2026): one rule, matching on the URI path, counting requests per IP address over 10 seconds, blocking for 10 seconds. One rule can list every path above. The [Workers Rate Limiting binding](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/) is another option inside the Worker; Ocre does not wrap it.
+- the `[[ratelimits]]` entry is still in `wrangler.toml` (without it, those routes answer 500 and the log names the entry to add), and `limit` and `period` (10 or 60 seconds) suit you;
+- your own routes that are expensive or send email call `ocre::security::rate_limit` with a binding of their own (see [Sessions, flash and security](security.md#rate-limiting)).
+
+With a custom domain, a [Cloudflare WAF rate limiting rule](https://developers.cloudflare.com/waf/rate-limiting-rules/) can add a limit before the Worker runs, so blocked requests cost no Worker request. On the Free plan (September 2026): one rule, matching on the URI path, counting requests per IP address over 10 seconds, blocking for 10 seconds.
 
 ## Logs
 
@@ -235,6 +243,8 @@ npx wrangler tail --status error          # failed invocations only
 npx wrangler tail --search "[ocre"        # Ocre's own lines
 npx wrangler tail --format json           # one JSON object per event
 ```
+
+`wrangler tail` shows live events only. Apps made by `ocre new` also have `[observability] enabled = true` in `wrangler.toml`, which keeps every request and log line in Workers Logs, searchable in the dashboard (Workers & Pages > your Worker > Logs); the free plan keeps 200,000 events a day for 3 days (see [Configuration](../reference/configuration.md#observability)).
 
 Ocre never shows internal errors to users: a 500 page or JSON error says `Internal server error`, and the details go to the log with a prefix:
 

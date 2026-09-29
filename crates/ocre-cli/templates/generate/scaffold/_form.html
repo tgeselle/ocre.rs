@@ -1,0 +1,8 @@
+{% if !errors.is_empty() %}
+  <ul class="errors">
+    {% for error in errors %}<li>{{ error.full_message() }}</li>{% endfor %}
+  </ul>
+{% endif %}
+<% for field in fields %>
+  <label><%= field.label %> <%= field.input %></label>
+<% endfor %>

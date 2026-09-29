@@ -1,0 +1,38 @@
+{% extends "layout.html" %}
+
+{% block title %}<%= human_plural %>{% endblock %}
+
+{% block content %}
+<h1><%= human_plural %></h1>
+{% if let Some(notice) = flash.notice() %}<p class="notice">{{ notice }}</p>{% endif %}
+{% if let Some(alert) = flash.alert() %}<p class="alert">{{ alert }}</p>{% endif %}
+<p><a href="{{ paths::new() }}">New <%= lower %></a></p>
+
+<% if realtime %>
+{# Live updates: htmx's WebSocket extension swaps in the rows other visitors create, edit and delete (src/realtime.rs). #}
+<script src="https://unpkg.com/htmx-ext-ws@2.0.4/dist/ws.js" crossorigin="anonymous"></script>
+<div hx-ext="ws" ws-connect="/realtime/<%= plural %>">
+<% endif %>
+<table>
+  <thead>
+    <tr><% for field in fields %><th><%= field.label %></th><% endfor %><th></th></tr>
+  </thead>
+  <tbody<% if realtime %> id="<%= plural %>"<% endif %>>
+    {% for <%= singular %> in <%= plural %> %}
+<% if realtime %>
+    {% include "<%= plural %>/_row.html" %}
+<% else %>
+    <tr><% for field in fields %><td><%= field.display %></td><% endfor %><td><a href="{{ paths::show(<%= singular %>.id) }}">Show</a> <a href="{{ paths::edit(<%= singular %>.id) }}">Edit</a></td></tr>
+<% endif %>
+    {% endfor %}
+  </tbody>
+</table>
+<% if realtime %>
+</div>
+<% endif %>
+
+<nav class="pagination">
+  {% if let Some(previous) = page.previous() %}<a href="?{{ previous.query() }}" rel="prev">Previous</a>{% endif %}
+  {% if let Some(next) = page.next(<%= plural %>.len()) %}<a href="?{{ next.query() }}" rel="next">Next</a>{% endif %}
+</nav>
+{% endblock %}

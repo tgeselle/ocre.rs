@@ -1,9 +1,10 @@
 //! Middleware every Ocre app runs, in this order (outermost first):
 //!
 //! 1. Security headers on every response.
-//! 2. CORS for the origins listed in `ALLOWED_ORIGINS`.
-//! 3. Cross-origin request protection (CSRF).
-//! 4. The session cookie.
+//! 2. Host authorization for the hosts listed in `ALLOWED_HOSTS`.
+//! 3. CORS for the origins listed in `ALLOWED_ORIGINS`.
+//! 4. Cross-origin request protection (CSRF).
+//! 5. The session cookie.
 //!
 //! CSRF protection checks where a request comes from instead of embedding
 //! tokens in forms: browsers send `Sec-Fetch-Site` (or at least `Origin`) with
@@ -21,10 +22,9 @@ use axum::{
     middleware::{self, Next},
     response::{IntoResponse, Response},
 };
-use cookie::Key;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
-use crate::session::Session;
+use crate::session::{Keys, Session};
 
 /// Name of the Worker variable listing extra origins that may call the app from a browser.
 ///
@@ -51,13 +51,40 @@ use crate::session::Session;
 ///     Ok(ctx.env().var(ALLOWED_ORIGINS).map(|v| v.to_string()).unwrap_or_default())
 /// }
 /// # let _ = origins;
-/// ```
 pub const ALLOWED_ORIGINS: &str = "ALLOWED_ORIGINS";
+
+/// Name of the Worker variable listing the host names the app answers to (Rails' `config.hosts`).
+///
+/// Comma-separated; an entry starting with `.` also allows every subdomain
+/// (`.example.com` allows `example.com` and `www.example.com`). When set,
+/// requests for any other `Host` get a plain-text `403 Forbidden` before any
+/// handler or session code runs; `localhost`, `127.0.0.1` and `[::1]` are
+/// always allowed so `ocre dev` keeps working (Cloudflare only routes your
+/// own host names to the Worker, so these never reach it in production).
+/// Unset or empty: every host is allowed.
+///
+/// On Workers, DNS rebinding cannot reach the app, but the same Worker also
+/// answers on `<name>.<account>.workers.dev` and preview URLs: list your
+/// custom domain to keep search engines and users on it. Read once per
+/// request by [`serve`](crate::serve); no binding call.
+///
+/// ```toml
+/// [vars]
+/// ALLOWED_HOSTS = "example.com, .example.com"
+/// ```
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(ocre::ALLOWED_HOSTS, "ALLOWED_HOSTS");
+/// ```
+pub const ALLOWED_HOSTS: &str = "ALLOWED_HOSTS";
 
 /// Per-request settings read from the Worker environment.
 pub(crate) struct Config {
-    pub key: Result<Key, String>,
+    pub keys: Result<Keys, String>,
     pub allowed_origins: Vec<HeaderValue>,
+    pub allowed_hosts: Vec<String>,
 }
 
 /// `"https://a.example, https://b.example"` -> the two origins. Invalid
@@ -72,14 +99,41 @@ pub(crate) fn parse_origins(value: Option<String>) -> Vec<HeaderValue> {
         .collect()
 }
 
+/// `"Example.com, .example.com"` -> `["example.com", ".example.com"]`.
+pub(crate) fn parse_hosts(value: Option<String>) -> Vec<String> {
+    let value = value.unwrap_or_default();
+    value.split(',').map(|host| host.trim().to_ascii_lowercase()).filter(|host| !host.is_empty()).collect()
+}
+
+/// Whether a request for `host` (with or without a port) may proceed.
+pub(crate) fn host_allowed(host: Option<&str>, allowed: &[String]) -> bool {
+    if allowed.is_empty() {
+        return true;
+    }
+    let Some(host) = host else { return false };
+    let host = host.to_ascii_lowercase();
+    // `[::1]:8787` -> `[::1]`; `example.com:443` -> `example.com`.
+    let name = match host.rsplit_once(':') {
+        Some((name, port)) if !name.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => name,
+        _ => host.as_str(),
+    };
+    if matches!(name, "localhost" | "127.0.0.1" | "[::1]") {
+        return true;
+    }
+    allowed.iter().any(|entry| match entry.strip_prefix('.') {
+        Some(domain) => name == domain || name.strip_suffix(domain).is_some_and(|sub| sub.ends_with('.')),
+        None => name == entry,
+    })
+}
+
 /// Wraps the application router with Ocre's middleware.
 pub(crate) fn wrap(router: Router, config: Config) -> Router {
-    let Config { key, allowed_origins } = config;
+    let Config { keys, allowed_origins, allowed_hosts } = config;
     let trusted = allowed_origins.clone();
     let mut router = router
         .layer(middleware::from_fn(move |req: Request, next: Next| {
-            let key = key.clone();
-            async move { session(key, req, next).await }
+            let keys = keys.clone();
+            async move { session(keys, req, next).await }
         }))
         .layer(middleware::from_fn(move |req: Request, next: Next| {
             let refused = cross_origin(req.method(), req.headers(), &trusted);
@@ -99,12 +153,26 @@ pub(crate) fn wrap(router: Router, config: Config) -> Router {
                 .allow_credentials(true),
         );
     }
+    if !allowed_hosts.is_empty() {
+        router = router.layer(middleware::from_fn(move |req: Request, next: Next| {
+            let header = req.headers().get(header::HOST).and_then(|host| host.to_str().ok());
+            let allowed = host_allowed(req.uri().host().or(header), &allowed_hosts);
+            async move {
+                if allowed {
+                    next.run(req).await
+                } else {
+                    (StatusCode::FORBIDDEN, "Forbidden: blocked host. Add it to ALLOWED_HOSTS to allow it.")
+                        .into_response()
+                }
+            }
+        }));
+    }
     router.layer(middleware::from_fn(security_headers))
 }
 
-async fn session(key: Result<Key, String>, mut req: Request, next: Next) -> Response {
+async fn session(keys: Result<Keys, String>, mut req: Request, next: Next) -> Response {
     let secure = req.uri().scheme_str() == Some("https");
-    let session = Session::from_headers(req.headers(), key, secure);
+    let session = Session::from_headers(req.headers(), keys, secure);
     req.extensions_mut().insert(session.clone());
     let mut response = next.run(req).await;
     match session.set_cookie() {

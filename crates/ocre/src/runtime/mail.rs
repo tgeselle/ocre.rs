@@ -1,18 +1,18 @@
 use std::time::Duration;
 
-use wasm_bindgen::JsValue;
+use wasm_bindgen::{JsCast, JsValue};
 use worker::{
-    EmailAddress, Env, Fetch, ForwardableEmailMessage, Headers, Method, Request, RequestInit, SendEmailBuilder,
-    send::SendFuture,
+    EmailAddress, EmailAttachment, Env, Fetch, ForwardableEmailMessage, Headers, Method, Request, RequestInit,
+    SendEmailBuilder, send::SendFuture,
 };
 
 use super::Ctx;
 use crate::{
     Error, Result,
-    jobs::Payload,
+    jobs::{DEFAULT_QUEUE, Payload},
     mail::{
-        Adapter, EMAIL_BINDING, Email, LOG_PREFIX, MAIL_ADAPTER, MAIL_FROM, Message, Outgoing, RESEND_API_KEY,
-        RESEND_URL, adapter, cloudflare_error, resend_error, resend_key,
+        Adapter, Attachment, EMAIL_BINDING, Email, LOG_PREFIX, MAIL_ADAPTER, MAIL_FROM, Message, Outgoing,
+        RESEND_API_KEY, RESEND_URL, adapter, cloudflare_error, resend_error, resend_key,
     },
 };
 
@@ -33,7 +33,7 @@ use crate::{
 ///
 /// # Errors
 ///
-/// - [`Error::BadRequest`](crate::Error::BadRequest) (400): `to` or `reply_to` is not an email address.
+/// - [`Error::BadRequest`](crate::Error::BadRequest) (400): a recipient (`to`, `cc`, `bcc`) or `reply_to` is not an email address.
 /// - [`Error::Internal`](crate::Error::Internal) (500), with a log message naming the fix:
 ///   `MAIL_ADAPTER` unset or unknown; `MAIL_FROM` unset or not an address; a
 ///   subject that is empty or spans several lines; the `RESEND_API_KEY`
@@ -79,7 +79,7 @@ pub fn send(ctx: &Ctx, email: Email) -> impl Future<Output = Result<()>> + Send 
 ///
 /// # Errors
 ///
-/// - [`Error::BadRequest`](crate::Error::BadRequest) (400): `to` or `reply_to` is not an email address.
+/// - [`Error::BadRequest`](crate::Error::BadRequest) (400): a recipient or `reply_to` is not an email address.
 /// - [`Error::Internal`](crate::Error::Internal) (500): `MAIL_ADAPTER` unset or
 ///   unknown, `MAIL_FROM` unset or not an address, a subject that is empty or
 ///   spans several lines, an email over the 128 KB queue message limit, the
@@ -100,11 +100,39 @@ pub fn send(ctx: &Ctx, email: Email) -> impl Future<Output = Result<()>> + Send 
 /// }
 /// ```
 pub fn deliver_later(ctx: &Ctx, email: Email) -> impl Future<Output = Result<()>> + Send + use<> {
+    deliver_in(ctx, email, Duration::ZERO)
+}
+
+/// Checks `email` now and sends it from the jobs queue after `delay`, like Rails' `deliver_later(wait:)`.
+///
+/// Works like [`deliver_later`](crate::mail::deliver_later), with the
+/// message due after `delay` (whole seconds, 24 hours at most, Queues'
+/// limit): a reminder an hour after sign-up, a digest at the end of the
+/// day. Same free-plan cost as [`deliver_later`](crate::mail::deliver_later).
+///
+/// # Errors
+///
+/// Those of [`deliver_later`](crate::mail::deliver_later), plus an
+/// [`Error::Internal`](crate::Error::Internal) when `delay` is over 24 hours.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::time::Duration;
+///
+/// use ocre::mail::Email;
+///
+/// async fn remind(ctx: &ocre::Ctx) -> ocre::Result<()> {
+///     let email = Email::new("ada@example.com", "Finish setting up your shop", "https://example.com/setup");
+///     ocre::mail::deliver_in(ctx, email, Duration::from_secs(3600)).await
+/// }
+/// ```
+pub fn deliver_in(ctx: &Ctx, email: Email, delay: Duration) -> impl Future<Output = Result<()>> + Send + use<> {
     let env = ctx.env();
     let checked = adapter(var(env, MAIL_ADAPTER).as_deref())
         .and_then(|_| Outgoing::new(var(env, MAIL_FROM), email))
-        .map(|outgoing| Payload::Mail(outgoing.email));
-    super::jobs::send(ctx, checked, Duration::ZERO)
+        .map(|outgoing| Payload::Mail(Box::new(outgoing.email)));
+    super::jobs::send(env.clone(), DEFAULT_QUEUE, checked, delay)
 }
 
 fn var(env: &Env, name: &str) -> Option<String> {
@@ -117,6 +145,7 @@ pub(crate) async fn deliver(env: &Env, email: Email) -> Result<()> {
     match adapter {
         Adapter::Log => {
             worker::console_log!("{}", outgoing.log_text());
+            crate::mail::capture(outgoing);
             Ok(())
         }
         Adapter::Resend => resend(env, &outgoing).await,
@@ -150,13 +179,14 @@ async fn cloudflare(env: &Env, outgoing: &Outgoing) -> Result<()> {
         ))
     })?;
     let Outgoing { from, email } = outgoing;
+    let to = Outgoing::addresses(&email.to);
     let builder = match &from.name {
-        Some(name) => SendEmailBuilder::builder_with_email_address_and_str(
+        Some(name) => SendEmailBuilder::builder_with_email_address_and_slice(
             &EmailAddress::new(name, &from.address),
-            &email.to,
+            &to,
             &email.subject,
         ),
-        None => SendEmailBuilder::builder(&from.address, &email.to, &email.subject),
+        None => SendEmailBuilder::builder_with_str_and_slice(&from.address, &to, &email.subject),
     };
     let mut builder = builder.text(&email.text);
     if let Some(html) = &email.html {
@@ -164,6 +194,38 @@ async fn cloudflare(env: &Env, outgoing: &Outgoing) -> Result<()> {
     }
     if let Some(reply_to) = &email.reply_to {
         builder = builder.reply_to(reply_to);
+    }
+    if !email.cc.is_empty() {
+        builder = builder.cc_with_slice(&Outgoing::addresses(&email.cc));
+    }
+    if !email.bcc.is_empty() {
+        builder = builder.bcc_with_slice(&Outgoing::addresses(&email.bcc));
+    }
+    if !email.headers.is_empty() {
+        let headers = worker::js_sys::Object::new();
+        for (name, value) in &email.headers {
+            // Setting a property on a plain object cannot fail.
+            let _ = worker::js_sys::Reflect::set(&headers, &JsValue::from_str(name), &JsValue::from_str(value));
+        }
+        builder = builder.headers(headers.unchecked_ref());
+    }
+    if !email.attachments.is_empty() {
+        let files: Vec<EmailAttachment> = email
+            .attachments
+            .iter()
+            .map(|file| {
+                let bytes = worker::js_sys::Uint8Array::from(file.content.as_slice());
+                match &file.content_id {
+                    Some(id) => {
+                        EmailAttachment::new_inline_with_typed_array(id, &file.filename, &file.content_type, &bytes)
+                    }
+                    None => {
+                        EmailAttachment::new_attachment_with_typed_array(&file.filename, &file.content_type, &bytes)
+                    }
+                }
+            })
+            .collect();
+        builder = builder.attachments(&files);
     }
     binding.send_with_builder(&builder.build()).await.map_err(|err| cloudflare_error(&js_error(&err)))?;
     Ok(())
@@ -182,8 +244,8 @@ fn js_error(err: &worker::js_sys::Error) -> String {
 ///
 /// [`receive`](crate::mail::receive) builds it. The envelope ([`from`](Self::from), [`to`](Self::to)) comes from
 /// Cloudflare; headers and bodies are parsed from the raw message
-/// (multipart, quoted-printable, base64, RFC 2047 encoded words; attachments
-/// are skipped, [`raw`](Self::raw) keeps them). Bounce it with
+/// (multipart, quoted-printable, base64, RFC 2047 encoded words; files in
+/// [`attachments`](Self::attachments), the bytes in [`raw`](Self::raw)). Bounce it with
 /// [`reject`](Self::reject) or pass it on with [`forward`](Self::forward).
 /// Receiving is free and unlimited on every plan.
 ///
@@ -303,6 +365,25 @@ impl InboundEmail {
     /// ```
     pub fn text(&self) -> Option<&str> {
         self.message.text.as_deref()
+    }
+
+    /// Returns the files of the email, decoded: every part that is not the first text or HTML body.
+    ///
+    /// Inline images carry their `content_id`. Store them in R2
+    /// (`ocre::storage`) rather than D1; they are the sender's files, so
+    /// check the type and size before keeping them.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn mailbox(email: ocre::mail::InboundEmail) {
+    /// for file in email.attachments() {
+    ///     worker::console_log!("{} ({}, {} bytes)", file.filename, file.content_type, file.content.len());
+    /// }
+    /// # }
+    /// ```
+    pub fn attachments(&self) -> &[Attachment] {
+        &self.message.attachments
     }
 
     /// Returns the first `text/html` part, decoded to UTF-8, or `None` when there is none.

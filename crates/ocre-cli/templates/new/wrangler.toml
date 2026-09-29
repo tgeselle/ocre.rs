@@ -7,9 +7,17 @@ compatibility_date = "2026-09-01"
 command = "cargo install -q \"worker-build@^0.8\" && worker-build ${OCRE_BUILD:---release}"
 
 # Files in public/ (robots.txt, images, CSS...) are served by Cloudflare before
-# the Worker runs: free, and not counted as Worker requests.
+# the Worker runs: free, and not counted as Worker requests. public/_headers
+# sets their headers (e.g. long caching); a single-page app would add
+# not_found_handling = "single-page-application".
 [assets]
 directory = "public"
+
+# Workers Logs: every request (method, URL, status, CPU time) and every
+# console line, searchable in the dashboard. Free plan: 200,000 events a day,
+# kept 3 days; beyond that, logs are sampled, never billed.
+[observability]
+enabled = true
 
 # The first `ocre deploy` creates this database; no database_id needed.
 [[d1_databases]]

@@ -96,6 +96,8 @@ impl fmt::Display for FieldError {
 #[derive(Debug, Default)]
 pub struct Validator {
     errors: Vec<FieldError>,
+    /// Whether the last check failed, for [`message`](Self::message).
+    last_failed: bool,
 }
 
 impl Validator {
@@ -121,6 +123,7 @@ impl Validator {
     /// assert_eq!(v.finish().unwrap_err().to_string(), "invalid: Title is reserved");
     /// ```
     pub fn check(&mut self, field: &str, failed: bool, message: impl Into<String>) -> &mut Self {
+        self.last_failed = failed;
         if failed {
             self.errors.push(FieldError::new(field, message));
         }
@@ -206,8 +209,11 @@ impl Validator {
         min: &dyn fmt::Display,
         max: &dyn fmt::Display,
     ) -> &mut Self {
-        self.check(field, below, format!("must be greater than or equal to {min}"));
-        self.check(field, above, format!("must be less than or equal to {max}"))
+        if below {
+            self.check(field, true, format!("must be greater than or equal to {min}"))
+        } else {
+            self.check(field, above, format!("must be less than or equal to {max}"))
+        }
     }
 
     /// Checks that `value` is an integer D1 can store and return exactly (±2^53 - 1).
@@ -240,6 +246,219 @@ impl Validator {
     /// ```
     pub fn inclusion(&mut self, field: &str, value: &str, allowed: &[&str]) -> &mut Self {
         self.check(field, !allowed.contains(&value), "is not included in the list")
+    }
+
+    /// Checks that `value` is not one of `forbidden` ("is reserved"), like Rails' `exclusion`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut v = ocre::Validator::new();
+    /// v.exclusion("username", "ada", &["admin", "root"]);
+    /// assert!(v.is_valid());
+    /// v.exclusion("username", "admin", &["admin", "root"]);
+    /// assert_eq!(v.finish().unwrap_err().to_string(), "invalid: Username is reserved");
+    /// ```
+    pub fn exclusion(&mut self, field: &str, value: &str, forbidden: &[&str]) -> &mut Self {
+        self.check(field, forbidden.contains(&value), "is reserved")
+    }
+
+    /// Checks that `value` has exactly `length` characters (Unicode scalar
+    /// values): "is the wrong length (should be N characters)". For a range
+    /// (Rails' `in:`), chain [`min_length`](Self::min_length) and
+    /// [`max_length`](Self::max_length).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut v = ocre::Validator::new();
+    /// v.length("zip", "75001", 5);
+    /// assert!(v.is_valid());
+    /// v.length("zip", "7500", 5);
+    /// assert_eq!(v.finish().unwrap_err().to_string(), "invalid: Zip is the wrong length (should be 5 characters)");
+    /// ```
+    pub fn length(&mut self, field: &str, value: &str, length: usize) -> &mut Self {
+        let wrong = value.chars().count() != length;
+        self.check(field, wrong, format!("is the wrong length (should be {length} characters)"))
+    }
+
+    /// Checks that `value > than` ("must be greater than N"), like Rails' `comparison`.
+    ///
+    /// Works for numbers and for `YYYY-MM-DD` dates or datetimes as text,
+    /// which compare in time order.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut v = ocre::Validator::new();
+    /// v.greater_than("ends_on", "2026-10-02", "2026-10-01").greater_than("quantity", 0, 0);
+    /// assert_eq!(v.finish().unwrap_err().to_string(), "invalid: Quantity must be greater than 0");
+    /// ```
+    pub fn greater_than<T: PartialOrd + fmt::Display>(&mut self, field: &str, value: T, than: T) -> &mut Self {
+        self.check(field, value <= than, format!("must be greater than {than}"))
+    }
+
+    /// Checks that `value >= min` ("must be greater than or equal to N").
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut v = ocre::Validator::new();
+    /// v.greater_than_or_equal_to("age", 17, 18);
+    /// assert_eq!(v.finish().unwrap_err().to_string(), "invalid: Age must be greater than or equal to 18");
+    /// ```
+    pub fn greater_than_or_equal_to<T: PartialOrd + fmt::Display>(
+        &mut self,
+        field: &str,
+        value: T,
+        min: T,
+    ) -> &mut Self {
+        self.check(field, value < min, format!("must be greater than or equal to {min}"))
+    }
+
+    /// Checks that `value < than` ("must be less than N").
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut v = ocre::Validator::new();
+    /// v.less_than("discount", 1.0, 1.0);
+    /// assert_eq!(v.finish().unwrap_err().to_string(), "invalid: Discount must be less than 1");
+    /// ```
+    pub fn less_than<T: PartialOrd + fmt::Display>(&mut self, field: &str, value: T, than: T) -> &mut Self {
+        self.check(field, value >= than, format!("must be less than {than}"))
+    }
+
+    /// Checks that `value <= max` ("must be less than or equal to N").
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut v = ocre::Validator::new();
+    /// v.less_than_or_equal_to("seats", 9, 8);
+    /// assert_eq!(v.finish().unwrap_err().to_string(), "invalid: Seats must be less than or equal to 8");
+    /// ```
+    pub fn less_than_or_equal_to<T: PartialOrd + fmt::Display>(&mut self, field: &str, value: T, max: T) -> &mut Self {
+        self.check(field, value > max, format!("must be less than or equal to {max}"))
+    }
+
+    /// Checks that `value != other` ("must be other than N").
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut v = ocre::Validator::new();
+    /// v.other_than("parent_id", 4, 4);
+    /// assert_eq!(v.finish().unwrap_err().to_string(), "invalid: Parent must be other than 4");
+    /// ```
+    pub fn other_than<T: PartialEq + fmt::Display>(&mut self, field: &str, value: T, other: T) -> &mut Self {
+        self.check(field, value == other, format!("must be other than {other}"))
+    }
+
+    /// Checks that `confirmation` equals `value`, like Rails' `confirmation`:
+    /// the error goes on `<field>_confirmation` ("doesn't match Password").
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut v = ocre::Validator::new();
+    /// v.confirmation("password", "s3cret-pass", "s3cret-pass");
+    /// assert!(v.is_valid());
+    /// v.confirmation("password", "s3cret-pass", "typo");
+    /// assert_eq!(v.finish().unwrap_err().to_string(), "invalid: Password confirmation doesn't match Password");
+    /// ```
+    pub fn confirmation(&mut self, field: &str, value: &str, confirmation: &str) -> &mut Self {
+        let message = format!("doesn't match {}", humanize(field));
+        self.check(&format!("{field}_confirmation"), value != confirmation, message)
+    }
+
+    /// Checks that a checkbox was ticked ("must be accepted"), like Rails' `acceptance`.
+    ///
+    /// The value is not stored: take it as a `bool` in the form or JSON
+    /// struct (`#[serde(default)]`, since an unticked checkbox sends nothing).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut v = ocre::Validator::new();
+    /// v.acceptance("terms_of_service", false);
+    /// assert_eq!(v.finish().unwrap_err().to_string(), "invalid: Terms of service must be accepted");
+    /// ```
+    pub fn acceptance(&mut self, field: &str, accepted: bool) -> &mut Self {
+        self.check(field, !accepted, "must be accepted")
+    }
+
+    /// Checks that `value` is blank: empty or only whitespace ("must be blank"), like Rails' `absence`.
+    ///
+    /// For an `Option`, check `value.is_some()` with [`check`](Self::check).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut v = ocre::Validator::new();
+    /// v.absence("nickname", " ");
+    /// assert!(v.is_valid());
+    /// v.absence("nickname", "bot");
+    /// assert_eq!(v.finish().unwrap_err().to_string(), "invalid: Nickname must be blank");
+    /// ```
+    pub fn absence(&mut self, field: &str, value: &str) -> &mut Self {
+        self.check(field, !value.trim().is_empty(), "must be blank")
+    }
+
+    /// Checks that every character of `value` passes `allowed` ("is invalid"):
+    /// Rails' `format`, without regular expressions (no regex engine in the
+    /// WebAssembly binary). Combine with [`min_length`](Self::min_length) to
+    /// refuse an empty value, and with [`check`](Self::check) for position
+    /// rules (`value.starts_with(..)`).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut v = ocre::Validator::new();
+    /// let slug = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-';
+    /// v.format("slug", "hello-2026", slug);
+    /// assert!(v.is_valid());
+    /// v.format("slug", "Hello World", slug);
+    /// assert_eq!(v.finish().unwrap_err().to_string(), "invalid: Slug is invalid");
+    /// ```
+    pub fn format(&mut self, field: &str, value: &str, allowed: impl Fn(char) -> bool) -> &mut Self {
+        let invalid = !value.chars().all(allowed);
+        self.check(field, invalid, "is invalid")
+    }
+
+    /// Replaces the message of the check just before, if it failed (Rails' `message:` option).
+    ///
+    /// Only the last check counts: call it right after the check it changes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut v = ocre::Validator::new();
+    /// v.required("title", "Dune").message("needs a title");
+    /// v.required("body", "").message("write something first");
+    /// assert_eq!(v.finish().unwrap_err().to_string(), "invalid: Body write something first");
+    /// ```
+    pub fn message(&mut self, message: impl Into<String>) -> &mut Self {
+        if self.last_failed
+            && let Some(error) = self.errors.last_mut()
+        {
+            error.message = message.into();
+        }
+        self
+    }
+
+    /// The errors collected so far, in the order the checks ran (Rails' `errors`).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut v = ocre::Validator::new();
+    /// v.required("title", "").required("body", "");
+    /// let fields: Vec<&str> = v.errors().iter().map(|e| e.field.as_str()).collect();
+    /// assert_eq!(fields, ["title", "body"]);
+    /// ```
+    pub fn errors(&self) -> &[FieldError] {
+        &self.errors
     }
 
     /// Checks that `value` looks like an e-mail address ("is invalid").
@@ -295,6 +514,51 @@ impl Validator {
     /// ```
     pub fn optional_number<T: FromStr>(&mut self, field: &str, text: &str) -> Option<T> {
         if text.trim().is_empty() { None } else { self.number(field, text) }
+    }
+
+    /// Parses form text into one of an enum's values, like
+    /// [`number`](Self::number): `None` plus "is not included in the list"
+    /// when `T::from_str` refuses it. Generated scaffolds use it for `enum`
+    /// fields.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #[derive(Debug, PartialEq)]
+    /// enum Status {
+    ///     Draft,
+    /// }
+    ///
+    /// impl std::str::FromStr for Status {
+    ///     type Err = ();
+    ///     fn from_str(text: &str) -> Result<Self, ()> {
+    ///         if text == "draft" { Ok(Status::Draft) } else { Err(()) }
+    ///     }
+    /// }
+    ///
+    /// let mut v = ocre::Validator::new();
+    /// assert_eq!(v.one_of::<Status>("status", "draft"), Some(Status::Draft));
+    /// assert_eq!(v.one_of::<Status>("status", "archived"), None);
+    /// assert_eq!(v.finish().unwrap_err().to_string(), "invalid: Status is not included in the list");
+    /// ```
+    pub fn one_of<T: FromStr>(&mut self, field: &str, text: &str) -> Option<T> {
+        let parsed = text.parse().ok();
+        self.check(field, parsed.is_none(), "is not included in the list");
+        parsed
+    }
+
+    /// Like [`one_of`](Self::one_of) for an optional field: blank text is `None` without error.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut v = ocre::Validator::new();
+    /// assert_eq!(v.optional_one_of::<bool>("flag", " "), None);
+    /// assert_eq!(v.optional_one_of::<bool>("flag", "true"), Some(true));
+    /// assert!(v.is_valid());
+    /// ```
+    pub fn optional_one_of<T: FromStr>(&mut self, field: &str, text: &str) -> Option<T> {
+        if text.trim().is_empty() { None } else { self.one_of(field, text) }
     }
 
     /// Parses a required JSON value typed as text (a `<textarea>`), adding "is not valid JSON" when it does not parse.
@@ -367,6 +631,66 @@ impl Validator {
             && matches!(value.as_bytes()[10], b' ' | b'T')
             && is_time(&value[11..]);
         self.check(field, !valid, "is not a valid date and time")
+    }
+
+    /// Checks that `value` is a time of day written `HH:MM` or `HH:MM:SS` (HTML `<input type="time">`).
+    ///
+    /// Message: "is not a valid time". No time zone is accepted.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut v = ocre::Validator::new();
+    /// v.time("opens_at", "09:30").time("closes_at", "18:00:00");
+    /// assert!(v.is_valid());
+    /// v.time("opens_at", "24:00");
+    /// assert_eq!(v.finish().unwrap_err().to_string(), "invalid: Opens at is not a valid time");
+    /// ```
+    pub fn time(&mut self, field: &str, value: &str) -> &mut Self {
+        self.check(field, !is_time(value), "is not a valid time")
+    }
+
+    /// Checks that `value` is a UUID in its hyphenated form, any case ("is not a valid UUID").
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut v = ocre::Validator::new();
+    /// v.uuid("token", "67e55044-10b1-426f-9247-bb680e5fe0c8");
+    /// assert!(v.is_valid());
+    /// v.uuid("token", "67e55044");
+    /// assert_eq!(v.finish().unwrap_err().to_string(), "invalid: Token is not a valid UUID");
+    /// ```
+    pub fn uuid(&mut self, field: &str, value: &str) -> &mut Self {
+        let groups: Vec<&str> = value.split('-').collect();
+        let valid = groups.len() == 5
+            && groups
+                .iter()
+                .zip([8, 4, 4, 4, 12])
+                .all(|(group, len)| group.len() == len && group.bytes().all(|b| b.is_ascii_hexdigit()));
+        self.check(field, !valid, "is not a valid UUID")
+    }
+
+    /// Checks that `value` is an exact decimal number such as `-12.50` ("is not a decimal number").
+    ///
+    /// An optional sign, digits, then optionally a dot and digits: no
+    /// exponent, no spaces. Decimal columns are stored as this text, so money
+    /// keeps every digit (a `REAL` would round `0.1 + 0.2`).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut v = ocre::Validator::new();
+    /// v.decimal("price", "19.99").decimal("balance", "-3");
+    /// assert!(v.is_valid());
+    /// v.decimal("price", "1e3");
+    /// assert_eq!(v.finish().unwrap_err().to_string(), "invalid: Price is not a decimal number");
+    /// ```
+    pub fn decimal(&mut self, field: &str, value: &str) -> &mut Self {
+        let unsigned = value.strip_prefix(['-', '+']).unwrap_or(value);
+        let (whole, fraction) = unsigned.split_once('.').unwrap_or((unsigned, "0"));
+        let valid = [whole, fraction].iter().all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()));
+        self.check(field, !valid, "is not a decimal number")
     }
 
     /// Adds the errors collected by `other`, e.g. a model's `validate()` after parsing a form.

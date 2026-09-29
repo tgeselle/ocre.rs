@@ -1,6 +1,6 @@
 # Testing an Ocre app
 
-An Ocre app is tested today in three layers: native `cargo test` for code that does not touch Cloudflare bindings, `cargo check --target wasm32-unknown-unknown` as the type check of the real build, and end-to-end requests against `ocre dev`. This page shows what works, with the exact commands and their output, and lists what Ocre does not provide yet.
+An Ocre app is tested today in three layers: native `cargo test` for code that does not touch Cloudflare bindings, `cargo check --target wasm32-unknown-unknown` as the type check of the real build, and end-to-end requests against `ocre dev`. `ocre test` runs all three in one command. This page shows what works, with the exact commands and their output, and lists what Ocre does not provide yet.
 
 ## Before you start
 
@@ -20,14 +20,15 @@ An Ocre app is tested today in three layers: native `cargo test` for code that d
 | Model queries (`create`, `find`, `update`...), uniqueness and foreign-key checks | no | yes |
 | Handlers taking `State(ctx)`, `Session`, `Flash`, `CurrentUser`, `BearerUser` | no | yes |
 | CSRF, CORS and security headers (`ocre::serve`) | no | yes |
-| Mail, jobs, crons, R2 files, KV cache, realtime | no | yes |
+| Mailer functions (the `Email` they build), job structs, `ocre::mail::address_with_name` | yes | yes |
+| Sending mail, running jobs and crons, R2 files, KV cache, realtime | no | yes |
 
 Everything that reaches D1, KV, R2, Queues, Durable Objects or email goes through `ocre::Ctx`, and only `ocre::serve` (and the `queue`, `scheduled` and `email` entry points) can build one: a `Ctx` wraps the Worker's JavaScript environment, which exists only inside workerd. So that code runs in `ocre dev`, not in `cargo test`.
 
 ## What Ocre does not provide yet
 
 - `ocre new` and the generators write no tests and no `tests/` directory.
-- There is no test client for handlers, no in-memory or test D1 database, no fixtures or factories, and no `ocre test` command.
+- There is no test client for handlers, no in-memory or test D1 database, and no fixtures or factories.
 - Integration tests in `tests/*.rs` cannot see the app. A generated app is a `cdylib` (the WebAssembly module), so Cargo has no library to link them to; a file `tests/external.rs` that names the crate fails with:
 
 ```text
@@ -200,6 +201,26 @@ cargo check --target wasm32-unknown-unknown
 ```
 
 This check does not compile `#[cfg(test)]` code, and `cargo test` does not compile for WebAssembly: run both. A function used only by tests shows up here as a `dead_code` warning ("function `slugify` is never used") until app code calls it.
+
+## All checks in one command: ocre test
+
+`ocre test` runs `cargo test`, then `cargo check --target wasm32-unknown-unknown`, and stops at the first failure. Arguments after `--` go to `cargo test`:
+
+```sh
+ocre test                  # both steps
+ocre test -- post::tests   # only the tests whose name contains post::tests
+```
+
+```text
+...
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.52s
+  cargo test: ok
+  cargo check --target wasm32-unknown-unknown: ok
+```
+
+It exits with status 1 when a step fails, so it can run in CI; `ocre test --json` prints `{"command":"test","ok":true,"ran":["cargo test: ok","cargo check --target wasm32-unknown-unknown: ok"]}` on stdout and cargo's output on stderr. With `--e2e` it also runs your end-to-end script against a server it starts (see [below](#run-the-script-with-ocre-test-e2e)).
 
 ## End-to-end tests against ocre dev
 
@@ -376,14 +397,24 @@ all checks passed
 
 The script exits with status 1 when a check fails, so an agent or a CI job can run it.
 
+### Run the script with ocre test --e2e
+
+`ocre test --e2e` runs the whole chain unattended: `cargo test`, the wasm32 check, then local migrations, one `wrangler dev` on port 8788 (`--port` to change it) started for the run, and `sh tests/e2e.sh` with `BASE_URL=http://localhost:8788` once the server is ready. The server stops when the script ends, and the command fails when the script exits non-zero. Save the script above as `tests/e2e.sh`, reading `BASE_URL` instead of `BASE`:
+
+```sh
+BASE=${BASE_URL:-http://localhost:8787}
+```
+
+The server uses the same local database as `ocre dev`: run `ocre db reset` first when the checks expect the seeds. Without `tests/e2e.sh`, `ocre test --e2e` stops before running anything with ``error: tests/e2e.sh not found``. See [ocre test](../reference/cli.md#ocre-test).
+
 ### Emails, jobs and scheduled tasks
 
 These leave traces in the `ocre dev` output rather than in responses:
 
-- Emails: with `MAIL_ADAPTER=log` (written to `.dev.vars` by `ocre new`), each email is printed between `[ocre mail]` lines, links included. Read magic-link or reset tokens from there (see [Email](email.md)).
+- Emails: with `MAIL_ADAPTER=log` (written to `.dev.vars` by `ocre new`), each email is printed between `[ocre mail]` lines, links included, and the last 20 are listed as JSON at `http://localhost:8787/ocre/dev/mailers/sent.json`: `curl -s http://localhost:8787/ocre/dev/mailers/sent.json | jq -r '.[-1].email.text'` reads the magic-link or reset token of the last one. Mailer previews are at `/ocre/dev/mailers` (see [Email](email.md#preview-and-inspect-emails-in-development)).
 - Jobs: they run within about 5 seconds of being enqueued; look for `[ocre jobs] <job> done` (see [Background jobs and schedules](jobs.md)).
-- Scheduled tasks: trigger one with `curl 'http://localhost:8787/cdn-cgi/local/scheduled?cron=0+3+*+*+*'` (the cron expression, URL-encoded) and read the `[ocre cron]` lines.
-- Incoming email: POST a raw message to `http://localhost:8787/cdn-cgi/local/email?from=...&to=...` (see [Email](email.md)).
+- Scheduled tasks: fire one with `ocre schedules run <task>` (or `curl 'http://localhost:8787/cdn-cgi/local/scheduled?cron=0+3+*+*+*'`, the cron expression URL-encoded) and read the `[ocre cron]` lines.
+- Incoming email: the form at `http://localhost:8787/ocre/dev/mailbox`, or POST a raw message to `http://localhost:8787/cdn-cgi/local/email?from=...&to=...` (see [Email](email.md#test-it-locally)).
 
 A test script can redirect `ocre dev`'s output to a file and wait for the line it expects.
 
@@ -431,7 +462,7 @@ To do the same for your app, put such a harness in a separate Cargo project next
 
 ## Reference
 
-- [CLI commands](../reference/cli.md): [`ocre dev`](../reference/cli.md#ocre-dev), [`ocre db reset`](../reference/cli.md#ocre-db-reset), [`ocre db seed`](../reference/cli.md#ocre-db-seed), [`ocre sql`](../reference/cli.md#ocre-sql)
+- [CLI commands](../reference/cli.md): [`ocre test`](../reference/cli.md#ocre-test), [`ocre dev`](../reference/cli.md#ocre-dev), [`ocre db reset`](../reference/cli.md#ocre-db-reset), [`ocre db seed`](../reference/cli.md#ocre-db-seed), [`ocre sql`](../reference/cli.md#ocre-sql)
 - [Validations](validations.md): what `validate()`, `create` and `update` check
 - [Sessions, flash and security](security.md): the CSRF check the smoke test exercises
 - [Email](email.md), [Background jobs and schedules](jobs.md): what to read in the `ocre dev` output

@@ -4,7 +4,7 @@ fn project(name: &str) -> Project {
     let root = std::env::temp_dir().join(format!("ocre-edits-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("migrations")).unwrap();
-    Project { root, database_name: "app".into(), api_only: false }
+    Project { root, database_name: "app".into(), api_only: false, generate: Default::default() }
 }
 
 #[test]

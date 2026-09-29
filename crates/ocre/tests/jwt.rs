@@ -89,5 +89,31 @@ fn the_key_comes_from_secret_key_base() {
     assert!(message.starts_with("the SECRET_KEY_BASE secret is not set"), "{message}");
     assert!(matches!(Key::from_secret(Some("short".into())), Err(Error::Internal(_))));
     // Not the session key: a JWT key never decrypts cookies and vice versa.
-    assert_ne!(key().0.as_slice(), crate::session::key_from_secret(Some(SECRET.into())).unwrap().master());
+    assert_ne!(key().0.as_slice(), crate::session::key_from_secret(Some(SECRET.into())).unwrap().current.master());
+}
+
+#[test]
+fn tokens_are_found_in_order_of_locations() {
+    use axum::http::{HeaderMap, HeaderValue, Uri};
+    let mut headers = HeaderMap::new();
+    headers.insert("cookie", HeaderValue::from_static("a=1; token=from-cookie"));
+    headers.insert("authorization", HeaderValue::from_static("Basic abc"));
+    let uri: Uri = "/x?page=2&token=from%20query&token=second".parse().unwrap();
+    let all = [Location::Bearer, Location::Query("token"), Location::Cookie("token")];
+    assert_eq!(token_from(&headers, &uri, &all).as_deref(), Some("from query"), "not a Bearer header");
+    assert_eq!(
+        token_from(&headers, &uri, &[Location::Cookie("token"), Location::Query("token")]).as_deref(),
+        Some("from-cookie")
+    );
+    headers.insert("authorization", HeaderValue::from_static("Bearer  spaced "));
+    assert_eq!(token_from(&headers, &uri, &all).as_deref(), Some("spaced"));
+    headers.insert("authorization", HeaderValue::from_static("Bearer "));
+    let empty: Uri = "/x?token=".parse().unwrap();
+    assert_eq!(
+        token_from(&headers, &empty, &[Location::Bearer, Location::Query("token")]),
+        None,
+        "empty tokens skipped"
+    );
+    assert_eq!(token_from(&HeaderMap::new(), &"/x".parse().unwrap(), &all), None);
+    assert_eq!(token_from(&headers, &"/x?%zz".parse().unwrap(), &[Location::Query("token")]), None);
 }

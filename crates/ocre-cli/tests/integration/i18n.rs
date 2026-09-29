@@ -26,9 +26,11 @@ fn first_locales_wire_the_catalog_and_later_ones_extend_it() {
     assert_eq!(report["next"][1], "ocre i18n missing");
     let lib = read(&root, "src/lib.rs");
     // Last in the chain: it also wraps the routes merged before it.
-    let chain =
-        "        // ocre:routes\n        .merge(comments::routes())\n        .layer(ocre::i18n::layer(&LOCALES))\n}";
-    assert!(lib.contains(chain), "{lib}");
+    assert!(
+        lib.contains("        // ocre:routes\n        .merge(comments::routes())\n        .fallback(not_found)\n"),
+        "{lib}"
+    );
+    assert!(lib.contains("        .layer(ocre::i18n::layer(&LOCALES))\n}"), "{lib}");
     assert!(lib.ends_with("static LOCALES: ocre::i18n::Locales = ocre::locales!(\"en\", \"fr\");\n"), "{lib}");
     assert!(read(&root, "locales/en.yml").ends_with("en:\n  app:\n    welcome: \"Welcome\"\n"));
     assert!(read(&root, "locales/fr.yml").contains("Translate every key of locales/en.yml"));
@@ -47,7 +49,7 @@ fn first_locales_wire_the_catalog_and_later_ones_extend_it() {
     assert!(
         lib.contains(
             "// ocre:routes\n        .merge(posts::routes())\n        .merge(comments::routes())\n        \
-             .layer(ocre::i18n::layer(&LOCALES))"
+             .fallback(not_found)"
         ),
         "{lib}"
     );

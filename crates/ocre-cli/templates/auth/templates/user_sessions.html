@@ -1,0 +1,34 @@
+{% extends "layout.html" %}
+
+{% block title %}Signed-in devices{% endblock %}
+
+{% block content %}
+<h1>Signed-in devices</h1>
+{% if let Some(notice) = flash.notice() %}<p class="notice">{{ notice }}</p>{% endif %}
+{% if let Some(alert) = flash.alert() %}<p class="alert">{{ alert }}</p>{% endif %}
+
+<table>
+  <thead><tr><th>Browser</th><th>IP address</th><th>Last active</th><th>Signed in</th><th></th></tr></thead>
+  <tbody>
+  {% for s in sessions %}
+    <tr>
+      <td>{{ s.user_agent.as_deref().unwrap_or("Unknown") }}{% if s.current %} <strong>(this device)</strong>{% endif %}</td>
+      <td>{{ s.ip_address.as_deref().unwrap_or("") }}</td>
+      <td>{{ s.last_seen_at }}</td>
+      <td>{{ s.created_at }}</td>
+      <td>
+        <form action="/account/sessions/{{ s.id }}/delete" method="post">
+          <button type="submit">Sign out</button>
+        </form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<form action="/account/sessions/others/delete" method="post">
+  <button type="submit">Sign out everywhere else</button>
+</form>
+
+<p><a href="/account">Back to your account</a></p>
+{% endblock %}

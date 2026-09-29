@@ -3,8 +3,11 @@
 CREATE TABLE users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     email TEXT NOT NULL COLLATE NOCASE,
-    -- ocre::password digest (PBKDF2-HMAC-SHA256), never the password.
+    -- ocre::password digest (PBKDF2-HMAC-SHA256), never the password; empty
+    -- for users who only sign in with an OAuth provider.
     password_digest TEXT NOT NULL,
+    -- Set when the user opens the confirmation email.
+    confirmed_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

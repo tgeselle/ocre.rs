@@ -30,23 +30,43 @@ Messages are the exact strings Ocre adds (Rails' wording).
 
 | Method | Passes when | Message |
 |---|---|---|
-| `v.required("title", &title)` | not empty after trimming whitespace | `can't be blank` |
+| `v.required("title", &title)` | not empty after trimming whitespace (Rails' `presence`) | `can't be blank` |
+| `v.absence("nickname", &nickname)` | empty or only whitespace | `must be blank` |
 | `v.max_length("title", &title, 100)` | at most 100 characters (Unicode characters, not bytes) | `is too long (maximum is 100 characters)` |
 | `v.min_length("code", &code, 6)` | at least 6 characters | `is too short (minimum is 6 characters)` |
+| `v.length("zip", &zip, 5)` | exactly 5 characters | `is the wrong length (should be 5 characters)` |
 | `v.range("guests", guests, 1..=12)` | within the inclusive range; any `PartialOrd + Display` type (`i64`, `f64`...) | `must be greater than or equal to 1` / `must be less than or equal to 12` |
+| `v.greater_than("quantity", quantity, 0)` | `value > 0` | `must be greater than 0` |
+| `v.greater_than_or_equal_to("age", age, 18)` | `value >= 18` | `must be greater than or equal to 18` |
+| `v.less_than("discount", discount, 100)` | `value < 100` | `must be less than 100` |
+| `v.less_than_or_equal_to("guests", guests, 12)` | `value <= 12` | `must be less than or equal to 12` |
+| `v.other_than("floor", floor, 13)` | `value != 13` | `must be other than 13` |
 | `v.safe_integer("stock", stock)` | within ±`ocre::MAX_SAFE_INTEGER` (2^53 - 1), what D1 returns exactly | `must be less than or equal to 9007199254740991` (or greater than or equal to the negative bound) |
 | `v.inclusion("slot", &slot, &["lunch", "dinner"])` | one of the listed values | `is not included in the list` |
+| `v.exclusion("username", &username, &["admin", "root"])` | none of the listed values | `is reserved` |
+| `v.format("slug", &slug, \|c\| c.is_ascii_lowercase() \|\| c == '-')` | every character passes the function (no regular expressions: no regex engine in the WebAssembly binary) | `is invalid` |
 | `v.email("email", &email)` | one `@`, text on both sides, a dot in the domain, no spaces or `<>,` | `is invalid` |
+| `v.confirmation("password", &password, &password_confirmation)` | both texts are equal; the error is on `password_confirmation` | `doesn't match Password` |
+| `v.acceptance("terms_of_service", accepted)` | the checkbox `bool` is true | `must be accepted` |
 | `v.date("date", &date)` | `YYYY-MM-DD`, a real calendar date (month lengths, leap years) | `is not a valid date` |
+| `v.time("opens_at", &opens_at)` | `HH:MM` or `HH:MM:SS` (what `<input type="time">` sends) | `is not a valid time` |
 | `v.datetime("at", &at)` | `YYYY-MM-DD HH:MM[:SS]` with a space or `T` (what `<input type="datetime-local">` sends) | `is not a valid date and time` |
+| `v.decimal("price", &price)` | an optional sign, digits, optionally a dot and digits (`19.99`, `-3`); no exponent | `is not a decimal number` |
+| `v.uuid("token", &token)` | hyphenated UUID, any case | `is not a valid UUID` |
 | `v.check("guests", failed, "message")` | `failed` is false: any rule of your own | your message |
 | `v.number::<f64>("price", &text)` | the text parses as the target type; returns `Option<T>` | `is not a number` |
 | `v.optional_number::<i64>("stock", &text)` | blank, or parses; blank returns `None` without an error | `is not a number` |
+| `v.one_of::<Status>("status", &text)` | the text parses with `FromStr` (a generated enum); returns `Option<T>` | `is not included in the list` |
+| `v.optional_one_of::<Status>("status", &text)` | blank, or parses; blank returns `None` | `is not included in the list` |
 | `v.json("data", &text)` | the text is valid JSON; returns `Option<serde_json::Value>` | `is not valid JSON` |
 | `v.optional_json("data", &text)` | blank, or valid JSON; blank returns `None` | `is not valid JSON` |
 | `v.file("image", &upload, &IMAGE)` | the upload is within `Rules::max_bytes` and has an allowed content type | `is too large (maximum is 10 MB)` / `has an unsupported type (allowed: ...)` |
 
-The other methods: `Validator::new()`, `v.merge(other)` (adds the errors another validator collected), `v.is_valid()` (no error so far) and `v.finish()`. File rules and `v.file` are covered in [File storage](files.md). The API reference is in the [rustdoc of `Validator`](/api/ocre/struct.Validator.html).
+The comparisons take any `PartialOrd + Display` value, so they also compare `YYYY-MM-DD` dates as text (`v.greater_than("ends_on", &ends_on, &starts_on)`). For a length range, chain `min_length` and `max_length`.
+
+`.message("...")` right after a check replaces its message when it failed (Rails' `message:`): `v.required("body", &body).message("write something first")`. It only changes the check just before it.
+
+The other methods: `Validator::new()`, `v.merge(other)` (adds the errors another validator collected), `v.is_valid()` (no error so far), `v.errors()` (the `FieldError`s so far, in order) and `v.finish()`. File rules and `v.file` are covered in [File storage](files.md). The API reference is in the [rustdoc of `Validator`](/api/ocre/struct.Validator.html).
 
 A complete set of rules, with a custom one, behind a JSON endpoint:
 
@@ -149,20 +169,92 @@ curl -s -X POST http://localhost:8787/api/reservations -H 'Content-Type: applica
 
 A body that does not deserialize (a missing required field, a string where a number is expected, invalid JSON) never reaches `validate()`: `ocre::Json` answers 400 with serde's explanation (see [JSON APIs](json-apis.md#errors)).
 
+### Forms: confirmation, acceptance, formats and enums
+
+A signup form uses the checks Rails apps reach for on accounts, and a filter form parses a generated enum (`Status` from `ocre g model Task title:string status:enum:open,done author:references?`):
+
+```rust,check
+// src/signup_form.rs
+use ocre::{Result, Validator};
+use serde::Deserialize;
+
+use crate::models::task::Status;
+
+const RESERVED: &[&str] = &["admin", "root", "support"];
+
+/// What the signup form sends: every field is text, the checkbox a bool.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct SignupForm {
+    pub username: String,
+    pub password: String,
+    pub password_confirmation: String,
+    pub age: String,
+    pub zip: String,
+    /// Hidden with CSS: people leave it empty, bots fill it in.
+    pub website: String,
+    /// An unticked checkbox sends nothing, hence `#[serde(default)]`.
+    pub terms_of_service: bool,
+}
+
+impl SignupForm {
+    pub fn validate(&self) -> Result<()> {
+        let mut v = Validator::new();
+        let username_char = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_';
+        v.min_length("username", &self.username, 3).max_length("username", &self.username, 20);
+        v.format("username", &self.username, username_char).message("may only contain a-z, 0-9 and _");
+        v.exclusion("username", &self.username, RESERVED);
+        v.min_length("password", &self.password, 12);
+        v.confirmation("password", &self.password, &self.password_confirmation);
+        if let Some(age) = v.number::<i64>("age", &self.age) {
+            v.greater_than_or_equal_to("age", age, 16);
+        }
+        v.length("zip", &self.zip, 5);
+        v.absence("website", &self.website);
+        v.acceptance("terms_of_service", self.terms_of_service);
+        v.finish()
+    }
+}
+
+/// A filter such as `?status=done`; blank means no filter.
+pub fn status_filter(text: &str) -> Result<Option<Status>> {
+    let mut v = Validator::new();
+    let status = v.optional_one_of::<Status>("status", text);
+    v.finish()?;
+    Ok(status)
+}
+```
+
+With `username=Admin!`, `password=short`, `password_confirmation=shorter`, `age=15`, `zip=7500`, `website=http://spam.example` and no `terms_of_service`, `validate()` fails with these messages, in this order (`full_message()`):
+
+```text
+Username may only contain a-z, 0-9 and _
+Password is too short (minimum is 12 characters)
+Password confirmation doesn't match Password
+Age must be greater than or equal to 16
+Zip is the wrong length (should be 5 characters)
+Website must be blank
+Terms of service must be accepted
+```
+
+The confirmation error is on `password_confirmation`, so a form shows it next to the second field. `status_filter("archived")` fails with "Status is not included in the list"; `status_filter("done")` returns `Some(Status::Done)`.
+
 ## Where rules live
 
 Data rules belong in the model, `src/models/<model>.rs`, so the HTML pages, the JSON API and GraphQL enforce the same ones:
 
 | Rule | Where | Generated for |
 |---|---|---|
-| Checks on the values alone (presence, length, format, ranges, custom rules) | `New<Model>::validate()` and `<Model>Changes::validate()` | `required` (non-optional `string`/`text`), `date`, `datetime`, `safe_integer` (`integer`), `v.file` (`attachment`) |
-| Uniqueness: `has already been taken` | `create` and `update`, with `db.exists(..)` | fields marked `^` |
-| Reference: `must exist` | `create` and `update`, with `db.exists(..)` | `references` fields |
+| Checks on the values alone (presence, length, format, ranges, custom rules) | `New<Model>::validate()` and `<Model>Changes::validate()` | `required` (non-optional `string`/`text`), `date`, `time`, `datetime`, `decimal`, `uuid`, `safe_integer` (`integer`), `v.file` (`attachment`); `enum` fields need none (serde refuses unknown values, the `CHECK` backs it) |
+| Uniqueness: `has already been taken` | `create` and `update`, with `db.exists(..)` | fields marked `^`, and the pair of references of a join model |
+| Reference: `must exist` | `create` and `update`, with `db.exists(..)` | `references` fields (optional ones only when set) |
+| Normalizing input before the checks (trim, lowercase) | `before_create` / `before_update` callbacks | none: empty functions to fill in (see [Callbacks](models.md#callbacks)) |
 
 A generated `create`, for `Comment` (`post:references`):
 
 ```rust
-pub async fn create(ctx: &Ctx, new: NewComment) -> Result<Comment> {
+pub async fn create(ctx: &Ctx, mut new: NewComment) -> Result<Comment> {
+    before_create(ctx, &mut new).await?;
     let db = ctx.db()?;
     let mut v = new.validate();
     {
@@ -170,9 +262,12 @@ pub async fn create(ctx: &Ctx, new: NewComment) -> Result<Comment> {
         v.check("post_id", !db.exists("SELECT 1 FROM posts WHERE id = ?1 LIMIT 1", params![*post_id]).await?, "must exist");
     }
     v.finish()?;
-    db.first("INSERT INTO comments (author, body, post_id) VALUES (?1, ?2, ?3) RETURNING *", params![new.author, new.body, new.post_id])
+    let record: Comment = db
+        .first("INSERT INTO comments (author, body, post_id) VALUES (?1, ?2, ?3) RETURNING *", params![new.author, new.body, new.post_id])
         .await?
-        .ok_or_else(|| Error::internal("INSERT ... RETURNING returned no row"))
+        .ok_or_else(|| Error::internal("INSERT ... RETURNING returned no row"))?;
+    after_create(ctx, &record).await?;
+    Ok(record)
 }
 ```
 
@@ -338,7 +433,7 @@ The separate `dates` validator tells whether both dates parsed (`is_valid()`), s
 ## See also
 
 - [Models and migrations](models.md): the generated `validate()`, `create` and `update`
-- [Controllers, routing, views and htmx](controllers.md): the scaffold's form handling
+- [Controllers and routing](controllers.md) and [Views, helpers and forms](views.md#forms): the scaffold's form handling
 - [JSON APIs and GraphQL](json-apis.md): error JSON, 400 versus 422
 - [File storage](files.md): `Rules` and `v.file` for uploads
 - [Field types](../reference/field-types.md): which checks each type gets

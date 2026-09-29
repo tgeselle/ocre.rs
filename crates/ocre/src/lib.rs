@@ -38,8 +38,17 @@
 //!
 //! | Module | Contents |
 //! |---|---|
-//! | crate root | [`serve`], [`Ctx`], [`Db`] and [`params!`] (D1), [`Error`] / [`Result`], [`Json`] / [`ApiError`] / [`Page`] (JSON APIs), [`Session`] / [`Flash`], [`Validator`], `render` / `Htmx` (feature `html`), serde helpers ([`optional`], [`patch`], [`bool_from_sql`], ...) |
+//! | crate root | [`serve`], [`Ctx`], [`Db`], [`params!`] and [`Query`] / [`Paginated`] (D1), [`Error`] / [`Result`], [`Json`] / [`ApiError`] / [`Page`] (JSON APIs), [`Session`] / [`Flash`], [`Validator`], request helpers ([`Format`], [`RemoteIp`], [`RequestId`], [`redirect_back`]), `render` / `error_page` / `Htmx` / `HxRedirect` (feature `html`), serde helpers ([`optional`], [`patch`], [`bool_from_sql`], ...) |
 //! | [`cache`] | Read-through values in Workers KV, `Cache-Control`, `ETag` and `304 Not Modified` |
+//! | [`encryption`] | Encrypted model columns (AES-256-GCM keyed from `SECRET_KEY_BASE`), deterministic for lookups |
+#![cfg_attr(
+    feature = "html",
+    doc = "| [`filters`] | Ocre's view helpers as askama filters: `{{ price\\|number_to_currency(\"$\") }}` (feature `html`) |"
+)]
+#![cfg_attr(
+    not(feature = "html"),
+    doc = "| `filters` | View helpers as askama filters (feature `html`, off in this build) |"
+)]
 #![cfg_attr(
     feature = "graphql",
     doc = "| [`graphql`] | `/graphql` endpoint and GraphiQL for an async-graphql schema (feature `graphql`) |"
@@ -48,10 +57,12 @@
     not(feature = "graphql"),
     doc = "| `graphql` | `/graphql` endpoint and GraphiQL (feature `graphql`, off in this build) |"
 )]
+//! | [`helpers`] | Rails' view helpers: numbers (`number_to_currency`...), times (`time_ago_in_words`, `strftime`), text (`excerpt`, `highlight`) |
 //! | [`i18n`] | Translations from `locales/*.yml`, plurals, the request's locale |
 //! | [`jobs`] | Background jobs on Cloudflare Queues, scheduled tasks on Cron Triggers |
 //! | [`jwt`] | HS256 JSON Web Tokens for API clients |
 //! | [`mail`] | Sending email (log, Resend, Cloudflare adapters) and receiving it from Email Routing |
+//! | [`oauth`] | "Sign in with GitHub / Google": OAuth 2.0 code flow with PKCE |
 //! | [`password`] | PBKDF2-HMAC-SHA256 password digests |
 #![cfg_attr(
     feature = "realtime",
@@ -61,6 +72,7 @@
     not(feature = "realtime"),
     doc = "| `realtime` | WebSocket channels on a Durable Object (feature `realtime`, off in this build) |"
 )]
+//! | [`security`] | Content-Security-Policy (nonces), Permissions-Policy, rate limits, safe redirects, `sanitize` / `strip_tags`, log filtering, HTTP Basic auth |
 //! | [`storage`] | Files in Cloudflare R2: multipart uploads, attachments, streamed downloads |
 //! | [`token`] | Random tokens for emailed links and API keys, stored as SHA-256 digests |
 //!
@@ -120,11 +132,16 @@
 mod api;
 pub mod cache;
 mod clock;
+pub mod encryption;
 mod error;
 mod fields;
+#[cfg(feature = "html")]
+#[cfg_attr(docsrs, doc(cfg(feature = "html")))]
+pub mod filters;
 #[cfg(feature = "graphql")]
 #[cfg_attr(docsrs, doc(cfg(feature = "graphql")))]
 pub mod graphql;
+pub mod helpers;
 #[cfg(feature = "html")]
 mod htmx;
 pub mod i18n;
@@ -132,12 +149,16 @@ pub mod jobs;
 pub mod jwt;
 pub mod mail;
 mod names;
+pub mod oauth;
 pub mod password;
 mod protect;
+mod query;
 #[cfg(feature = "realtime")]
 #[cfg_attr(docsrs, doc(cfg(feature = "realtime")))]
 pub mod realtime;
+mod request;
 mod runtime;
+pub mod security;
 mod session;
 mod sql;
 pub mod storage;
@@ -149,24 +170,26 @@ mod validate;
 #[cfg(feature = "html")]
 mod view;
 
-pub use api::{ApiError, ApiResult, Created, Json, Page};
+pub use api::{ApiError, ApiResult, Created, Json, Page, PageLinks};
 pub use clock::now;
 pub use error::{Error, OptionExt, Result};
 pub use fields::{optional, patch, patch_json};
 #[cfg(feature = "html")]
 #[cfg_attr(docsrs, doc(cfg(feature = "html")))]
-pub use htmx::Htmx;
-pub use protect::ALLOWED_ORIGINS;
+pub use htmx::{Htmx, HxRedirect};
+pub use protect::{ALLOWED_HOSTS, ALLOWED_ORIGINS};
+pub use query::{Direction, Paginated, Query, escape_like};
+pub use request::{Format, RemoteIp, RequestId, redirect_back, remote_ip};
 pub use runtime::{Ctx, Db, serve};
 /// JSON values (`serde_json::Value`, the `json!` macro) for `json` fields,
 /// without adding `serde_json` to the app.
 pub use serde_json;
-pub use session::{Flash, SECRET_KEY_BASE, SESSION_COOKIE, Session};
+pub use session::{Flash, SECRET_KEY_BASE, SECRET_KEY_BASE_PREVIOUS, SESSION_COOKIE, Session};
 pub use sql::{IntoParam, MAX_SAFE_INTEGER, Param, Statement, bool_from_sql, json_from_sql, optional_json_from_sql};
 pub use validate::{FieldError, Validator};
 #[cfg(feature = "html")]
 #[cfg_attr(docsrs, doc(cfg(feature = "html")))]
-pub use view::render;
+pub use view::{ErrorPage, error_page, render};
 
 /// Builds the parameter list of a [`Db`] query: `params![title, id]`.
 ///

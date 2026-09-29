@@ -1,0 +1,11 @@
+{% extends "layout.html" %}
+
+{% block title %}Confirm your email address{% endblock %}
+
+{% block content %}
+<h1>Confirm your email address</h1>
+
+<form action="/confirmations/{{ token }}" method="post">
+  <button type="submit">Confirm</button>
+</form>
+{% endblock %}

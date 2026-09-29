@@ -2,6 +2,7 @@
 # Stand-in for `npx --yes wrangler@4 ...` in CLI tests. Behaviour is driven by
 # marker files in $FAKE_WRANGLER_STATE; every call is appended to calls.log.
 state="$FAKE_WRANGLER_STATE"
+if [ "$1" = "--version" ]; then echo "10.9.0"; exit 0; fi
 shift 2 # drop `--yes wrangler@4`
 echo "$*" >> "$state/calls.log"
 
@@ -50,11 +51,21 @@ case "$1" in
             ;;
         esac
         ;;
+      create)
+        fail_if d1_create_fails
+        echo "Created D1 database '$3'"
+        ;;
       execute)
         fail_if execute_fails
+        if [ -e "$state/execute_no_table" ]; then echo "✘ [ERROR] no such table: d1_migrations: SQLITE_ERROR" >&2; exit 1; fi
         if [ "$4" = "--command" ]; then
-          # `--json`: the rows, from execute.json (default: one empty result).
-          if [ -e "$state/execute.json" ]; then cat "$state/execute.json"; else echo '[{"results":[],"success":true}]'; fi
+          # `--json`: the rows, from the first file of execute_queue/ (used
+          # once), else execute.json (default: one empty result).
+          next="$(ls "$state/execute_queue" 2>/dev/null | head -n 1)"
+          if [ -n "$next" ]; then
+            cat "$state/execute_queue/$next"
+            rm "$state/execute_queue/$next"
+          elif [ -e "$state/execute.json" ]; then cat "$state/execute.json"; else echo '[{"results":[],"success":true}]'; fi
         else
           echo "Executed $5 on $3 ($6)"
         fi
@@ -67,6 +78,13 @@ case "$1" in
     echo "Ready on http://localhost:$3"
     ;;
   secret)
+    # `secret bulk <file>`: logs the uploaded JSON as a call.
+    if [ "$2" = "bulk" ]; then
+      fail_if secret_bulk_fails
+      echo "uploaded $(cat "$3")" >> "$state/calls.log"
+      echo "✨ Finished processing secrets file"
+      exit 0
+    fi
     # `secret list --format json`: SECRET_KEY_BASE only with has_secret;
     # secret_list.json overrides the output.
     if [ -e "$state/secret_list_fails" ]; then

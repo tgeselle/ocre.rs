@@ -12,7 +12,25 @@
   <dt>Member since</dt><dd>{{ user.created_at }}</dd>
 </dl>
 
+{% if !user.confirmed() %}
+<form action="/confirmations" method="post">
+  <p class="alert">Your email address is not confirmed yet.</p>
+  <button type="submit">Send a new confirmation link</button>
+</form>
+{% endif %}
+
+{# ocre:account-links #}
 <form action="/logout" method="post">
   <button type="submit">Log out</button>
+</form>
+
+<h2>Delete your account</h2>
+<form action="/account/delete" method="post">
+{% if user.has_password() %}
+  <label>Your password <input type="password" name="confirmation" required autocomplete="current-password"></label>
+{% else %}
+  <label>Type your email address <input type="email" name="confirmation" required></label>
+{% endif %}
+  <button type="submit">Delete my account and its data</button>
 </form>
 {% endblock %}

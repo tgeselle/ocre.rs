@@ -90,6 +90,14 @@ pub fn pluralize(word: &str) -> String {
     }
 }
 
+/// Rust keywords (strict and reserved, 2024 edition): never a function or module name.
+pub const RUST_KEYWORDS: &[&str] = &[
+    "abstract", "as", "async", "await", "become", "box", "break", "const", "continue", "crate", "do", "dyn", "else",
+    "enum", "extern", "false", "final", "fn", "for", "gen", "if", "impl", "in", "let", "loop", "macro", "match", "mod",
+    "move", "mut", "override", "priv", "pub", "ref", "return", "self", "static", "struct", "super", "trait", "true",
+    "try", "type", "typeof", "unsafe", "unsized", "use", "virtual", "where", "while", "yield",
+];
+
 /// `snake_case` identifier starting with a letter.
 pub fn is_identifier(name: &str) -> bool {
     let mut chars = name.chars();

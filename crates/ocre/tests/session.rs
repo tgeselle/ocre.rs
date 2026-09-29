@@ -4,8 +4,79 @@ use super::*;
 
 const SECRET: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-fn key() -> std::result::Result<Key, String> {
+fn key() -> std::result::Result<Keys, String> {
     key_from_secret(Some(SECRET.to_owned()))
+}
+
+#[test]
+fn previous_secrets_decrypt_and_are_rotated_out() {
+    let old = SECRET.replace('0', "1");
+    let old_keys = key_from_secret(Some(old.clone()));
+    let session = Session::from_headers(&HeaderMap::new(), old_keys, true);
+    session.insert("user_id", 9).unwrap();
+    let old_cookie = cookie_pair(&session.set_cookie().unwrap().unwrap());
+
+    let rotated = keys_from_secrets(Some(SECRET.to_owned()), Some(format!(" {}, ,{old}", SECRET.replace('0', "2"))));
+    let session = Session::from_headers(&headers(&old_cookie), rotated.clone(), true);
+    assert_eq!(session.get::<i64>("user_id").unwrap(), Some(9), "read with a previous key");
+    let new_cookie = cookie_pair(&session.set_cookie().unwrap().expect("re-encrypted with the current key"));
+    let session = Session::from_headers(&headers(&new_cookie), key(), true);
+    assert_eq!(session.get::<i64>("user_id").unwrap(), Some(9), "readable with the current key alone");
+
+    let session = Session::from_headers(&headers(&new_cookie), rotated, true);
+    assert_eq!(session.get::<i64>("user_id").unwrap(), Some(9));
+    assert_eq!(session.set_cookie().unwrap(), None, "current key: nothing to rewrite");
+
+    let Err(message) = keys_from_secrets(Some(SECRET.to_owned()), Some("short".into())) else { panic!("short") };
+    assert!(message.starts_with("SECRET_KEY_BASE_PREVIOUS has a value shorter than 64"), "{message}");
+    assert!(keys_from_secrets(None, None).is_err());
+}
+
+#[test]
+fn expired_sessions_start_empty() {
+    let set = round_trip("", |s| {
+        s.insert("user_id", 1).unwrap();
+        s.expire_in(3600).unwrap();
+    })
+    .unwrap();
+    assert!(!set.to_str().unwrap().contains("Max-Age"), "expire_in keeps a browser-session cookie");
+    let session = Session::from_headers(&headers(&cookie_pair(&set)), key(), true);
+    assert_eq!(session.get::<i64>("user_id").unwrap(), Some(1));
+    let expires_at = session.expires_at().unwrap().unwrap();
+    assert!((expires_at - crate::now() - 3600).abs() <= 1);
+
+    let set = round_trip("", |s| {
+        s.insert("user_id", 1).unwrap();
+        s.flash("notice", "hi").unwrap();
+        s.expire_in(-1).unwrap();
+    })
+    .unwrap();
+    let session = Session::from_headers(&headers(&cookie_pair(&set)), key(), true);
+    assert_eq!(session.get::<i64>("user_id").unwrap(), None, "expired");
+    assert!(session.flashes().unwrap().is_empty(), "flash expired with it");
+    assert_eq!(session.expires_at().unwrap(), None);
+    let removal = session.set_cookie().unwrap().unwrap();
+    assert!(removal.to_str().unwrap().contains("Max-Age=0"), "the expired cookie is deleted");
+}
+
+#[test]
+fn remember_for_sets_a_persistent_cookie() {
+    let set = round_trip("", |s| {
+        s.insert("user_id", 1).unwrap();
+        s.remember_for(30 * 86_400).unwrap();
+    })
+    .unwrap();
+    let text = set.to_str().unwrap().to_owned();
+    let max_age: i64 = text.split("Max-Age=").nth(1).unwrap().split(';').next().unwrap().parse().unwrap();
+    assert!((max_age - 30 * 86_400).abs() <= 1, "{text}");
+
+    // A later change keeps the same end time; `expire_in` makes it a browser-session cookie again.
+    let next = round_trip(&cookie_pair(&set), |s| s.insert("theme", "dark").unwrap()).unwrap();
+    assert!(next.to_str().unwrap().contains("Max-Age="));
+    let next = round_trip(&cookie_pair(&next), |s| s.expire_in(60).unwrap()).unwrap();
+    assert!(!next.to_str().unwrap().contains("Max-Age"));
+    let cleared = round_trip(&cookie_pair(&set), |s| s.clear().unwrap()).unwrap();
+    assert!(cleared.to_str().unwrap().contains("Max-Age=0"), "sign-out deletes it");
 }
 
 fn headers(cookie: &str) -> HeaderMap {

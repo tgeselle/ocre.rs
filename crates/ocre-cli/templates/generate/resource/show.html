@@ -1,0 +1,16 @@
+{% extends "layout.html" %}
+
+{% block title %}<%= human_singular %> {{ <%= singular %>.id }}{% endblock %}
+
+{% block content %}
+<h1><%= human_singular %> {{ <%= singular %>.id }}</h1>
+
+<dl>
+<% for field in fields %>
+  <dt><%= field.label %></dt><dd><%= field.display %></dd>
+<% endfor %>
+  <dt>Created at</dt><dd>{{ <%= singular %>.created_at }}</dd>
+</dl>
+
+<p><a href="{{ paths::index() }}">Back</a></p>
+{% endblock %}

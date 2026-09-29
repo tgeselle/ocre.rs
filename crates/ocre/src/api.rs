@@ -4,7 +4,7 @@
 use axum::{
     extract::{FromRequest, FromRequestParts, Query, Request},
     http::{HeaderValue, StatusCode, header, request::Parts},
-    response::{IntoResponse, Response},
+    response::{IntoResponse, IntoResponseParts, Response, ResponseParts},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -216,6 +216,120 @@ impl Page {
             return Err(Error::bad_request("offset must be 0 or more"));
         }
         Ok(Self { limit, offset })
+    }
+
+    /// The page after this one, or `None` when `returned` (the rows this page got) is less than `limit`.
+    ///
+    /// Ocre paginates without `COUNT(*)` (that query reads every row, and D1
+    /// bills rows read), so "is there more?" is guessed from a full page: when
+    /// the last page is exactly full, its "Next" link leads to an empty page.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ocre::Page;
+    ///
+    /// let page = Page::new(50, 0).unwrap();
+    /// assert_eq!(page.next(50), Some(Page { limit: 50, offset: 50 }));
+    /// assert_eq!(page.next(12), None);
+    /// ```
+    pub fn next(&self, returned: usize) -> Option<Self> {
+        (i64::try_from(returned).is_ok_and(|returned| returned >= self.limit))
+            .then_some(Self { limit: self.limit, offset: self.offset.saturating_add(self.limit) })
+    }
+
+    /// The page before this one, or `None` on the first page.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ocre::Page;
+    ///
+    /// assert_eq!(Page::new(50, 70).unwrap().previous(), Some(Page { limit: 50, offset: 20 }));
+    /// assert_eq!(Page::new(50, 0).unwrap().previous(), None);
+    /// ```
+    pub fn previous(&self) -> Option<Self> {
+        (self.offset > 0).then(|| Self { limit: self.limit, offset: (self.offset - self.limit).max(0) })
+    }
+
+    /// The query string of this page, without `?`: `offset=50`, with `limit=` first when it is not the default.
+    ///
+    /// Templates link to other pages with it:
+    /// `{% if let Some(next) = page.next(posts.len()) %}<a href="?{{ next.query() }}">Next</a>{% endif %}`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ocre::Page;
+    ///
+    /// assert_eq!(Page::new(50, 100).unwrap().query(), "offset=100");
+    /// assert_eq!(Page::new(20, 40).unwrap().query(), "limit=20&offset=40");
+    /// ```
+    pub fn query(&self) -> String {
+        if self.limit == Self::DEFAULT_LIMIT {
+            format!("offset={}", self.offset)
+        } else {
+            format!("limit={}&offset={}", self.limit, self.offset)
+        }
+    }
+
+    /// `Link` header (RFC 8288) pointing JSON clients at the `next`, `prev` and `first` pages of `path`.
+    ///
+    /// GitHub's API convention. Returns a response part: put it before the
+    /// body in a tuple. `returned` is the number of rows this page got; see
+    /// [`next`](Self::next). No header on a single page.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use axum::response::IntoResponse;
+    /// use ocre::{Json, Page};
+    ///
+    /// let page = Page::new(2, 2).unwrap();
+    /// let posts = vec!["c", "d"];
+    /// let response = (page.links("/api/posts", posts.len()), Json(posts)).into_response();
+    /// assert_eq!(
+    ///     response.headers()["link"],
+    ///     r#"</api/posts?limit=2&offset=4>; rel="next", </api/posts?limit=2&offset=0>; rel="prev", </api/posts?limit=2&offset=0>; rel="first""#
+    /// );
+    /// ```
+    pub fn links(&self, path: &str, returned: usize) -> PageLinks {
+        let mut links = Vec::new();
+        if let Some(next) = self.next(returned) {
+            links.push(format!("<{path}?{}>; rel=\"next\"", next.query()));
+        }
+        if let Some(previous) = self.previous() {
+            links.push(format!("<{path}?{}>; rel=\"prev\"", previous.query()));
+            let first = Self { limit: self.limit, offset: 0 };
+            links.push(format!("<{path}?{}>; rel=\"first\"", first.query()));
+        }
+        PageLinks((!links.is_empty()).then(|| links.join(", ")).and_then(|value| HeaderValue::from_str(&value).ok()))
+    }
+}
+
+/// The `Link` header built by [`Page::links`], as a response part (nothing when there is no other page).
+///
+/// # Examples
+///
+/// ```
+/// use axum::response::IntoResponse;
+/// use ocre::Page;
+///
+/// let only_page = Page::new(50, 0).unwrap().links("/api/posts", 3);
+/// let response = (only_page, "[]").into_response();
+/// assert!(response.headers().get("link").is_none());
+/// ```
+#[derive(Debug, Clone)]
+pub struct PageLinks(Option<HeaderValue>);
+
+impl IntoResponseParts for PageLinks {
+    type Error = std::convert::Infallible;
+
+    fn into_response_parts(self, mut res: ResponseParts) -> Result<ResponseParts, Self::Error> {
+        if let Some(value) = self.0 {
+            res.headers_mut().insert(header::LINK, value);
+        }
+        Ok(res)
     }
 }
 

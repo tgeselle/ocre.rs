@@ -71,10 +71,65 @@ pub const SECRET_KEY_BASE: &str = "SECRET_KEY_BASE";
 const MAX_COOKIE_BYTES: usize = 4096;
 /// Session entry holding the flash messages for the next request.
 const FLASH_KEY: &str = "_flash";
+/// Session entry holding the Unix time (seconds) the session expires at.
+const EXPIRES_AT_KEY: &str = "_expires_at";
+/// Session entry set to `true` when the cookie outlives the browser session.
+const PERSISTENT_KEY: &str = "_persistent";
 
-/// Derives the cookie encryption key from `SECRET_KEY_BASE`.
-pub(crate) fn key_from_secret(secret: Option<String>) -> std::result::Result<Key, String> {
-    checked_secret(secret).map(|secret| Key::derive_from(secret.as_bytes()))
+/// Name of the Worker secret listing the previous `SECRET_KEY_BASE` values, during a rotation.
+///
+/// Comma-separated, newest first, each 64 characters or more. Session
+/// cookies encrypted with one of them are still read, then re-encrypted with
+/// the current `SECRET_KEY_BASE` on the same response; JWTs signed with one
+/// still verify until they expire. Rails' `cookies_rotations`. Remove it once
+/// the longest session you care about has been re-encrypted (or after your
+/// JWT lifetime). Worker secrets cannot be read back: keep the value you
+/// replace, and upload it with `npx wrangler secret put
+/// SECRET_KEY_BASE_PREVIOUS` before the new `SECRET_KEY_BASE`. Read once per
+/// request; no binding call.
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(ocre::SECRET_KEY_BASE_PREVIOUS, "SECRET_KEY_BASE_PREVIOUS");
+/// ```
+pub const SECRET_KEY_BASE_PREVIOUS: &str = "SECRET_KEY_BASE_PREVIOUS";
+
+/// The session cookie keys: the current one encrypts, every one decrypts.
+#[derive(Clone, Debug)]
+pub(crate) struct Keys {
+    pub current: Key,
+    pub previous: Vec<Key>,
+}
+
+/// Derives the cookie encryption key from `SECRET_KEY_BASE` (tests).
+#[cfg(test)]
+pub(crate) fn key_from_secret(secret: Option<String>) -> std::result::Result<Keys, String> {
+    keys_from_secrets(secret, None)
+}
+
+/// Derives the current key from `SECRET_KEY_BASE` and the previous ones from
+/// `SECRET_KEY_BASE_PREVIOUS` (comma-separated).
+pub(crate) fn keys_from_secrets(secret: Option<String>, previous: Option<String>) -> std::result::Result<Keys, String> {
+    let current = Key::derive_from(checked_secret(secret)?.as_bytes());
+    let previous = previous_secrets(previous)?.iter().map(|secret| Key::derive_from(secret.as_bytes())).collect();
+    Ok(Keys { current, previous })
+}
+
+/// The values of `SECRET_KEY_BASE_PREVIOUS`, each checked like `SECRET_KEY_BASE`.
+pub(crate) fn previous_secrets(previous: Option<String>) -> std::result::Result<Vec<String>, String> {
+    let previous = previous.unwrap_or_default();
+    let secrets = previous.split(',').map(str::trim).filter(|secret| !secret.is_empty());
+    secrets
+        .map(|secret| {
+            checked_secret(Some(secret.to_owned())).map_err(|_| {
+                format!(
+                    "{SECRET_KEY_BASE_PREVIOUS} has a value shorter than 64 characters. Fix: list old \
+                     SECRET_KEY_BASE values, comma-separated, newest first"
+                )
+            })
+        })
+        .collect()
 }
 
 /// `SECRET_KEY_BASE` when it is set and long enough, or an error naming the fix.
@@ -93,13 +148,26 @@ pub(crate) fn checked_secret(secret: Option<String>) -> std::result::Result<Stri
 /// Like Rails' default cookie store: values are serialized as JSON and the
 /// cookie is encrypted and authenticated with AES-256-GCM using a key derived
 /// from [`SECRET_KEY_BASE`], so clients can neither read nor change it. A
-/// cookie that does not decrypt (tampered, or encrypted with an older key)
-/// starts an empty session. The cookie is decrypted on first use; changes are
-/// sent back as one `Set-Cookie` header when the handler returns, and only if
-/// something changed. Clones share the same session.
+/// cookie that does not decrypt (tampered, or encrypted with a key that is
+/// neither `SECRET_KEY_BASE` nor listed in [`SECRET_KEY_BASE_PREVIOUS`])
+/// starts an empty session; one encrypted with a previous key is read and
+/// re-encrypted with the current key. The cookie is decrypted on first use;
+/// changes are sent back as one `Set-Cookie` header when the handler returns,
+/// and only if something changed. Clones share the same session.
 ///
 /// Browsers drop cookies over 4 KB: store ids, not records. A response whose
 /// session cookie would be larger becomes a 500 (logged, naming that fix).
+///
+/// By default the cookie lasts until the browser session ends and the
+/// session never expires on its own. [`expire_in`](Self::expire_in) sets an
+/// expiry time stored inside the encrypted cookie (checked on every request,
+/// so an old copy of the cookie cannot be replayed after it), and
+/// [`remember_for`](Self::remember_for) also keeps the cookie across browser
+/// restarts ("remember me"). Keys starting with `_` are reserved for Ocre.
+///
+/// Server-side session tracking (list and revoke a user's sessions) is
+/// generated by `ocre g auth --db-sessions`, which stores a session id here
+/// and the session row in D1.
 ///
 /// Added by [`serve`](crate::serve). Outside `serve` the extractor rejects
 /// with [`Error::Internal`]: as an HTML page with the `html` feature, as
@@ -132,7 +200,7 @@ pub(crate) fn checked_secret(secret: Option<String>) -> std::result::Result<Stri
 pub struct Session(Arc<Mutex<State>>);
 
 struct State {
-    key: std::result::Result<Key, String>,
+    keys: std::result::Result<Keys, String>,
     /// Encrypted cookie value from the request, decrypted on first use.
     cookie: Option<String>,
     loaded: bool,
@@ -145,14 +213,27 @@ struct State {
 
 impl State {
     fn key(&self) -> Result<&Key> {
-        self.key.as_ref().map_err(|err| Error::internal(err.clone()))
+        self.keys.as_ref().map(|keys| &keys.current).map_err(|err| Error::internal(err.clone()))
+    }
+
+    /// The session data in `value`, and whether it was encrypted with a previous key.
+    fn decrypt(&self, value: String) -> Result<(Option<Map<String, Value>>, bool)> {
+        let keys = self.keys.as_ref().map_err(|err| Error::internal(err.clone()))?;
+        let mut jar = CookieJar::new();
+        jar.add_original(Cookie::new(SESSION_COOKIE, value));
+        for (index, key) in std::iter::once(&keys.current).chain(&keys.previous).enumerate() {
+            if let Some(cookie) = jar.private(key).get(SESSION_COOKIE) {
+                return Ok((serde_json::from_str(cookie.value()).ok(), index > 0));
+            }
+        }
+        Ok((None, false))
     }
 }
 
 impl Session {
     /// Session for a request with these headers. `secure` marks the cookie
     /// `Secure` (HTTPS requests).
-    pub(crate) fn from_headers(headers: &HeaderMap, key: std::result::Result<Key, String>, secure: bool) -> Self {
+    pub(crate) fn from_headers(headers: &HeaderMap, keys: std::result::Result<Keys, String>, secure: bool) -> Self {
         let cookie = headers
             .get_all(header::COOKIE)
             .iter()
@@ -162,7 +243,7 @@ impl Session {
             .find(|cookie| cookie.name() == SESSION_COOKIE)
             .map(|cookie| cookie.value().to_owned());
         Self(Arc::new(Mutex::new(State {
-            key,
+            keys,
             cookie,
             loaded: false,
             data: Map::new(),
@@ -178,15 +259,21 @@ impl Session {
     }
 
     /// The state with the cookie decrypted. A cookie that does not decrypt
-    /// (tampered, or encrypted with an older key) starts an empty session.
+    /// (tampered, or encrypted with an unknown key) or that expired starts an
+    /// empty session; one encrypted with a previous key is re-encrypted.
     fn loaded(&self) -> Result<MutexGuard<'_, State>> {
         let mut state = self.state();
         if !state.loaded {
             if let Some(value) = state.cookie.take() {
-                let mut jar = CookieJar::new();
-                jar.add_original(Cookie::new(SESSION_COOKIE, value));
-                let cookie = jar.private(state.key()?).get(SESSION_COOKIE);
-                state.data = cookie.and_then(|cookie| serde_json::from_str(cookie.value()).ok()).unwrap_or_default();
+                let (data, rotated) = state.decrypt(value)?;
+                state.data = data.unwrap_or_default();
+                state.changed |= rotated;
+            }
+            let expires_at = state.data.get(EXPIRES_AT_KEY).and_then(Value::as_i64);
+            if expires_at.is_some_and(|expires_at| expires_at <= crate::now()) {
+                // Expired: the response deletes the cookie.
+                state.data.clear();
+                state.changed = true;
             }
             if let Some(Value::Object(flash)) = state.data.remove(FLASH_KEY) {
                 state.flash = flash;
@@ -203,6 +290,94 @@ impl Session {
         state.key()?;
         state.changed = true;
         Ok(state)
+    }
+
+    /// Makes the session expire `seconds` from now; the cookie still ends with the browser session.
+    ///
+    /// The expiry time is stored inside the encrypted cookie and checked on
+    /// every request, so a copied or replayed cookie stops working after it
+    /// (Rails' "session expiry" countermeasure): the session then starts
+    /// empty. Calling it again moves the expiry. [`clear`](Self::clear)
+    /// removes it with everything else. Generated sign-in (`ocre g auth`)
+    /// calls it or [`remember_for`](Self::remember_for).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Internal`] when [`SECRET_KEY_BASE`] is missing or shorter
+    /// than 64 characters.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use ocre::{Result, Session};
+    ///
+    /// async fn sign_in(session: Session) -> Result<()> {
+    ///     session.insert("user_id", 42)?;
+    ///     session.expire_in(24 * 3600) // signed out after a day, even if the tab stays open
+    /// }
+    /// # let _ = sign_in;
+    /// ```
+    pub fn expire_in(&self, seconds: i64) -> Result<()> {
+        self.set_expiry(seconds, false)
+    }
+
+    /// Keeps the session for `seconds`, across browser restarts ("remember me").
+    ///
+    /// Like [`expire_in`](Self::expire_in), plus a persistent cookie
+    /// (`Max-Age` set to the time left), so closing the browser does not sign
+    /// the user out. Every later `Set-Cookie` keeps the same end time.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Internal`] when [`SECRET_KEY_BASE`] is missing or shorter
+    /// than 64 characters.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use ocre::{Result, Session};
+    ///
+    /// async fn sign_in(session: Session, remember_me: bool) -> Result<()> {
+    ///     session.insert("user_id", 42)?;
+    ///     if remember_me { session.remember_for(30 * 24 * 3600) } else { session.expire_in(24 * 3600) }
+    /// }
+    /// # let _ = sign_in;
+    /// ```
+    pub fn remember_for(&self, seconds: i64) -> Result<()> {
+        self.set_expiry(seconds, true)
+    }
+
+    fn set_expiry(&self, seconds: i64, persistent: bool) -> Result<()> {
+        let mut state = self.writable()?;
+        state.data.insert(EXPIRES_AT_KEY.to_owned(), Value::from(crate::now().saturating_add(seconds)));
+        if persistent {
+            state.data.insert(PERSISTENT_KEY.to_owned(), Value::Bool(true));
+        } else {
+            state.data.remove(PERSISTENT_KEY);
+        }
+        Ok(())
+    }
+
+    /// When the session expires, in Unix seconds, if [`expire_in`](Self::expire_in)
+    /// or [`remember_for`](Self::remember_for) set it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Internal`] when the request carries a session cookie but
+    /// [`SECRET_KEY_BASE`] is missing or shorter than 64 characters.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use ocre::{Result, Session};
+    ///
+    /// async fn expires(session: Session) -> Result<String> {
+    ///     Ok(session.expires_at()?.map_or("with the browser".to_owned(), |at| format!("at {at}")))
+    /// }
+    /// # let _ = expires;
+    /// ```
+    pub fn expires_at(&self) -> Result<Option<i64>> {
+        Ok(self.loaded()?.data.get(EXPIRES_AT_KEY).and_then(Value::as_i64))
     }
 
     /// Returns the value stored under `key`, or `None` if absent or not deserializable as `T`.
@@ -382,7 +557,12 @@ impl Session {
             let json = serde_json::to_string(data).expect("JSON values serialize");
             let mut jar = CookieJar::new();
             jar.private_mut(key).add(Cookie::new(SESSION_COOKIE, json));
-            jar.get(SESSION_COOKIE).expect("just added").clone()
+            let mut cookie = jar.get(SESSION_COOKIE).expect("just added").clone();
+            if data.get(PERSISTENT_KEY) == Some(&Value::Bool(true)) {
+                let expires_at = data.get(EXPIRES_AT_KEY).and_then(Value::as_i64).unwrap_or(0);
+                cookie.set_max_age(cookie::time::Duration::seconds(expires_at.saturating_sub(crate::now()).max(0)));
+            }
+            cookie
         };
         cookie.set_path("/");
         cookie.set_http_only(true);

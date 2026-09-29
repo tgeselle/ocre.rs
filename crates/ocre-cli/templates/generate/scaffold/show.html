@@ -1,0 +1,23 @@
+{% extends "layout.html" %}
+
+{% block title %}<%= human_singular %> {{ <%= singular %>.id }}{% endblock %}
+
+{% block content %}
+<h1><%= human_singular %> {{ <%= singular %>.id }}</h1>
+{% if let Some(notice) = flash.notice() %}<p class="notice">{{ notice }}</p>{% endif %}
+{% if let Some(alert) = flash.alert() %}<p class="alert">{{ alert }}</p>{% endif %}
+
+<dl>
+<% for field in fields %>
+  <dt><%= field.label %></dt><dd><%= field.show %></dd>
+<% endfor %>
+  <dt>Created at</dt><dd>{{ <%= singular %>.created_at }}</dd>
+  <dt>Updated at</dt><dd>{{ <%= singular %>.updated_at }}</dd>
+</dl>
+
+<p><a href="{{ paths::edit(<%= singular %>.id) }}">Edit</a> · <a href="{{ paths::index() }}">Back</a></p>
+
+<form action="{{ paths::delete(<%= singular %>.id) }}" method="post" hx-boost="true" hx-confirm="Delete this <%= lower %>?">
+  <button type="submit">Delete <%= lower %></button>
+</form>
+{% endblock %}

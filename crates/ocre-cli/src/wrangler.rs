@@ -239,6 +239,12 @@ impl<'a> Wrangler<'a> {
     /// Worker does not exist yet. Any other failure is an error, so an
     /// existing secret is never overwritten by mistake.
     fn has_secret_key_base(&self) -> Result<bool, CliError> {
+        Ok(self.secret_names()?.is_some_and(|names| names.iter().any(|name| name == SECRET_KEY_BASE)))
+    }
+
+    /// Names of the deployed Worker's secrets, or `None` when the Worker does
+    /// not exist yet (`wrangler secret list`; values cannot be read back).
+    pub fn secret_names(&self) -> Result<Option<Vec<String>>, CliError> {
         let output = self
             .command()
             .args(["secret", "list", "--format", "json"])
@@ -248,7 +254,7 @@ impl<'a> Wrangler<'a> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if !output.status.success() {
             if stderr.contains("not found") {
-                return Ok(false);
+                return Ok(None);
             }
             return Err(CliError::new(format!("`wrangler secret list` failed: {}", stderr.trim())).hint(
                 "log in with `ocre login`, or set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID; \
@@ -257,10 +263,10 @@ impl<'a> Wrangler<'a> {
         }
         let secrets: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)
             .map_err(|err| CliError::new(format!("unexpected `wrangler secret list` output: {err}")))?;
-        Ok(secrets.iter().any(|secret| secret["name"] == SECRET_KEY_BASE))
+        Ok(Some(secrets.iter().filter_map(|secret| secret["name"].as_str().map(str::to_owned)).collect()))
     }
 
-    fn database_exists(&self, name: &str) -> Result<bool, CliError> {
+    pub(crate) fn database_exists(&self, name: &str) -> Result<bool, CliError> {
         let output =
             self.command().args(["d1", "list", "--json"]).stderr(Stdio::piped()).output().map_err(npx_missing)?;
         if !output.status.success() {
@@ -319,6 +325,16 @@ impl<'a> Wrangler<'a> {
         Err(CliError::new(message).hint(hint))
     }
 
+    /// Starts wrangler in the background with stdout piped, in its own
+    /// process group so [`stop`] ends npx, wrangler and workerd together.
+    pub fn spawn(&self, args: &[&str]) -> Result<std::process::Child, CliError> {
+        let mut command = self.command();
+        command.args(args).stdout(Stdio::piped());
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        command.spawn().map_err(npx_missing)
+    }
+
     fn command(&self) -> Command {
         let mut command = Command::new("npx");
         command.args(["--yes", WRANGLER]).current_dir(self.cwd).env("OCRE_BUILD", self.build);
@@ -328,6 +344,14 @@ impl<'a> Wrangler<'a> {
 
 fn npx_missing(err: std::io::Error) -> CliError {
     CliError::new(format!("could not run npx: {err}")).hint("install Node.js 20 or newer (it provides npx)")
+}
+
+/// Stops a process started by [`Wrangler::spawn`], with its children.
+pub fn stop(mut child: std::process::Child) {
+    #[cfg(unix)]
+    let _ = Command::new("kill").args(["-TERM", &format!("-{}", child.id())]).status();
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Wrangler's D1 location flag.

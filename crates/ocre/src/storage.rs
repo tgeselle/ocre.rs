@@ -78,7 +78,7 @@ mod multipart;
 use std::fmt::Write as _;
 
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::Response,
 };
@@ -459,6 +459,48 @@ pub fn human_size(bytes: u64) -> String {
     } else {
         format!("{rounded:.1} {}", UNITS[unit])
     }
+}
+
+/// Sends bytes built by the handler as a file (Rails' `send_data`): a CSV export, a generated image, an `.ics` file.
+///
+/// Sets `Content-Type`, `Content-Length` and `Content-Disposition` with
+/// `filename` (sanitized; non-ASCII names kept in `filename*`). As with
+/// [`serve`], [`Disposition::Inline`] shows only types that are safe to
+/// display (images, PDF, plain text, audio, video) and downloads the rest,
+/// and types a browser could run (HTML, SVG, XML, JavaScript) are sent as
+/// `application/octet-stream`. Files already in R2 go through [`serve`]
+/// instead: it streams them without copying through WebAssembly, and
+/// answers `Range` and `If-None-Match` (Rails' `send_file`). The whole body
+/// is in memory, and the Worker's 128 MB memory limit applies; building it
+/// counts toward the 10 ms CPU budget.
+///
+/// # Examples
+///
+/// ```
+/// use ocre::storage::{Disposition, send_data};
+///
+/// let csv = "id,title\n1,Hello\n";
+/// let response = send_data(csv, "posts.csv", "text/csv", Disposition::Download);
+/// assert_eq!(response.headers()["content-type"], "text/csv");
+/// assert_eq!(response.headers()["content-disposition"], "attachment; filename=\"posts.csv\"");
+/// ```
+pub fn send_data(data: impl Into<Bytes>, filename: &str, content_type: &str, disposition: Disposition) -> Response {
+    data_response(data.into(), filename, content_type, disposition)
+}
+
+fn data_response(data: Bytes, filename: &str, content_type: &str, disposition: Disposition) -> Response {
+    let filename = sanitize_filename(filename);
+    let content_type = essence(content_type);
+    let binary = BINARY_TYPES.contains(&content_type.as_str());
+    let sent_type = if binary { "application/octet-stream" } else { &content_type };
+    let disposition = content_disposition(disposition, &filename, &content_type);
+    let length = HeaderValue::from(data.len());
+    let mut response = Response::new(Body::from(data));
+    let headers = response.headers_mut();
+    headers.insert(header::CONTENT_TYPE, header_value(sent_type));
+    headers.insert(header::CONTENT_DISPOSITION, header_value(&disposition));
+    headers.insert(header::CONTENT_LENGTH, length);
+    response
 }
 
 /// `<prefix>/<22 random URL-safe characters>` (128 random bits).

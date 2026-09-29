@@ -36,7 +36,7 @@ Without `--graphql`, only the migration, the model and `src/products_api.rs` are
 
 | Method | Path | Handler | Success |
 |---|---|---|---|
-| GET | `/api/products?limit=&offset=` | `index` | 200, a JSON array, newest first; `limit` 1-100 (default 50), `offset` from 0 |
+| GET | `/api/products?limit=&offset=` | `index` | 200, a JSON array, newest first; `limit` 1-100 (default 50), `offset` from 0; a `Link` header to the other pages |
 | GET | `/api/products/{id}` | `show` | 200, the record |
 | POST | `/api/products` | `create` | 201, the created record; every required field must be sent |
 | PATCH | `/api/products/{id}` | `update` | 200, the updated record; only the fields sent change |
@@ -51,8 +51,10 @@ pub fn routes() -> Router<Ctx> {
         .route("/api/products/{id}", get(show).patch(update).delete(delete))
 }
 
-async fn index(State(ctx): State<Ctx>, page: Page) -> ApiResult<Json<Vec<Product>>> {
-    Ok(Json(product::all(&ctx, page).await?))
+/// One page (`?limit=&offset=`), with a `Link` header to the next and previous pages.
+async fn index(State(ctx): State<Ctx>, page: Page) -> ApiResult<(PageLinks, Json<Vec<Product>>)> {
+    let products = product::all(&ctx, page).await?;
+    Ok((page.links("/api/products", products.len()), Json(products)))
 }
 
 async fn show(State(ctx): State<Ctx>, Path(id): Path<i64>) -> ApiResult<Json<Product>> {
@@ -247,6 +249,36 @@ curl -s 'http://localhost:8787/api/products?limit=abc'
 ```
 
 A `PATCH` to an unknown id is a 404 (`{"error":{"message":"Not found","status":404}}`), as is `GET`.
+
+## Pagination, versions and formats
+
+List endpoints read `?limit=&offset=` with `ocre::Page` and answer a `Link` header (RFC 8288, GitHub's convention) pointing to the neighbouring pages:
+
+```sh
+curl -si 'http://localhost:8787/api/products?limit=2&offset=2'
+```
+
+```text
+HTTP/1.1 200 OK
+Content-Type: application/json
+link: </api/products?limit=2&offset=4>; rel="next", </api/products?limit=2&offset=0>; rel="prev", </api/products?limit=2&offset=0>; rel="first"
+...
+```
+
+`next` is there when the page is full (`Page::next`): Ocre does not run a `COUNT(*)`, which would read every row of the table from D1's daily 5 million. A client follows `next` until it is absent; the last page may be empty when the total is a multiple of `limit`. An endpoint that must report a total runs its own count (see [Models](models.md)).
+
+Versions are path prefixes: keep the current routes in a module and nest it, then nest the next version's module beside it when the contract changes (the routes then read `/products` inside the module):
+
+```rust
+fn routes() -> Router<Ctx> {
+    Router::new()
+        .nest("/api/v1", products_v1::routes())
+        .nest("/api/v2", products_v2::routes())
+        // ocre:routes
+}
+```
+
+`ocre routes` lists nested routes with their prefix. One action that serves HTML to browsers and JSON to API clients reads the `Accept` header with `ocre::Format` (see [Controllers](controllers.md#formats-respond_to)). Every error has the same shape, `{"error": {"status": ..., "message": ..., "fields": ...}}` (see [Errors](#errors)), including unmatched paths in API-only apps.
 
 ## Optional fields and partial updates
 
@@ -525,7 +557,7 @@ APIs are public until you protect them. After `ocre g auth`, take `BearerUser(us
 
 - [Models and migrations](models.md): the model behind every API
 - [Validations](validations.md): rules and the 422 `fields` object
-- [Controllers, routing, views and htmx](controllers.md): routing and extractors in general
+- [Controllers and routing](controllers.md): routing and extractors in general
 - [Authentication](authentication.md): `BearerUser`, JWTs and API keys
 - [File storage](files.md): attachments in JSON APIs (`PUT /api/<plural>/{id}/<file>`)
 - [Generators](../reference/generators.md#ocre-g-api), [Configuration](../reference/configuration.md#allowed_origins), [Free-plan limits](../reference/limits.md)

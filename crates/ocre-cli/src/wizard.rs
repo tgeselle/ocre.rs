@@ -9,6 +9,7 @@ use crate::{
     CliResult,
     new::{NewArgs, Plan, Starter, check_new_app},
     output::CliError,
+    template::Template,
     wrangler::{Echo, Session, Wrangler, pick_account},
 };
 
@@ -68,7 +69,8 @@ pub fn new_app(args: NewArgs, cwd: &Path) -> CliResult {
         }
     };
 
-    let plan = Plan::new(cwd, &name, args.ocre_path.as_deref(), api, starter, git, account_id)?;
+    let mut plan = Plan::new(cwd, &name, args.ocre_path.as_deref(), api, starter, git, account_id)?;
+    plan.template = args.template.map(|source| Template::load(&source, cwd)).transpose()?;
     let mut report = step("Creating your app", &format!("Created {name}/"), || plan.create())?;
     if deploy {
         let deployed = step("Building and deploying to Cloudflare", "Deployed", || plan.deploy(Echo::Capture))?;

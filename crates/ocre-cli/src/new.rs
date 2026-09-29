@@ -15,6 +15,7 @@ use crate::{
     output::{CliError, Report},
     project::{Project, check_wasm_target},
     secret::{self, SECRET_KEY_BASE},
+    template::Template,
     wrangler::{Deployed, Echo, Wrangler, pick_account},
 };
 
@@ -39,6 +40,7 @@ const HTML_FILES: &[(&str, &str)] = &[
     ("src/lib.rs", include_str!("../templates/new/lib.rs")),
     ("templates/layout.html", include_str!("../templates/new/layout.html")),
     ("templates/home.html", include_str!("../templates/new/home.html")),
+    ("templates/error.html", include_str!("../templates/new/error.html")),
 ];
 
 /// API-only apps: JSON, no templates, no askama.
@@ -67,6 +69,8 @@ pub struct NewArgs {
     pub login: Option<bool>,
     pub deploy: Option<bool>,
     pub yes: bool,
+    /// `--template`: path or URL of an application template.
+    pub template: Option<String>,
 }
 
 pub fn run(args: NewArgs, json: bool) -> CliResult {
@@ -91,6 +95,7 @@ fn run_with_flags(args: NewArgs, cwd: &Path, json: bool) -> CliResult {
         args.git.unwrap_or(false),
         args.account_id,
     )?;
+    plan.template = args.template.map(|source| Template::load(&source, cwd)).transpose()?;
     let echo = Echo::for_json(json);
     // Deploying needs a session, so `--deploy` implies `--login`.
     let session =
@@ -118,6 +123,8 @@ pub struct Plan {
     pub starter: Starter,
     pub git: bool,
     pub account_id: Option<String>,
+    /// Applied right after the app and its starter are created.
+    pub template: Option<Template>,
 }
 
 impl Plan {
@@ -150,7 +157,16 @@ impl Plan {
         if git && !git_available() {
             return Err(CliError::new("git is not installed").hint("install git, or create the app without `--git`"));
         }
-        Ok(Self { name: name.to_owned(), root: cwd.join(name), ocre_dep, api, starter, git, account_id })
+        Ok(Self {
+            name: name.to_owned(),
+            root: cwd.join(name),
+            ocre_dep,
+            api,
+            starter,
+            git,
+            account_id,
+            template: None,
+        })
     }
 
     pub fn create(&self) -> CliResult {
@@ -179,13 +195,21 @@ impl Plan {
         report.created.push(format!("{name}/.dev.vars"));
         if self.starter == Starter::Blog {
             let fields = ["title:string", "body:text", "published:boolean"].map(String::from);
-            let project = Project::at(self.root.clone())?;
+            let mut project = Project::at(self.root.clone())?;
+            let generator = if self.api { "api" } else { "scaffold" };
+            project.generate.invocation =
+                ["g", generator, "Post"].into_iter().map(String::from).chain(fields.iter().cloned()).collect();
             let generated = if self.api {
                 generate::api(&project, "Post", &fields, false)?
             } else {
                 generate::scaffold(&project, "Post", &fields, false)?
             };
             report.created.extend(generated.created.into_iter().map(|path| format!("{name}/{path}")));
+        }
+        if let Some(template) = &self.template {
+            let applied = template.apply(&self.root)?;
+            report.created.extend(applied.created.into_iter().map(|path| format!("{name}/{path}")));
+            report.ran.extend(applied.ran);
         }
         if self.git {
             let status = Command::new("git").args(["init", "--quiet"]).current_dir(&self.root).status()?;

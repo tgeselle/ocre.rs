@@ -21,6 +21,8 @@ fn mailer_generates_templates_and_registers_the_module() {
             "templates/mailers/user/welcome.html",
             "templates/mailers/user/password_reset.txt",
             "templates/mailers/user/password_reset.html",
+            "templates/mailers/layout.html",
+            "templates/mailers/layout.txt",
             "src/mailers/mod.rs",
         ])
     );
@@ -34,25 +36,81 @@ fn mailer_generates_templates_and_registers_the_module() {
     assert!(mailer.contains("#[template(path = \"mailers/user/password_reset.html\")]\nstruct PasswordResetHtml<'a>"));
     assert!(mailer.contains(
         "pub fn password_reset(to: &str) -> Result<Email> {\n    let text = PasswordResetText { to }.render()?;\n    \
-         let html = PasswordResetHtml { to }.render()?;\n    Ok(Email::new(to, \"Password reset\", text).html(html))\n}"
+         let html = PasswordResetHtml { to }.render()?;\n    Ok(super::defaults(Email::new(to, \"Password reset\", \
+         text).html(html)))\n}"
     ));
     let welcome = fs::read_to_string(root.join("templates/mailers/user/welcome.txt")).unwrap();
-    assert!(welcome.starts_with("Hello {{ to }},\n\nThis is the welcome email."), "{welcome}");
+    assert!(
+        welcome.starts_with(
+            "{% extends \"mailers/layout.txt\" %}\n{% block content -%}\nHello {{ to }},\n\nThis is the welcome email."
+        ),
+        "{welcome}"
+    );
     let html = fs::read_to_string(root.join("templates/mailers/user/password_reset.html")).unwrap();
+    assert!(html.starts_with("{% extends \"mailers/layout.html\" %}\n{% block content %}\n"), "{html}");
     assert!(html.contains("<p>Hello {{ to }},</p>\n<p>This is the password reset email."), "{html}");
+    let layout = fs::read_to_string(root.join("templates/mailers/layout.html")).unwrap();
+    assert!(layout.contains("{% block content %}{% endblock %}"), "{layout}");
     let lib = fs::read_to_string(root.join("src/lib.rs")).unwrap();
     assert!(lib.contains("// ocre:modules\nmod mailers;\n"), "{lib}");
+    assert!(lib.contains("// ocre:routes\n        .merge(ocre::mail::dev_routes(mailers::PREVIEWS))\n"), "{lib}");
 
     // A second mailer only extends the registry; the lib already has `mod mailers;`.
     let output = sandbox.ocre(&["g", "mailer", "billing", "receipt"], &root);
     assert!(output.status.success());
     assert!(text(&output).0.starts_with("  create  src/mailers/billing.rs\n"), "{}", text(&output).0);
+    assert!(!text(&output).0.contains("layout"), "layouts are created once");
     let registry = fs::read_to_string(root.join("src/mailers/mod.rs")).unwrap();
+    assert!(registry.contains("\n// ocre:mailers\npub mod billing;\npub mod user;\n"), "{registry}");
+    assert!(registry.contains("pub fn defaults(email: Email) -> Email {\n    email\n}"), "{registry}");
     assert!(
-        registry.contains("#![allow(dead_code)]\n\n// ocre:mailers\npub mod billing;\npub mod user;\n"),
+        registry.contains(
+            "    // ocre:mailer-previews\n    Preview::new(\"billing/receipt\", || billing::receipt(\"ada@example.com\")),\n    \
+             Preview::new(\"user/welcome\", || user::welcome(\"ada@example.com\")),\n    \
+             Preview::new(\"user/password_reset\", || user::password_reset(\"ada@example.com\")),\n];"
+        ),
         "{registry}"
     );
-    assert_eq!(fs::read_to_string(root.join("src/lib.rs")).unwrap().matches("mod mailers;").count(), 1);
+    let lib = fs::read_to_string(root.join("src/lib.rs")).unwrap();
+    assert_eq!((lib.matches("mod mailers;").count(), lib.matches("dev_routes").count()), (1, 1));
+}
+
+#[test]
+fn mailer_registries_from_older_versions_keep_compiling() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &["--api"]);
+    fs::create_dir_all(root.join("src/mailers")).unwrap();
+    fs::write(root.join("src/mailers/mod.rs"), "// ocre:mailers\npub mod user;\n").unwrap();
+    let (report, ok) = sandbox.json(&["g", "mailer", "Billing", "receipt"], &root);
+    assert!(ok, "{report}");
+    assert_eq!(report["updated"], serde_json::json!(["src/mailers/mod.rs"]));
+    let mailer = fs::read_to_string(root.join("src/mailers/billing.rs")).unwrap();
+    assert!(mailer.contains("    Ok(Email::new(to, \"Receipt\", text))\n"), "no `defaults` to call: {mailer}");
+    assert!(!fs::read_to_string(root.join("src/lib.rs")).unwrap().contains("dev_routes"), "no previews to serve");
+}
+
+#[test]
+fn a_mailer_after_the_mailbox_serves_its_previews() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    sandbox.json(&["g", "mailbox"], &root);
+    assert!(fs::read_to_string(root.join("src/lib.rs")).unwrap().contains(".merge(ocre::mail::dev_routes(&[]))"));
+    let (report, ok) = sandbox.json(&["g", "mailer", "User", "welcome"], &root);
+    assert!(ok, "{report}");
+    let lib = fs::read_to_string(root.join("src/lib.rs")).unwrap();
+    assert!(lib.contains(".merge(ocre::mail::dev_routes(mailers::PREVIEWS))") && !lib.contains("(&[])"), "{lib}");
+
+    // Without the routes marker nothing is written.
+    fs::write(
+        root.join("src/lib.rs"),
+        lib.replace("        .merge(ocre::mail::dev_routes(mailers::PREVIEWS))\n", "").replace("// ocre:routes", ""),
+    )
+    .unwrap();
+    fs::remove_file(root.join("src/mailers/user.rs")).unwrap();
+    let (report, ok) = sandbox.json(&["g", "mailer", "Team", "invite"], &root);
+    assert!(!ok);
+    assert_eq!(report["error"], "src/lib.rs is missing the `// ocre:routes` marker");
+    assert!(!root.join("src/mailers/team.rs").exists());
 }
 
 #[test]
@@ -66,7 +124,7 @@ fn mailer_in_an_api_only_app_builds_text_with_format() {
     assert!(!mailer.contains("askama") && !root.join("templates").exists(), "{mailer}");
     assert!(mailer.contains(
         "pub fn welcome(to: &str) -> Result<Email> {\n    let text = format!(\"Hello {to},\\n\\nThis is the welcome \
-         email. Edit it in src/mailers/account.rs.\\n\");\n    Ok(Email::new(to, \"Welcome\", text))\n}"
+         email. Edit it in src/mailers/account.rs.\\n\");\n    Ok(super::defaults(Email::new(to, \"Welcome\", text)))\n}"
     ), "{mailer}");
 }
 
@@ -140,4 +198,30 @@ fn mailbox_wires_the_email_event_once() {
     let (report, _) = sandbox.json(&["g", "mailbox"], &root);
     assert_eq!(report["error"], "src/lib.rs is missing the `// ocre:modules` marker");
     assert!(!root.join("src/mailbox.rs").exists());
+}
+
+#[test]
+fn mailbox_after_a_mailer_keeps_its_previews() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    let (report, ok) = sandbox.json(&["g", "mailer", "User", "welcome"], &root);
+    assert!(ok, "{report}");
+    let (report, ok) = sandbox.json(&["g", "mailbox"], &root);
+    assert!(ok, "{report}");
+    let lib = fs::read_to_string(root.join("src/lib.rs")).unwrap();
+    assert_eq!(lib.matches("dev_routes").count(), 1, "{lib}");
+    assert!(lib.contains(".merge(ocre::mail::dev_routes(mailers::PREVIEWS))"), "{lib}");
+}
+
+#[test]
+fn mailbox_needs_the_routes_marker_for_its_dev_pages() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    let lib = fs::read_to_string(root.join("src/lib.rs")).unwrap().replace("// ocre:routes", "");
+    fs::write(root.join("src/lib.rs"), &lib).unwrap();
+    let (report, ok) = sandbox.json(&["g", "mailbox"], &root);
+    assert!(!ok);
+    assert_eq!(report["error"], "src/lib.rs is missing the `// ocre:routes` marker");
+    assert!(!root.join("src/mailbox.rs").exists(), "nothing written on failure");
+    assert_eq!(fs::read_to_string(root.join("src/lib.rs")).unwrap(), lib);
 }

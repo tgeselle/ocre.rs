@@ -160,6 +160,11 @@ fn api_only_app_serves_rest_and_graphql_on_workerd() {
     let (status, me) = bearer_json(&server, "GET", "/api/auth/me", token["token"].as_str().unwrap(), "");
     assert_eq!((status, me["id"].as_i64()), (200, user["id"].as_i64()));
     assert_eq!(get(&server, "/login").status, 404, "no HTML pages in API-only apps");
+    assert_eq!(
+        json(&server, "GET", "/no/such/path", ""),
+        (404, serde_json::json!({"error": {"status": 404, "message": "Not found"}})),
+        "unmatched paths answer JSON"
+    );
 
     assert_eq!(json(&server, "GET", "/", ""), (200, serde_json::json!({"app": "e2e-api", "status": "ok"})));
 
@@ -279,6 +284,22 @@ fn generated_app_serves_full_crud_on_workerd() {
     assert_eq!(get(&server, "/posts/999").status, 404);
     assert_eq!(post(&server, "/posts/999", &[("title", "a"), ("body", "b")]).status, 404);
     assert_eq!(post(&server, "/posts/999/delete", &[]).status, 404);
+
+    // Error pages use templates/error.html and the layout; JSON errors stay JSON.
+    let missing = get(&server, "/no/such/page");
+    assert_eq!(missing.status, 404);
+    assert!(missing.body.contains("<title>Not found</title>") && missing.body.contains("<h1>Not found</h1>"));
+    let bad_id = get(&server, "/posts/abc");
+    assert_eq!(bad_id.status, 400);
+    assert!(bad_id.body.contains("<h1>Bad Request</h1>"), "{}", bad_id.body);
+    assert!(get(&server, "/posts/999").body.contains("<p>Error 404."), "handler errors too");
+
+    // Pagination links: a full page links to the next one.
+    let first = get(&server, "/posts?limit=2");
+    assert!(first.body.contains(r#"<a href="?limit=2&#38;offset=2" rel="next">Next</a>"#), "{}", first.body);
+    let second = get(&server, "/posts?limit=2&offset=2");
+    assert!(second.body.contains(r#"<a href="?limit=2&#38;offset=0" rel="prev">Previous</a>"#), "{}", second.body);
+    assert!(!second.body.contains("rel=\"next\""), "two posts: no third page");
 
     // Numbers: the largest integer D1 round-trips exactly, then one beyond it.
     let book =
@@ -528,21 +549,39 @@ fn generated_auth_signs_users_in_on_workerd() {
     // A protected page sends visitors to /login.
     let visitor = browser.get("/account");
     assert_eq!((visitor.status, visitor.location.as_str()), (303, "/login"));
-    assert!(browser.get("/login").body.contains("Please log in to continue."));
+    let login = browser.get("/login");
+    assert!(login.body.contains("Please log in to continue."));
+    // The generated app's Content-Security-Policy and Permissions-Policy.
+    let csp = login.headers["content-security-policy"].to_str().unwrap();
+    assert!(csp.starts_with("default-src 'self'; script-src 'self' https://unpkg.com;"), "{csp}");
+    assert!(login.headers["permissions-policy"].to_str().unwrap().starts_with("camera=()"));
 
     // Sign up (validation, then success), back to the page that asked.
     let short = browser.post("/signup", &[("email", "Ada@Example.com"), ("password", "short")]);
     assert_eq!(short.status, 422);
     assert!(short.body.contains("<li>Password is too short (minimum is 8 characters)</li>"), "{}", short.body);
     browser.get("/account");
+    let since = log_len(&log);
     let signed_up = browser.post("/signup", &[("email", " Ada@Example.com"), ("password", "correct horse")]);
     assert_eq!((signed_up.status, signed_up.location.as_str()), (303, "/account"));
     let account = browser.get("/account");
     assert_eq!(account.status, 200);
     assert!(account.body.contains("<dd>ada@example.com</dd>"), "email normalized: {}", account.body);
     assert!(account.body.contains("Welcome! Your account is ready."));
+    assert!(account.body.contains("Your email address is not confirmed yet."));
     let taken = browser.post("/signup", &[("email", "ADA@example.com"), ("password", "another one")]);
     assert!(taken.status == 422 && taken.body.contains("<li>Email has already been taken</li>"), "{}", taken.body);
+
+    // Email confirmation: the sign-up email's link, shown as a button, single use.
+    let link = format!("/confirmations/{}", mailed_token(&log, since, &format!("{}/confirmations/", server.base)));
+    assert!(browser.get(&link).body.contains(&format!("<form action=\"{link}\" method=\"post\">")));
+    let confirmed = browser.post(&link, &[]);
+    assert_eq!((confirmed.status, confirmed.location.as_str()), (303, "/account"));
+    let account = browser.get("/account");
+    assert!(account.body.contains("Thanks, your email address is confirmed."), "{}", account.body);
+    assert!(!account.body.contains("not confirmed yet"));
+    browser.post(&link, &[]);
+    assert!(browser.get("/account").body.contains("That confirmation link is invalid or has expired."));
 
     // Log out, then the wrong password (or an unknown email) is rejected.
     let logged_out = browser.post("/logout", &[]);
@@ -555,9 +594,14 @@ fn generated_auth_signs_users_in_on_workerd() {
     }
     assert_eq!(browser.get("/account").status, 303, "still signed out");
 
-    // Log in with a password (email case ignored), back to /account.
-    let logged_in = browser.post("/login", &[("email", "ADA@example.com"), ("password", "correct horse")]);
+    // Log in with a password (email case ignored), back to /account;
+    // "Remember me" makes the cookie outlive the browser session (two weeks).
+    let logged_in =
+        browser.post("/login", &[("email", "ADA@example.com"), ("password", "correct horse"), ("remember_me", "1")]);
     assert_eq!((logged_in.status, logged_in.location.as_str()), (303, "/account"));
+    let set_cookie = logged_in.headers["set-cookie"].to_str().unwrap();
+    let max_age: i64 = set_cookie.split("Max-Age=").nth(1).unwrap().split(';').next().unwrap().parse().unwrap();
+    assert!((1_209_590..=1_209_600).contains(&max_age), "{set_cookie}");
     assert!(browser.get("/account").body.contains("<dd>ada@example.com</dd>"));
     browser.post("/logout", &[]);
 
@@ -592,6 +636,15 @@ fn generated_auth_signs_users_in_on_workerd() {
     browser.post("/logout", &[]);
     let native_login = browser.post("/login", &[("email", "native@example.com"), ("password", "native digest")]);
     assert_eq!(native_login.status, 303, "{}", native_login.body);
+
+    // Account deletion needs the password; the account then no longer signs in.
+    let refused = browser.post("/account/delete", &[("confirmation", "wrong")]);
+    assert_eq!((refused.status, refused.location.as_str()), (303, "/account"));
+    assert!(browser.get("/account").body.contains("That is not your password"));
+    let deleted = browser.post("/account/delete", &[("confirmation", "native digest")]);
+    assert_eq!((deleted.status, deleted.location.as_str()), (303, "/"));
+    assert_eq!(browser.get("/account").status, 303, "signed out");
+    assert_eq!(browser.post("/login", &[("email", "native@example.com"), ("password", "native digest")]).status, 422);
 
     // JWT for API clients; wrong passwords get a JSON 401.
     let credentials = r#"{"email": "ada@example.com", "password": "correct horse"}"#;
@@ -630,6 +683,68 @@ fn generated_auth_signs_users_in_on_workerd() {
     );
     assert_eq!(bearer_json(&server, "DELETE", &format!("/api/auth/keys/{id}"), jwt, "").0, 404);
     assert_eq!(bearer_json(&server, "GET", "/api/auth/me", key, "").0, 401, "revoked");
+
+    // JSON account deletion: the password again, then the JWT stops working.
+    let bob = r#"{"email": "bob@example.com", "password": "bob's password"}"#;
+    assert_eq!(json(&server, "POST", "/api/auth/signup", bob).0, 201);
+    let (_, token) = json(&server, "POST", "/api/auth/token", bob);
+    let bob_jwt = token["token"].as_str().unwrap();
+    let delete_me = |password: &str| {
+        let response = agent()
+            .delete(&format!("{}/api/auth/me", server.base))
+            .header("authorization", &format!("Bearer {bob_jwt}"))
+            .force_send_body()
+            .content_type("application/json")
+            .send(serde_json::json!({ "password": password }).to_string())
+            .unwrap();
+        response.status().as_u16()
+    };
+    assert_eq!(delete_me("wrong"), 403);
+    assert_eq!(delete_me("bob's password"), 204);
+    assert_eq!(bearer_json(&server, "GET", "/api/auth/me", bob_jwt, "").0, 401, "deleted");
+
+    // Rate limit: 10 token requests a minute per IP address, then 429 JSON.
+    let statuses: Vec<u16> = (0..12).map(|_| json(&server, "POST", "/api/auth/token", credentials).0).collect();
+    assert_eq!(statuses.last(), Some(&429), "{statuses:?}");
+    assert_eq!(
+        json(&server, "POST", "/api/auth/token", credentials).1,
+        serde_json::json!({"error": {"status": 429, "message": "Too many requests. Try again later."}})
+    );
+}
+
+#[test]
+#[ignore = "builds WebAssembly and runs wrangler dev; run with --ignored"]
+fn generated_database_sessions_list_and_revoke_devices_on_workerd() {
+    let sandbox = Sandbox::new();
+    sandbox.use_real_wrangler();
+    let root = sandbox.new_app("e2e-sessions", &[]);
+    let (report, ok) = sandbox.json(&["g", "auth", "--db-sessions", "--oauth", "github"], &root);
+    assert!(ok, "{report}");
+    let server = start(&sandbox, &root);
+    let (mut laptop, mut phone) = (Browser::new(&server), Browser::new(&server));
+    let signed_up = laptop.post("/signup", &[("email", "ada@example.com"), ("password", "correct horse")]);
+    assert_eq!(signed_up.status, 303);
+    let logged_in = phone.post("/login", &[("email", "ada@example.com"), ("password", "correct horse")]);
+    assert_eq!(logged_in.status, 303);
+    assert!(phone.get("/login").body.contains("<form action=\"/auth/github\" method=\"post\">"), "OAuth button");
+
+    let devices = laptop.get("/account/sessions");
+    assert_eq!(devices.status, 200);
+    assert_eq!(devices.body.matches("<form action=\"/account/sessions/").count(), 3, "{}", devices.body);
+    assert_eq!(devices.body.matches("(this device)").count(), 1);
+
+    // "Sign out everywhere else": the phone's next request asks it to log in.
+    let revoked = laptop.post("/account/sessions/others/delete", &[]);
+    assert_eq!((revoked.status, revoked.location.as_str()), (303, "/account/sessions"));
+    assert!(laptop.get("/account/sessions").body.contains("Signed out of 1 other session(s)."));
+    assert_eq!(phone.get("/account").location, "/login");
+    assert_eq!(laptop.get("/account").status, 200, "this device stays signed in");
+
+    // Logging out deletes this session's row too; /auth/github without secrets is a 500.
+    laptop.post("/logout", &[]);
+    assert_eq!(laptop.get("/account").status, 303);
+    assert_eq!(laptop.post("/auth/github", &[]).status, 500);
+    assert_eq!(laptop.post("/auth/myspace", &[]).status, 404);
 }
 
 /// Polls `path` until its body contains `needle` (jobs run in the background).
@@ -1162,7 +1277,8 @@ fn generated_app_stores_uploads_in_r2_on_workerd() {
         multipart(&server, "POST", "/photos", &[("title", "Sunset")], &[("image", "sunset é.png", "image/png", &png)]);
     assert_eq!((created.status, created.location.as_str()), (303, "/photos/1"), "{}", created.body);
     let shown = get(&server, "/photos/1");
-    assert!(shown.body.contains(r#"<a href="/photos/1/image">sunset é.png</a> (39.1 KB)"#), "{}", shown.body);
+    let link = r#"<a href="/photos/1/image" hx-boost="false">sunset é.png</a> (39.1 KB)"#;
+    assert!(shown.body.contains(link), "{}", shown.body);
     let (status, headers, body) = download(&server, "/photos/1/image", &[]);
     assert_eq!(status, 200);
     assert!(body == png, "downloaded {} bytes, uploaded {}", body.len(), png.len());

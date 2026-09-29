@@ -2,10 +2,14 @@
 //!
 //! Generators collect every change in [`Edits`] and write nothing until the
 //! whole generation succeeded, so a failure never leaves half a resource.
+//! [`Edits::apply`] honours `--pretend`, `--force` and `--skip` and writes a
+//! [`record`] of the run for `ocre destroy`.
 
 mod api;
 mod auth;
 mod cache;
+mod controller;
+mod custom;
 mod fields;
 mod job;
 mod locale;
@@ -14,15 +18,19 @@ mod mailer;
 mod migration;
 mod model;
 mod realtime;
+pub(crate) mod record;
 mod scaffold;
 mod schedule;
 pub(crate) mod storage;
+mod templates;
 
 use std::{fmt::Write as _, path::PathBuf};
 
 pub use api::api;
-pub use auth::auth;
+pub use auth::{AuthOptions, auth};
 pub use cache::cache;
+pub use controller::{controller, resource};
+pub use custom::{custom, generator};
 pub use job::job;
 pub use locale::locale;
 pub use mailbox::mailbox;
@@ -31,6 +39,7 @@ pub use migration::migration;
 pub use model::model;
 pub use scaffold::scaffold;
 pub use schedule::schedule;
+pub use templates::{TemplateInfo, override_templates};
 
 use crate::{
     output::{CliError, Report},
@@ -40,16 +49,39 @@ use crate::{
 pub(crate) const MODULES_MARKER: &str = "// ocre:modules";
 pub(crate) const ROUTES_MARKER: &str = "// ocre:routes";
 
+/// Flags shared by every generator.
+#[derive(Clone, Debug, Default)]
+pub struct GenerateOptions {
+    /// `--pretend`: report the changes, write nothing.
+    pub pretend: bool,
+    /// What to do with a file the generator creates when it already exists.
+    pub existing: Existing,
+    /// The command line after `ocre`, kept in the generation record.
+    pub invocation: Vec<String>,
+}
+
+/// A generated file that already exists: fail (default), `--force`
+/// overwrite it, or `--skip` keep it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Existing {
+    #[default]
+    Fail,
+    Force,
+    Skip,
+}
+
 /// Pending file changes, relative to the app root.
 pub(crate) struct Edits<'a> {
     project: &'a Project,
     /// (path, contents, whether the file existed before)
     files: Vec<(String, String, bool)>,
+    /// Existing files kept by `--skip`.
+    skipped: Vec<String>,
 }
 
 impl<'a> Edits<'a> {
     pub fn new(project: &'a Project) -> Self {
-        Self { project, files: Vec::new() }
+        Self { project, files: Vec::new(), skipped: Vec::new() }
     }
 
     fn full(&self, path: &str) -> PathBuf {
@@ -73,12 +105,21 @@ impl<'a> Edits<'a> {
         }
     }
 
-    /// Adds a new file; refuses to overwrite anything.
+    /// Adds a new file. An existing file is an error, unless `--force`
+    /// (overwrite it) or `--skip` (keep it) was given.
     pub fn create(&mut self, path: &str, contents: String) -> Result<(), CliError> {
         if self.exists(path) {
-            return Err(CliError::new(format!("{path} already exists")).hint(
-                "generators create new files only; edit the existing file, or add a migration with `ocre g migration`",
-            ));
+            let pending = self.files.iter().any(|(p, _, _)| p == path);
+            match self.project.generate.existing {
+                Existing::Force if !pending => self.update(path, contents),
+                Existing::Skip if !pending => self.skipped.push(path.to_owned()),
+                _ => {
+                    return Err(CliError::new(format!("{path} already exists")).hint(
+                        "generators create new files only: pass --skip to keep the existing file, --force to overwrite it, or edit it (`ocre g migration` for tables)",
+                    ));
+                }
+            }
+            return Ok(());
         }
         self.files.push((path.to_owned(), contents, false));
         Ok(())
@@ -113,14 +154,34 @@ impl<'a> Edits<'a> {
         Ok(names)
     }
 
-    /// Writes everything and reports it, in the order the changes were made.
+    /// Writes everything (nothing with `--pretend`) and reports it, in the
+    /// order the changes were made; records the run for `ocre destroy`.
     pub fn apply(self, command: &'static str) -> Result<Report, CliError> {
+        let options = &self.project.generate;
         let mut report = Report::new(command);
+        let mut record = record::Record::new(command, &options.invocation);
         for (path, contents, existed) in self.files {
             let full = self.project.root.join(&path);
-            std::fs::create_dir_all(full.parent().expect("app files have a parent"))?;
-            std::fs::write(&full, contents)?;
-            if existed { report.updated.push(path) } else { report.created.push(path) }
+            if existed {
+                let old = std::fs::read_to_string(&full)?;
+                if old == contents {
+                    continue;
+                }
+                record.updated(&path, &old, &contents);
+                report.updated.push(path);
+            } else {
+                record.created(&path, &contents);
+                report.created.push(path);
+            }
+            if !options.pretend {
+                std::fs::create_dir_all(full.parent().expect("app files have a parent"))?;
+                std::fs::write(&full, contents)?;
+            }
+        }
+        report.skipped = self.skipped;
+        report.pretend = options.pretend;
+        if !options.pretend && !record.is_empty() {
+            record.save(&self.project.root)?;
         }
         Ok(report)
     }
@@ -138,8 +199,14 @@ pub(crate) fn next_migration_path(edits: &Edits, name: &str) -> Result<String, C
 }
 
 /// Inserts `line` after the line holding `marker`, with the marker's
-/// indentation. `None` when the marker is missing.
+/// indentation. `None` when the marker is missing; the text unchanged when
+/// it already has those lines (a generator run again with `--force`).
 pub(crate) fn insert_after_marker(text: &str, marker: &str, line: &str) -> Option<String> {
+    let block: Vec<&str> = line.lines().map(str::trim).collect();
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    if lines.contains(&marker) && lines.windows(block.len().max(1)).any(|window| window == block) {
+        return Some(text.to_owned());
+    }
     let mut out = String::with_capacity(text.len() + line.len() + 8);
     let mut found = false;
     for current in text.lines() {

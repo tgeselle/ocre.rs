@@ -1,0 +1,14 @@
+{% extends "layout.html" %}
+
+{% block title %}New <%= lower %>{% endblock %}
+
+{% block content %}
+<h1>New <%= lower %></h1>
+
+<form action="{{ paths::index() }}" method="post"<% if multipart %> enctype="multipart/form-data"<% endif %>>
+{% include "<%= plural %>/_form.html" %}
+  <button type="submit">Create <%= lower %></button>
+</form>
+
+<p><a href="{{ paths::index() }}">Back</a></p>
+{% endblock %}

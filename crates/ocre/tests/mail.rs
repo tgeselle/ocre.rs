@@ -95,6 +95,107 @@ fn resend_json_matches_the_api() {
     assert_eq!((body["html"].as_str(), body["reply_to"].as_str()), (Some("<p>Hello</p>"), Some("team@example.com")));
 }
 
+fn full_email() -> Email {
+    Email::new("Ada <ada@example.com>", "Report", "See attached.")
+        .also_to("grace@example.com")
+        .cc("team@example.com")
+        .bcc("archive@example.com")
+        .header("In-Reply-To", "<1@example.com>")
+        .html("<img src=\"cid:logo\">")
+        .attach("report.csv", "text/csv", b"a,b\n".to_vec())
+        .inline("logo", "logo.png", "image/png", vec![1, 2, 3])
+}
+
+#[test]
+fn recipients_headers_and_attachments_are_checked() {
+    let checked = outgoing(full_email()).unwrap();
+    assert_eq!(Outgoing::addresses(&checked.email.to), ["ada@example.com", "grace@example.com"]);
+    for bad in [full_email().cc("nope"), full_email().bcc("x@y.co\r\nTo: z@z.co"), full_email().also_to("a b")] {
+        assert!(matches!(outgoing(bad), Err(Error::BadRequest(_))));
+    }
+    let mut none = full_email();
+    none.to.clear();
+    assert!(internal(outgoing(none).unwrap_err()).contains("it has no `to` recipient"));
+    let crowd = (0..50).fold(Email::new("a@example.com", "Hi", "x"), |email, i| email.bcc(format!("u{i}@example.com")));
+    let message = internal(outgoing(crowd).unwrap_err());
+    assert!(message.starts_with("cannot send email to 51 recipients: 50 at most"), "{message}");
+    for (name, value) in [("Subject", "x"), ("BCC", "x"), ("X Bad", "x"), ("", "x"), ("X-Ok", "a\r\nBcc: b@c.co")] {
+        let message = internal(outgoing(full_email().header(name, value)).unwrap_err());
+        assert!(message.contains("is not allowed. Fix:"), "{name}: {message}");
+    }
+    for bad in [
+        Email::new("a@example.com", "Hi", "x").attach(" ", "text/plain", vec![]),
+        Email::new("a@example.com", "Hi", "x").attach("a.txt", "text", vec![]),
+        Email::new("a@example.com", "Hi", "x").attach("a.txt", "text/ plain", vec![]),
+        Email::new("a@example.com", "Hi", "x").inline("<logo>", "a.png", "image/png", vec![]),
+        Email::new("a@example.com", "Hi", "x").inline("", "a.png", "image/png", vec![]),
+    ] {
+        let message = internal(outgoing(bad).unwrap_err());
+        assert!(message.contains("is invalid. Fix: give a file name"), "{message}");
+    }
+}
+
+#[test]
+fn the_email_may_set_its_own_sender() {
+    let email = Email::new("ada@example.com", "Hi", "x").from("Billing <billing@example.com>");
+    assert_eq!(Outgoing::new(None, email).unwrap().from.to_string(), "Billing <billing@example.com>");
+    let bad = internal(Outgoing::new(None, Email::new("ada@example.com", "Hi", "x").from("billing")).unwrap_err());
+    assert!(bad.contains("the email's `from` \"billing\" is not an address"), "{bad}");
+}
+
+#[test]
+fn log_and_resend_carry_every_part() {
+    let checked = outgoing(full_email()).unwrap();
+    let text = checked.log_text();
+    assert!(
+        text.contains(
+            "To: Ada <ada@example.com>, grace@example.com\nCc: team@example.com\nBcc: archive@example.com\n\
+             In-Reply-To: <1@example.com>\nSubject: Report\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.ends_with(
+            "[ocre mail] attachment: report.csv (text/csv, 4 bytes)\n\
+             [ocre mail] inline cid:logo: logo.png (image/png, 3 bytes)\n[ocre mail] end"
+        ),
+        "{text}"
+    );
+    let body = checked.resend_json();
+    assert_eq!(body["to"], json!(["Ada <ada@example.com>", "grace@example.com"]));
+    assert_eq!(
+        (body["cc"].clone(), body["bcc"].clone()),
+        (json!(["team@example.com"]), json!(["archive@example.com"]))
+    );
+    assert_eq!(body["headers"], json!({"In-Reply-To": "<1@example.com>"}));
+    assert_eq!(
+        body["attachments"],
+        json!([
+            {"filename": "report.csv", "content": "YSxiCg==", "content_type": "text/csv"},
+            {"filename": "logo.png", "content": "AQID", "content_type": "image/png", "content_id": "logo"},
+        ])
+    );
+}
+
+#[test]
+fn attachments_travel_as_base64() {
+    let email = full_email();
+    let json = serde_json::to_value(&email).unwrap();
+    assert_eq!(json["attachments"][0]["content"], "YSxiCg==");
+    assert_eq!(serde_json::from_value::<Email>(json).unwrap(), email);
+    let broken = json!({"to": ["a@b.co"], "subject": "x", "text": "x", "html": null, "reply_to": null,
+        "attachments": [{"filename": "a", "content_type": "a/b", "content": "not base64!"}]});
+    assert!(serde_json::from_value::<Email>(broken).is_err());
+}
+
+#[test]
+fn names_are_quoted_and_cleaned() {
+    assert_eq!(address_with_name("Ada \"The\"\nCountess", "ada@example.com"), "Ada The Countess <ada@example.com>");
+    assert_eq!(address_with_name("", " ada@example.com "), "ada@example.com");
+    let quoted = address_with_name("Acme, Inc.", "x@acme.test");
+    assert_eq!(Mailbox::parse(&quoted).unwrap().name.as_deref(), Some("Acme, Inc."), "round-trips");
+}
+
 #[test]
 fn provider_errors_name_the_fix() {
     let auth =

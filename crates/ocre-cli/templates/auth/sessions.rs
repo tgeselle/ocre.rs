@@ -5,7 +5,7 @@ use askama::Template;
 use axum::{
     Form, Router,
     extract::{Path, State},
-    http::{StatusCode, Uri},
+    http::{HeaderMap, StatusCode, Uri},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
@@ -17,9 +17,10 @@ use ocre::{
 use serde::Deserialize;
 
 use crate::{
-    auth::{origin, sign_in, sign_out},
+    auth::{OAUTH_PROVIDERS, origin, sign_in, sign_out},
+    auth_api::throttle,
     models::{
-        auth_token::{self, MAGIC_LINK, VALID_MINUTES},
+        auth_token::{self, MAGIC_LINK, valid_minutes},
         user,
     },
 };
@@ -32,11 +33,14 @@ pub fn routes() -> Router<Ctx> {
         .route("/magic_link/{token}", get(show_magic_link).post(use_magic_link))
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+/// The login form. No `Debug`: it would print the password in logs.
+#[derive(Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct LoginForm {
     pub email: String,
     pub password: String,
+    /// The "Remember me" checkbox: present when ticked.
+    pub remember_me: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -51,6 +55,7 @@ struct LoginView {
     flash: Flash,
     alert: Option<&'static str>,
     email: String,
+    oauth_providers: &'static [&'static str],
 }
 
 #[derive(Template)]
@@ -66,26 +71,32 @@ struct MagicLinkShowView {
 }
 
 async fn new(flash: Flash) -> Result<Html<String>> {
-    render(&LoginView { flash, alert: None, email: String::new() })
+    render(&LoginView { flash, alert: None, email: String::new(), oauth_providers: OAUTH_PROVIDERS })
 }
 
-async fn create(State(ctx): State<Ctx>, session: Session, Form(form): Form<LoginForm>) -> Result<Response> {
+async fn create(
+    State(ctx): State<Ctx>,
+    session: Session,
+    headers: HeaderMap,
+    Form(form): Form<LoginForm>,
+) -> Result<Response> {
+    throttle(&ctx, &headers, "login").await?;
     match user::authenticate(&ctx, &form.email, &form.password).await? {
         Some(user) => {
-            let next = sign_in(&session, &user)?;
+            let next = sign_in(&ctx, &session, &headers, &user, form.remember_me.is_some()).await?;
             session.flash("notice", "Signed in.")?;
             Ok(Redirect::to(&next).into_response())
         }
         None => {
             let alert = Some("Invalid email or password.");
-            let page = render(&LoginView { flash: Flash::default(), alert, email: form.email })?;
-            Ok((StatusCode::UNPROCESSABLE_ENTITY, page).into_response())
+            let view = LoginView { flash: Flash::default(), alert, email: form.email, oauth_providers: OAUTH_PROVIDERS };
+            Ok((StatusCode::UNPROCESSABLE_ENTITY, render(&view)?).into_response())
         }
     }
 }
 
-async fn destroy(session: Session) -> Result<Redirect> {
-    sign_out(&session)?;
+async fn destroy(State(ctx): State<Ctx>, session: Session) -> Result<Redirect> {
+    sign_out(&ctx, &session).await?;
     session.flash("notice", "Signed out.")?;
     Ok(Redirect::to("/"))
 }
@@ -99,17 +110,20 @@ async fn new_magic_link(flash: Flash) -> Result<Html<String>> {
 async fn create_magic_link(
     State(ctx): State<Ctx>,
     session: Session,
+    headers: HeaderMap,
     uri: Uri,
     Form(form): Form<EmailForm>,
 ) -> Result<Redirect> {
+    throttle(&ctx, &headers, "magic_link").await?;
     if let Some(user) = user::find_by_email(&ctx, &form.email).await? {
         let token = auth_token::issue(&ctx, user.id, MAGIC_LINK).await?;
         let link = format!("{}/magic_link/{token}", origin(&uri));
+        let minutes = valid_minutes(MAGIC_LINK);
         let text = format!(
-            "Open this link within {VALID_MINUTES} minutes to sign in:\n\n{link}\n\nIf you did not ask for it, ignore this email.\n"
+            "Open this link within {minutes} minutes to sign in:\n\n{link}\n\nIf you did not ask for it, ignore this email.\n"
         );
         let html = format!(
-            "<p><a href=\"{link}\">Sign in</a> (valid {VALID_MINUTES} minutes).</p><p>If you did not ask for it, ignore this email.</p>"
+            "<p><a href=\"{link}\">Sign in</a> (valid {minutes} minutes).</p><p>If you did not ask for it, ignore this email.</p>"
         );
         mail::send(&ctx, Email::new(&user.email, "Your sign-in link", text).html(html)).await?;
     }
@@ -123,16 +137,25 @@ async fn show_magic_link(Path(token): Path<String>) -> Result<Html<String>> {
     render(&MagicLinkShowView { token })
 }
 
-async fn use_magic_link(State(ctx): State<Ctx>, session: Session, Path(token): Path<String>) -> Result<Redirect> {
+/// Signing in by email also proves the address: the user is confirmed.
+async fn use_magic_link(
+    State(ctx): State<Ctx>,
+    session: Session,
+    headers: HeaderMap,
+    Path(token): Path<String>,
+) -> Result<Redirect> {
     let user = match auth_token::consume(&ctx, MAGIC_LINK, &token).await? {
-        Some(user_id) => user::find(&ctx, user_id).await?,
+        Some(user_id) => {
+            user::confirm(&ctx, user_id).await?;
+            user::find(&ctx, user_id).await?
+        }
         None => None,
     };
     let Some(user) = user else {
         session.flash("alert", "That sign-in link is invalid or has expired.")?;
         return Ok(Redirect::to("/magic_link"));
     };
-    let next = sign_in(&session, &user)?;
+    let next = sign_in(&ctx, &session, &headers, &user, false).await?;
     session.flash("notice", "Signed in.")?;
     Ok(Redirect::to(&next))
 }

@@ -54,6 +54,10 @@ path = "tests/integration/realtime.rs"
 name = "storage"
 path = "tests/integration/storage.rs"
 
+[[test]]
+name = "models"
+path = "tests/integration/models.rs"
+
 # `ocre new` in a pseudo-terminal.
 [[test]]
 name = "wizard"
@@ -62,6 +66,18 @@ path = "tests/integration/wizard.rs"
 # Generated apps on workerd (`wrangler dev`); ignored by default, run locally with
 # `cargo test -p ocre-cli --test e2e -- --ignored`.
 [[test]]
+name = "generators"
+path = "tests/integration/generators.rs"
+
+[[test]]
+name = "commands"
+path = "tests/integration/commands.rs"
+
+[[test]]
+name = "secrets"
+path = "tests/integration/secrets.rs"
+
+[[test]]
 name = "e2e"
 path = "tests/system/e2e.rs"
 
@@ -69,14 +85,16 @@ path = "tests/system/e2e.rs"
 clap = { version = "4.6.7", features = ["derive"] }
 cliclack = "0.5.6"
 getrandom = "0.4.3"
+minijinja = { version = "2.24.0", default-features = false, features = ["builtins", "custom_syntax", "serde"] }
 # Locale files are checked with the parser the Worker uses (`ocre::i18n::check`).
 ocre = { path = "../ocre", default-features = false }
 serde.workspace = true
 serde_json = "1.0.151"
+sha2 = "0.10.9"
 toml = "1.1.6"
+ureq = "3.4.2"
 
 [dev-dependencies]
 rexpect = "0.7.1"
-ureq = "3.4.2"
 # WebSocket client for the realtime e2e test.
 tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }

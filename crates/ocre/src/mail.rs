@@ -1,12 +1,14 @@
 //! Email: send with adapters (log, Resend, Cloudflare), receive from Email Routing.
 //!
-//! Sending is Rails' Action Mailer without the class: build an [`Email`] and
-//! hand it to [`send`], or to
-//! [`deliver_later`] to send it from the
-//! background jobs queue (see [`jobs`](crate::jobs)) so the request does not
-//! wait for the provider and a failed delivery is retried. Receiving is
-//! Action Mailbox: [`receive`] is the Worker's `email`
-//! entry point and hands each message to the app as an [`InboundEmail`].
+//! Sending is Rails' Action Mailer without the class: build an [`Email`]
+//! (several recipients, cc, bcc, headers, attachments and inline images) and
+//! hand it to [`send`], or to [`deliver_later`] / [`deliver_in`] to send it
+//! from the background jobs queue (see [`jobs`](crate::jobs)) so the request
+//! does not wait for the provider and a failed delivery is retried.
+//! Receiving is Action Mailbox: [`receive`] is the Worker's `email` entry
+//! point and hands each message to the app as an [`InboundEmail`]. In
+//! `ocre dev`, [`dev_routes`] serves mailer previews, the emails sent, and a
+//! form that delivers test email to the mailbox.
 //!
 //! ```no_run
 //! use axum::extract::State;
@@ -27,10 +29,12 @@
 //! mail leaves the Worker, with no guessing from which keys happen to be set,
 //! so a development machine holding a real API key never sends by accident:
 //!
-//! - `log`: prints the whole email (headers, text, HTML) to the Worker console
-//!   between [`LOG_PREFIX`] lines, like Rails'
-//!   letter_opener. `ocre new` writes `MAIL_ADAPTER=log` to `.dev.vars`, which
-//!   overrides `[vars]` in `ocre dev`. No configuration, no limits.
+//! - `log`: prints the whole email (headers, text, HTML, attachments) to the
+//!   Worker console between [`LOG_PREFIX`] lines, like Rails'
+//!   letter_opener, and in debug builds keeps the last 20 for
+//!   `/ocre/dev/mailers` (see [`dev_routes`]). `ocre new` writes
+//!   `MAIL_ADAPTER=log` to `.dev.vars`, which overrides `[vars]` in
+//!   `ocre dev`. No configuration, no limits.
 //! - `resend`: `POST https://api.resend.com/emails` with the
 //!   [`RESEND_API_KEY`] secret, `MAIL_FROM` on a
 //!   domain verified in Resend. Free plan (September 2026): 100 emails a day,
@@ -41,8 +45,9 @@
 //!   (September 2026) only delivers to verified destination addresses of the
 //!   account; any recipient needs Workers Paid (3,000 a month included).
 //!
-//! The sender is the [`MAIL_FROM`] variable,
-//! `noreply@example.com` or `Name <noreply@example.com>`. With `MAIL_ADAPTER`
+//! The sender is the email's own [`from`](Email::from), else the
+//! [`MAIL_FROM`] variable, `noreply@example.com` or
+//! `Name <noreply@example.com>`. With `MAIL_ADAPTER`
 //! unset, sending fails with an [`Error::Internal`]
 //! naming the fix, so a production Worker never drops mail silently. For
 //! sign-up and password-reset mail on the free plan, use Resend.
@@ -50,12 +55,15 @@
 //! Receiving uses Cloudflare Email Routing, free and unlimited on every plan.
 //! Every line Ocre logs about mail starts with [`LOG_PREFIX`].
 
+mod dev;
 mod parse;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-pub use crate::runtime::mail::{InboundEmail, deliver_later, receive, send};
+pub use crate::runtime::mail::{InboundEmail, deliver_in, deliver_later, receive, send};
+pub(crate) use dev::capture;
+pub use dev::{Preview, dev_routes};
 pub(crate) use parse::Message;
 
 use crate::{Error, Result, validate::is_email};
@@ -120,18 +128,23 @@ pub const EMAIL_BINDING: &str = "EMAIL";
 /// ```
 pub const LOG_PREFIX: &str = "[ocre mail]";
 
-/// An outgoing email: one recipient, a subject, a plain-text body and an optional HTML body.
+/// An outgoing email: recipients, a subject, a plain-text body, and optionally HTML, headers and attachments.
 ///
-/// Build it with [`Email::new`], then add an HTML version with
-/// [`html`](Self::html) and a `Reply-To` with [`reply_to`](Self::reply_to);
-/// send it with [`send`] or [`deliver_later`]. Nothing is checked while
-/// building: addresses and the subject are checked when sending (an invalid
-/// recipient is a 400, a subject that is empty or spans several lines a 500).
-/// Generated mailers (`ocre g mailer`) return one per action, rendered from
-/// `templates/mailers/<name>/<action>.{txt,html}`.
+/// Build it with [`Email::new`] (one recipient), then add more with
+/// [`also_to`](Self::also_to), [`cc`](Self::cc) and [`bcc`](Self::bcc), an
+/// HTML version with [`html`](Self::html), a `Reply-To` with
+/// [`reply_to`](Self::reply_to), another sender with [`from`](Self::from),
+/// custom headers with [`header`](Self::header), and files with
+/// [`attach`](Self::attach) and [`inline`](Self::inline); send it with
+/// [`send`] or [`deliver_later`]. Nothing is checked while building:
+/// addresses, headers, attachments and the subject are checked when sending
+/// (an invalid recipient is a 400, the rest a 500 naming the fix). Every
+/// address may carry a display name, `Ada <ada@example.com>` (see
+/// [`address_with_name`]). Generated mailers (`ocre g mailer`) return one per
+/// action, rendered from `templates/mailers/<name>/<action>.{txt,html}`.
 ///
-/// It is serde-serializable because [`deliver_later`]
-/// puts it in a queue message.
+/// It is serde-serializable because [`deliver_later`] puts it in a queue
+/// message (128 KB at most, attachments included, base64-encoded).
 ///
 /// # Examples
 ///
@@ -141,7 +154,7 @@ pub const LOG_PREFIX: &str = "[ocre mail]";
 /// let email = Email::new("ada@example.com", "Reset your password", "Open https://example.com/reset/abc")
 ///     .html("<a href=\"https://example.com/reset/abc\">Reset your password</a>")
 ///     .reply_to("support@example.com");
-/// assert_eq!(email.to, "ada@example.com");
+/// assert_eq!(email.to, ["ada@example.com"]);
 /// assert_eq!(email.subject, "Reset your password");
 /// assert_eq!(email.text, "Open https://example.com/reset/abc");
 /// assert_eq!(email.html.as_deref(), Some("<a href=\"https://example.com/reset/abc\">Reset your password</a>"));
@@ -149,22 +162,68 @@ pub const LOG_PREFIX: &str = "[ocre mail]";
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Email {
-    /// Recipient address, `ada@example.com`; an invalid one makes sending a 400.
-    pub to: String,
+    /// Sender, when not `MAIL_FROM`: `billing@example.com` or `Billing <billing@example.com>`,
+    /// on a domain verified with the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// `To` recipients, `ada@example.com` or `Ada <ada@example.com>`; an invalid one makes sending a 400.
+    #[serde(deserialize_with = "one_or_many")]
+    pub to: Vec<String>,
+    /// `Cc` recipients, checked like `to`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cc: Vec<String>,
+    /// `Bcc` recipients, checked like `to`; the other recipients do not see them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bcc: Vec<String>,
     /// Subject line: one non-empty line of text.
     pub subject: String,
     /// Plain-text body; always sent, so every mail client can read it.
     pub text: String,
     /// Optional HTML body, shown instead of `text` by clients that render HTML.
     pub html: Option<String>,
-    /// Where replies go, when not to `MAIL_FROM`; checked like `to`.
+    /// Where replies go, when not to the sender; checked like `to`.
     pub reply_to: Option<String>,
+    /// Extra headers, `(name, value)`: threading (`In-Reply-To`, `References`), `List-Unsubscribe`, `X-...`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headers: Vec<(String, String)>,
+    /// Files attached to the email, and inline images the HTML shows with `cid:`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
+}
+
+/// A file attached to an [`Email`], or an inline image shown by its HTML.
+///
+/// Built by [`Email::attach`] and [`Email::inline`]; also what
+/// [`InboundEmail::attachments`] returns for received mail. In a queue
+/// message the content travels base64-encoded.
+///
+/// # Examples
+///
+/// ```
+/// let email = ocre::mail::Email::new("ada@example.com", "Invoice", "Attached.")
+///     .attach("invoice.pdf", "application/pdf", b"%PDF-1.7".to_vec());
+/// let file = &email.attachments[0];
+/// assert_eq!((file.filename.as_str(), file.content_type.as_str(), file.content_id.as_deref()),
+///            ("invoice.pdf", "application/pdf", None));
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Attachment {
+    /// File name shown by mail clients, `invoice.pdf`.
+    pub filename: String,
+    /// MIME type, `application/pdf` or `image/png`.
+    pub content_type: String,
+    /// The file's bytes.
+    #[serde(with = "base64_bytes")]
+    pub content: Vec<u8>,
+    /// For inline images: the id the HTML refers to as `cid:<id>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_id: Option<String>,
 }
 
 impl Email {
     /// Creates a text-only email to one recipient.
     ///
-    /// `html` and `reply_to` start empty. Nothing is validated here.
+    /// Everything else starts empty. Nothing is validated here.
     ///
     /// # Examples
     ///
@@ -173,7 +232,77 @@ impl Email {
     /// assert_eq!((email.subject.as_str(), email.html, email.reply_to), ("Hi", None, None));
     /// ```
     pub fn new(to: impl Into<String>, subject: impl Into<String>, text: impl Into<String>) -> Self {
-        Self { to: to.into(), subject: subject.into(), text: text.into(), html: None, reply_to: None }
+        Self {
+            from: None,
+            to: vec![to.into()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: subject.into(),
+            text: text.into(),
+            html: None,
+            reply_to: None,
+            headers: Vec::new(),
+            attachments: Vec::new(),
+        }
+    }
+
+    /// Adds another `To` recipient.
+    ///
+    /// All `To` and `Cc` recipients see each other; use [`bcc`](Self::bcc)
+    /// or one email each to keep addresses private. 50 recipients at most
+    /// (`to`, `cc` and `bcc` together), Resend's limit.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let email = ocre::mail::Email::new("ada@example.com", "Hi", "Hello").also_to("Grace <grace@example.com>");
+    /// assert_eq!(email.to, ["ada@example.com", "Grace <grace@example.com>"]);
+    /// ```
+    pub fn also_to(mut self, address: impl Into<String>) -> Self {
+        self.to.push(address.into());
+        self
+    }
+
+    /// Adds a `Cc` recipient.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let email = ocre::mail::Email::new("ada@example.com", "Hi", "Hello").cc("team@example.com");
+    /// assert_eq!(email.cc, ["team@example.com"]);
+    /// ```
+    pub fn cc(mut self, address: impl Into<String>) -> Self {
+        self.cc.push(address.into());
+        self
+    }
+
+    /// Adds a `Bcc` recipient: it gets the email, the other recipients do not see it.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let email = ocre::mail::Email::new("ada@example.com", "Hi", "Hello").bcc("archive@example.com");
+    /// assert_eq!(email.bcc, ["archive@example.com"]);
+    /// ```
+    pub fn bcc(mut self, address: impl Into<String>) -> Self {
+        self.bcc.push(address.into());
+        self
+    }
+
+    /// Sends from `address` instead of the `MAIL_FROM` variable.
+    ///
+    /// Like Rails' `mail(from: ...)`; the domain must be verified with the
+    /// provider, like `MAIL_FROM`'s. An unparsable sender is a 500.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let email = ocre::mail::Email::new("ada@example.com", "Invoice", "...").from("Billing <billing@example.com>");
+    /// assert_eq!(email.from.as_deref(), Some("Billing <billing@example.com>"));
+    /// ```
+    pub fn from(mut self, address: impl Into<String>) -> Self {
+        self.from = Some(address.into());
+        self
     }
 
     /// Adds the HTML version of the body, replacing any previous one.
@@ -192,7 +321,7 @@ impl Email {
         self
     }
 
-    /// Sets the `Reply-To` address, so replies go there instead of to `MAIL_FROM`.
+    /// Sets the `Reply-To` address, so replies go there instead of to the sender.
     ///
     /// Checked when sending: an invalid address is a 400, like the recipient.
     ///
@@ -205,6 +334,128 @@ impl Email {
     pub fn reply_to(mut self, address: impl Into<String>) -> Self {
         self.reply_to = Some(address.into());
         self
+    }
+
+    /// Adds a header, e.g. `In-Reply-To` and `References` to thread a reply, or `List-Unsubscribe`.
+    ///
+    /// When sending, the name must be letters, digits and `-`, the value one
+    /// line, and the name not one Ocre sets itself (`From`, `To`, `Cc`,
+    /// `Bcc`, `Subject`, `Reply-To`, `Content-Type`, ...); otherwise sending
+    /// is a 500 naming the header.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let reply = ocre::mail::Email::new("ada@example.com", "Re: Order 42", "Shipped today.")
+    ///     .header("In-Reply-To", "<order-42@example.com>")
+    ///     .header("References", "<order-42@example.com>");
+    /// assert_eq!(reply.headers[0], ("In-Reply-To".to_owned(), "<order-42@example.com>".to_owned()));
+    /// ```
+    pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+
+    /// Attaches a file, like Rails' `attachments["invoice.pdf"] = bytes`.
+    ///
+    /// The whole email must fit the provider's limit (Resend: 40 MB), and
+    /// 128 KB for [`deliver_later`] (base64 makes files a third larger):
+    /// store big files in R2 and send a link instead.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let csv = "id,total\n1,42\n".as_bytes().to_vec();
+    /// let email = ocre::mail::Email::new("ada@example.com", "Report", "Attached.").attach("report.csv", "text/csv", csv);
+    /// assert_eq!(email.attachments[0].content, b"id,total\n1,42\n");
+    /// ```
+    pub fn attach(mut self, filename: impl Into<String>, content_type: impl Into<String>, content: Vec<u8>) -> Self {
+        self.attachments.push(Attachment {
+            filename: filename.into(),
+            content_type: content_type.into(),
+            content,
+            content_id: None,
+        });
+        self
+    }
+
+    /// Embeds an image that the HTML shows with `<img src="cid:<content_id>">`, like Rails' `attachments.inline`.
+    ///
+    /// `content_id` is letters, digits and `.-_` (checked when sending).
+    /// Mail clients show inline images without loading anything remote;
+    /// the text body cannot show them.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let logo = vec![0x89, b'P', b'N', b'G'];
+    /// let email = ocre::mail::Email::new("ada@example.com", "Welcome", "Welcome!")
+    ///     .html("<img src=\"cid:logo\" alt=\"Shop\"><p>Welcome!</p>")
+    ///     .inline("logo", "logo.png", "image/png", logo);
+    /// assert_eq!(email.attachments[0].content_id.as_deref(), Some("logo"));
+    /// ```
+    pub fn inline(
+        mut self,
+        content_id: impl Into<String>,
+        filename: impl Into<String>,
+        content_type: impl Into<String>,
+        content: Vec<u8>,
+    ) -> Self {
+        self.attachments.push(Attachment {
+            filename: filename.into(),
+            content_type: content_type.into(),
+            content,
+            content_id: Some(content_id.into()),
+        });
+        self
+    }
+}
+
+/// Formats `Name <address>`, quoting the name when needed, like Rails' `email_address_with_name`.
+///
+/// Double quotes and line breaks in `name` become spaces, so a user-typed
+/// name cannot break the header. An empty name gives the bare address.
+///
+/// # Examples
+///
+/// ```
+/// use ocre::mail::address_with_name;
+///
+/// assert_eq!(address_with_name("Ada Lovelace", "ada@example.com"), "Ada Lovelace <ada@example.com>");
+/// assert_eq!(address_with_name("Acme, Inc.", "x@acme.test"), "\"Acme, Inc.\" <x@acme.test>");
+/// assert_eq!(address_with_name(" ", "ada@example.com"), "ada@example.com");
+/// ```
+pub fn address_with_name(name: &str, address: &str) -> String {
+    let name: String = name.chars().map(|c| if c == '"' || c.is_control() { ' ' } else { c }).collect();
+    let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    Mailbox { name: Some(name).filter(|n| !n.is_empty()), address: address.trim().to_owned() }.to_string()
+}
+
+/// `to` as a list, or as one address (messages queued before `to` became a list).
+fn one_or_many<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match OneOrMany::deserialize(deserializer)? {
+        OneOrMany::One(address) => vec![address],
+        OneOrMany::Many(addresses) => addresses,
+    })
+}
+
+/// Attachment bytes as base64 text in JSON.
+mod base64_bytes {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use serde::{Deserialize, Deserializer, Serializer, de::Error};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        STANDARD.decode(String::deserialize(deserializer)?).map_err(D::Error::custom)
     }
 }
 
@@ -281,6 +532,23 @@ impl std::fmt::Display for Mailbox {
     }
 }
 
+/// Most recipients per email (`to`, `cc` and `bcc` together): Resend's limit.
+pub(crate) const MAX_RECIPIENTS: usize = 50;
+
+/// Headers Ocre writes itself; [`Email::header`] refuses them.
+const RESERVED_HEADERS: [&str; 10] = [
+    "from",
+    "to",
+    "cc",
+    "bcc",
+    "subject",
+    "reply-to",
+    "content-type",
+    "content-transfer-encoding",
+    "mime-version",
+    "date",
+];
+
 /// A checked [`Email`] with its sender, ready for an adapter.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Outgoing {
@@ -289,26 +557,43 @@ pub(crate) struct Outgoing {
 }
 
 impl Outgoing {
-    /// Checks the sender (`MAIL_FROM`) and the email. Bad configuration or
-    /// code is an internal error; a bad recipient is a 400, since it
-    /// usually comes from a form.
-    pub fn new(from: Option<String>, email: Email) -> Result<Self> {
-        let from = from.ok_or_else(|| {
-            Error::internal(format!(
-                "cannot send email: {MAIL_FROM} is not set. Fix: add {MAIL_FROM} = \"App <noreply@yourdomain.com>\" \
-                 under [vars] in wrangler.toml"
-            ))
-        })?;
+    /// Checks the sender (the email's own, else `MAIL_FROM`) and the email.
+    /// Bad configuration or code is an internal error; a bad recipient is a
+    /// 400, since it usually comes from a form.
+    pub fn new(mail_from: Option<String>, email: Email) -> Result<Self> {
+        let (from, source) = match &email.from {
+            Some(from) => (from.clone(), "the email's `from`"),
+            None => (
+                mail_from.ok_or_else(|| {
+                    Error::internal(format!(
+                        "cannot send email: {MAIL_FROM} is not set. Fix: add {MAIL_FROM} = \"App \
+                         <noreply@yourdomain.com>\" under [vars] in wrangler.toml"
+                    ))
+                })?,
+                MAIL_FROM,
+            ),
+        };
         let from = Mailbox::parse(&from).ok_or_else(|| {
             Error::internal(format!(
-                "cannot send email: {MAIL_FROM} \"{from}\" is not an address. Fix: use \"noreply@yourdomain.com\" \
+                "cannot send email: {source} \"{from}\" is not an address. Fix: use \"noreply@yourdomain.com\" \
                  or \"App <noreply@yourdomain.com>\""
             ))
         })?;
-        for address in std::iter::once(&email.to).chain(&email.reply_to) {
-            if !is_email(address) {
+        if email.to.is_empty() {
+            return Err(Error::internal("cannot send email: it has no `to` recipient"));
+        }
+        let recipients = email.to.iter().chain(&email.cc).chain(&email.bcc);
+        for address in recipients.clone().chain(&email.reply_to) {
+            if Mailbox::parse(address).is_none() {
                 return Err(Error::bad_request(format!("invalid email address: {address}")));
             }
+        }
+        let count = recipients.count();
+        if count > MAX_RECIPIENTS {
+            return Err(Error::internal(format!(
+                "cannot send email to {count} recipients: {MAX_RECIPIENTS} at most (to, cc and bcc). Fix: send \
+                 one email per recipient, e.g. one `deliver_later` each"
+            )));
         }
         if email.subject.trim().is_empty() || email.subject.contains(['\r', '\n']) {
             return Err(Error::internal(format!(
@@ -316,20 +601,77 @@ impl Outgoing {
                 email.subject
             )));
         }
+        for (name, value) in &email.headers {
+            let token = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+            if !token || value.contains(['\r', '\n']) || RESERVED_HEADERS.contains(&name.to_ascii_lowercase().as_str())
+            {
+                return Err(Error::internal(format!(
+                    "cannot send email: header {name:?}: {value:?} is not allowed. Fix: use a name of letters, \
+                     digits and `-` that Ocre does not set itself (use `.cc`, `.reply_to`, ... for those), and a \
+                     one-line value"
+                )));
+            }
+        }
+        for file in &email.attachments {
+            let filename = !file.filename.trim().is_empty() && !file.filename.contains(|c: char| c.is_control());
+            let content_type = file.content_type.split_once('/').is_some_and(|(kind, sub)| {
+                !kind.is_empty() && !sub.is_empty() && !file.content_type.contains(|c: char| c.is_whitespace())
+            });
+            let content_id = file
+                .content_id
+                .as_deref()
+                .is_none_or(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || ".-_".contains(c)));
+            if !(filename && content_type && content_id) {
+                return Err(Error::internal(format!(
+                    "cannot send email: attachment {:?} ({:?}, content id {:?}) is invalid. Fix: give a file \
+                     name, a MIME type such as \"application/pdf\", and a content id of letters, digits and .-_",
+                    file.filename, file.content_type, file.content_id
+                )));
+            }
+        }
         Ok(Self { from, email })
     }
 
-    /// What the `log` adapter prints: headers, text and HTML, framed by
-    /// [`LOG_PREFIX`] lines.
+    /// Addresses of `list`, without display names (the Cloudflare binding takes bare addresses).
+    pub fn addresses(list: &[String]) -> Vec<String> {
+        list.iter().filter_map(|address| Mailbox::parse(address)).map(|mailbox| mailbox.address).collect()
+    }
+
+    /// What the `log` adapter prints: headers, text, HTML and attachments,
+    /// framed by [`LOG_PREFIX`] lines.
     pub fn log_text(&self) -> String {
-        let Email { to, subject, text, html, reply_to } = &self.email;
-        let mut out = format!("{LOG_PREFIX} not sent ({MAIL_ADAPTER} = \"log\")\nFrom: {}\nTo: {to}\n", self.from);
-        if let Some(reply_to) = reply_to {
+        let email = &self.email;
+        let mut out = format!(
+            "{LOG_PREFIX} not sent ({MAIL_ADAPTER} = \"log\")\nFrom: {}\nTo: {}\n",
+            self.from,
+            email.to.join(", ")
+        );
+        for (name, list) in [("Cc", &email.cc), ("Bcc", &email.bcc)] {
+            if !list.is_empty() {
+                out.push_str(&format!("{name}: {}\n", list.join(", ")));
+            }
+        }
+        if let Some(reply_to) = &email.reply_to {
             out.push_str(&format!("Reply-To: {reply_to}\n"));
         }
-        out.push_str(&format!("Subject: {subject}\n\n{text}\n"));
-        if let Some(html) = html {
+        for (name, value) in &email.headers {
+            out.push_str(&format!("{name}: {value}\n"));
+        }
+        out.push_str(&format!("Subject: {}\n\n{}\n", email.subject, email.text));
+        if let Some(html) = &email.html {
             out.push_str(&format!("{LOG_PREFIX} HTML version:\n{html}\n"));
+        }
+        for file in &email.attachments {
+            let kind = match &file.content_id {
+                Some(id) => format!("inline cid:{id}"),
+                None => "attachment".to_owned(),
+            };
+            out.push_str(&format!(
+                "{LOG_PREFIX} {kind}: {} ({}, {} bytes)\n",
+                file.filename,
+                file.content_type,
+                file.content.len()
+            ));
         }
         out.push_str(&format!("{LOG_PREFIX} end"));
         out
@@ -337,13 +679,37 @@ impl Outgoing {
 
     /// Body of `POST https://api.resend.com/emails`.
     pub fn resend_json(&self) -> Value {
-        let Email { to, subject, text, html, reply_to } = &self.email;
-        let mut body = json!({ "from": self.from.to_string(), "to": [to], "subject": subject, "text": text });
-        if let Some(html) = html {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        let email = &self.email;
+        let mut body =
+            json!({ "from": self.from.to_string(), "to": email.to, "subject": email.subject, "text": email.text });
+        for (key, list) in [("cc", &email.cc), ("bcc", &email.bcc)] {
+            if !list.is_empty() {
+                body[key] = json!(list);
+            }
+        }
+        if let Some(html) = &email.html {
             body["html"] = json!(html);
         }
-        if let Some(reply_to) = reply_to {
+        if let Some(reply_to) = &email.reply_to {
             body["reply_to"] = json!(reply_to);
+        }
+        if !email.headers.is_empty() {
+            body["headers"] = email.headers.iter().map(|(name, value)| (name.clone(), json!(value))).collect();
+        }
+        if !email.attachments.is_empty() {
+            let files = email.attachments.iter().map(|file| {
+                let mut entry = json!({
+                    "filename": file.filename,
+                    "content": STANDARD.encode(&file.content),
+                    "content_type": file.content_type,
+                });
+                if let Some(id) = &file.content_id {
+                    entry["content_id"] = json!(id);
+                }
+                entry
+            });
+            body["attachments"] = files.collect();
         }
         body
     }

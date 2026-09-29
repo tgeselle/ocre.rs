@@ -11,8 +11,14 @@
 <form action="/login" method="post">
   <label>Email <input type="email" name="email" value="{{ email }}" required autofocus autocomplete="username"></label>
   <label>Password <input type="password" name="password" required autocomplete="current-password"></label>
+  <label><input type="checkbox" name="remember_me" value="1"> Remember me for two weeks</label>
   <button type="submit">Log in</button>
 </form>
+{% for provider in oauth_providers %}
+<form action="/auth/{{ provider }}" method="post">
+  <button type="submit">Continue with {{ provider|capitalize }}</button>
+</form>
+{% endfor %}
 
 <p><a href="/magic_link">Email me a sign-in link</a> · <a href="/passwords/new">Forgot your password?</a> · <a href="/signup">Sign up</a></p>
 {% endblock %}

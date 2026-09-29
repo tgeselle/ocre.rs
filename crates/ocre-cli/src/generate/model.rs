@@ -4,13 +4,28 @@ use std::fmt::Write as _;
 
 use super::{
     Edits, MODULES_MARKER,
-    fields::{ATTACHMENT_TYPES, Field, FieldType, parse_fields},
+    fields::{ATTACHMENT_TYPES, Enumeration, Field, FieldType, parse_fields},
     insert_after_marker, next_migration_path,
 };
 use crate::{CliResult, names::ModelNames, output::CliError, project::Project};
 
 pub(super) const MODELS_MARKER: &str = "// ocre:models";
 pub(super) const ASSOCIATIONS_MARKER: &str = "// ocre:associations";
+
+/// Names a model file already uses: an enum field cannot take them.
+const TAKEN_TYPE_NAMES: &[&str] = &[
+    "Attachment",
+    "Ctx",
+    "Deserialize",
+    "Error",
+    "Page",
+    "Query",
+    "Result",
+    "Rules",
+    "Serialize",
+    "Upload",
+    "Validator",
+];
 
 pub fn model(project: &Project, name: &str, specs: &[String]) -> CliResult {
     let names = ModelNames::parse(name)?;
@@ -38,14 +53,32 @@ fn model_path(names: &ModelNames) -> String {
 }
 
 fn add_model(edits: &mut Edits, names: &ModelNames, fields: &[Field], command: &str) -> Result<(), CliError> {
-    for target in fields.iter().filter_map(|f| f.target.as_ref()) {
+    for field in fields {
+        let Some(enumeration) = &field.enumeration else { continue };
+        let own = [names.model.clone(), format!("New{}", names.model), format!("{}Changes", names.model)];
+        let type_name = &enumeration.type_name;
+        if TAKEN_TYPE_NAMES.contains(&type_name.as_str()) || own.contains(type_name) {
+            return Err(CliError::new(format!(
+                "enum `{}` would be named `{type_name}`, a name the model already uses",
+                field.name
+            ))
+            .hint(format!("rename the field, e.g. `{}_kind:enum:...`", field.name)));
+        }
+    }
+    let references: Vec<&Field> = fields.iter().filter(|f| f.target.is_some()).collect();
+    for field in &references {
+        let target = field.target.as_ref().expect("references have a target");
         let path = model_path(target);
         let source = edits.read(&path)?.ok_or_else(|| {
             CliError::new(format!("{path} does not exist"))
                 .hint(format!("generate the referenced model first, e.g. `ocre g model {} name:string`", target.model))
         })?;
-        let has_many = has_many_fn(names, target, fields);
-        let updated = insert_after_marker(&source, ASSOCIATIONS_MARKER, &has_many).ok_or_else(|| {
+        let mut code = if field.unique { has_one_fn(names, target, field) } else { has_many_fn(names, target, field) };
+        // A join model (two references or more): each side reaches the others through it.
+        for other in references.iter().filter(|other| other.name != field.name) {
+            code.push_str(&has_many_through_fn(names, field, other));
+        }
+        let updated = insert_after_marker(&source, ASSOCIATIONS_MARKER, &code).ok_or_else(|| {
             CliError::new(format!("{path} is missing the `{ASSOCIATIONS_MARKER}` marker"))
                 .hint(format!("put `{ASSOCIATIONS_MARKER}` on its own line inside `impl {} {{ ... }}`", target.model))
         })?;
@@ -98,7 +131,19 @@ pub(super) fn table_sql(table: &str, fields: &[Field]) -> String {
     for field in fields {
         sql.push_str(&index_sql(table, field));
     }
+    if let Some(columns) = join_columns(fields) {
+        let name = columns.join("_and_");
+        writeln!(sql, "CREATE UNIQUE INDEX index_{table}_on_{name} ON {table} ({});", columns.join(", "))
+            .expect("writing to a String");
+    }
     sql
+}
+
+/// The reference columns of a join model: two `references` fields or more and
+/// nothing else (`Tagging post:references tag:references`), linked at most once.
+fn join_columns(fields: &[Field]) -> Option<Vec<&str>> {
+    let join = fields.len() >= 2 && fields.iter().all(|f| f.target.is_some() && !f.unique);
+    join.then(|| fields.iter().map(|f| f.name.as_str()).collect())
 }
 
 /// `CREATE [UNIQUE] INDEX` for unique and reference columns.
@@ -327,9 +372,25 @@ fn model_rs(names: &ModelNames, fields: &[Field], command: &str) -> String {
     for file in &files {
         methods.push_str(&attachment_fn(file, &lower));
     }
-    let new_validation = validate_body(fields, false);
-    let change_validation = validate_body(fields, true);
-    let create_checks = database_checks(names, fields, false);
+    let validator = |checks: String| {
+        if checks.is_empty() {
+            "        Validator::new()".to_owned()
+        } else {
+            format!("        let mut v = Validator::new();\n{checks}        v")
+        }
+    };
+    let new_validation = validator(validate_body(fields, false));
+    let change_validation = validator(validate_body(fields, true));
+    let mut create_checks = database_checks(names, fields, false);
+    if let Some(columns) = join_columns(fields) {
+        let conditions: String = columns.iter().map(|c| format!(".eq(\"{c}\", new.{c})")).collect();
+        let last = columns.last().expect("a join has two columns or more");
+        writeln!(
+            create_checks,
+            "    v.check(\"{last}\", query(){conditions}.exists(&db).await?, \"has already been taken\");"
+        )
+        .expect("writing to a String");
+    }
     let update_checks = database_checks(names, fields, true);
     let create_validation = if create_checks.is_empty() {
         "    new.validate().finish()?;\n".to_owned()
@@ -344,30 +405,37 @@ fn model_rs(names: &ModelNames, fields: &[Field], command: &str) -> String {
     let insert_sql = format!("INSERT INTO {plural} ({columns}) VALUES ({placeholders}) RETURNING *");
     let update_sql =
         format!("UPDATE {plural} SET {sets}, updated_at = datetime('now') WHERE id = ?{update_id} RETURNING *");
+    let delete_query = format!(
+        "    let deleted: Option<{model}> = ctx.db()?.first(\"DELETE FROM {plural} WHERE id = ?1 RETURNING *\", params![id]).await?;\n    let Some(record) = deleted else {{ return Ok(false) }};\n"
+    );
     let (imports, rules, create_body, update_body, delete_body) = if files.is_empty() {
         (
             String::new(),
             String::new(),
             format!(
-                "{create_validation}    db.first(\"{insert_sql}\", params![{insert_params}])\n        .await?\n        .ok_or_else(|| Error::internal(\"INSERT ... RETURNING returned no row\"))\n"
+                "{create_validation}    let record: {model} = db\n        .first(\"{insert_sql}\", params![{insert_params}])\n        .await?\n        .ok_or_else(|| Error::internal(\"INSERT ... RETURNING returned no row\"))?;\n"
             ),
             format!(
-                "{update_validation}    db.first(\n        \"{update_sql}\",\n        params![{update_params}, id],\n    )\n    .await\n"
+                "{update_validation}    let updated: Option<{model}> = db\n        .first(\n            \"{update_sql}\",\n            params![{update_params}, id],\n        )\n        .await?;\n"
             ),
-            format!("    Ok(ctx.db()?.execute(\"DELETE FROM {plural} WHERE id = ?1\", params![id]).await? > 0)\n"),
+            delete_query,
         )
     } else {
         (
             ", storage::{self, Attachment, Rules, Upload}".to_owned(),
             files.iter().map(|f| rules_const(f)).collect(),
-            create_with_files(&files, &create_validation, &insert_sql, &insert_params, &names.plural),
-            update_with_files(&files, &update_validation, &update_sql, &update_params, &names.plural),
+            create_with_files(&files, &create_validation, &insert_sql, &insert_params, names),
+            update_with_files(&files, &update_validation, &update_sql, &update_params, names),
             format!(
-                "    let deleted: Option<{model}> = ctx.db()?.first(\"DELETE FROM {plural} WHERE id = ?1 RETURNING *\", params![id]).await?;\n    let Some(record) = deleted else {{ return Ok(false) }};\n    storage::delete_attachments(ctx, &[{}]).await?;\n    Ok(true)\n",
+                "{delete_query}    storage::delete_attachments(ctx, &[{}]).await?;\n",
                 files.iter().map(|f| file_value(f, "record")).collect::<Vec<_>>().join(", ")
             ),
         )
     };
+    let into_param = if files.is_empty() { "" } else { "IntoParam, " };
+    let preloads: String = fields.iter().filter(|f| f.target.is_some()).map(|f| preload_fns(names, f)).collect();
+    let singular = &names.singular;
+    let enums: String = fields.iter().filter_map(|f| Some(enum_rs(&f.name, f.enumeration.as_ref()?))).collect();
 
     format!(
         r#"//! {human_singular} model: the `{plural}` table. Generated by `{command}`.
@@ -375,9 +443,9 @@ fn model_rs(names: &ModelNames, fields: &[Field], command: &str) -> String {
 //! Every query and rule about {lower_plural} lives here. Controllers (HTML
 //! pages, JSON API, GraphQL) call these functions instead of writing SQL.
 
-use ocre::{{Ctx, Error, IntoParam, Page, Result, Validator, params{imports}}};
+use ocre::{{Ctx, Error, {into_param}Page, Query, Result, Validator, params{imports}}};
 use serde::{{Deserialize, Serialize}};
-{rules}
+{enums}{rules}
 /// A row of the `{plural}` table.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct {model} {{
@@ -400,16 +468,14 @@ pub struct {model}Changes {{
 impl New{model} {{
     /// Checks that need no database; `create` adds uniqueness and references.
     pub fn validate(&self) -> Validator {{
-        let mut v = Validator::new();
-{new_validation}        v
+{new_validation}
     }}
 }}
 
 impl {model}Changes {{
     /// Checks the fields being changed; `update` adds the database checks.
     pub fn validate(&self) -> Validator {{
-        let mut v = Validator::new();
-{change_validation}        v
+{change_validation}
     }}
 }}
 
@@ -417,22 +483,24 @@ impl {model} {{{methods}
     {ASSOCIATIONS_MARKER}
 }}
 
+/// Every query on {lower_plural} starts here, e.g.
+/// `query().eq("id", id).first(&ctx.db()?)`. Scopes are functions taking and
+/// returning a `Query<{model}>`; add them below.
+pub fn query() -> Query<{model}> {{
+    Query::table("{plural}")
+}}
+
 /// {human_plural}, newest first.
 pub async fn all(ctx: &Ctx, page: Page) -> Result<Vec<{model}>> {{
-    ctx.db()?.all("SELECT * FROM {plural} ORDER BY id DESC LIMIT ?1 OFFSET ?2", params![page.limit, page.offset]).await
+    query().order_desc("id").page(page).all(&ctx.db()?).await
 }}
 
 pub async fn count(ctx: &Ctx) -> Result<i64> {{
-    #[derive(Deserialize)]
-    struct Count {{
-        count: i64,
-    }}
-    let row: Option<Count> = ctx.db()?.first("SELECT COUNT(*) AS count FROM {plural}", params![]).await?;
-    Ok(row.map_or(0, |row| row.count))
+    query().count(&ctx.db()?).await
 }}
 
 pub async fn find(ctx: &Ctx, id: i64) -> Result<Option<{model}>> {{
-    ctx.db()?.first("SELECT * FROM {plural} WHERE id = ?1", params![id]).await
+    query().eq("id", id).first(&ctx.db()?).await
 }}
 
 /// Loads many {lower_plural} in few queries (100 ids per query, D1's limit on
@@ -441,25 +509,69 @@ pub async fn find_many(ctx: &Ctx, ids: &[i64]) -> Result<Vec<{model}>> {{
     let db = ctx.db()?;
     let mut rows = Vec::with_capacity(ids.len());
     for chunk in ids.chunks(100) {{
-        let placeholders = (1..=chunk.len()).map(|i| format!("?{{i}}")).collect::<Vec<_>>().join(", ");
-        let sql = format!("SELECT * FROM {plural} WHERE id IN ({{placeholders}})");
-        rows.extend(db.all::<{model}>(&sql, chunk.iter().map(|id| id.into_param()).collect()).await?);
+        rows.extend(query().is_in("id", chunk.iter().copied()).all(&db).await?);
     }}
     Ok(rows)
 }}
-
-pub async fn create(ctx: &Ctx, new: New{model}) -> Result<{model}> {{
+{preloads}
+pub async fn create(ctx: &Ctx, mut new: New{model}) -> Result<{model}> {{
+    before_create(ctx, &mut new).await?;
     let db = ctx.db()?;
-{create_body}}}
+{create_body}    after_create(ctx, &record).await?;
+    Ok(record)
+}}
 
 /// `None` when there is no {lower} with this id.
-pub async fn update(ctx: &Ctx, id: i64, changes: {model}Changes) -> Result<Option<{model}>> {{
+pub async fn update(ctx: &Ctx, id: i64, mut changes: {model}Changes) -> Result<Option<{model}>> {{
+    before_update(ctx, id, &mut changes).await?;
     let db = ctx.db()?;
-{update_body}}}
+{update_body}    if let Some(record) = &updated {{
+        after_update(ctx, record).await?;
+    }}
+    Ok(updated)
+}}
 
 /// `false` when there is no {lower} with this id.
 pub async fn delete(ctx: &Ctx, id: i64) -> Result<bool> {{
-{delete_body}}}
+    before_delete(ctx, id).await?;
+{delete_body}    after_delete(ctx, &record).await?;
+    Ok(true)
+}}
+
+// Callbacks: `create`, `update` and `delete` call these, so every controller
+// gets them. Return an error to stop the operation. D1 keeps no transaction
+// open between queries: an `after_*` error does not undo the write, so put
+// writes that must succeed together in one `ctx.db()?.batch(...)`.
+
+/// Before validation and the INSERT: normalize or fill in values.
+async fn before_create(_ctx: &Ctx, _new: &mut New{model}) -> Result<()> {{
+    Ok(())
+}}
+
+/// After the INSERT: send email, enqueue jobs, update counters.
+async fn after_create(_ctx: &Ctx, _{singular}: &{model}) -> Result<()> {{
+    Ok(())
+}}
+
+/// Before validation and the UPDATE of the {lower} `id`.
+async fn before_update(_ctx: &Ctx, _id: i64, _changes: &mut {model}Changes) -> Result<()> {{
+    Ok(())
+}}
+
+/// After a successful UPDATE.
+async fn after_update(_ctx: &Ctx, _{singular}: &{model}) -> Result<()> {{
+    Ok(())
+}}
+
+/// Before the DELETE of the {lower} `id`: return an error to keep it.
+async fn before_delete(_ctx: &Ctx, _id: i64) -> Result<()> {{
+    Ok(())
+}}
+
+/// After the DELETE, with the deleted row.
+async fn after_delete(_ctx: &Ctx, _{singular}: &{model}) -> Result<()> {{
+    Ok(())
+}}
 "#,
     )
 }
@@ -503,7 +615,8 @@ fn store_file(file: &Field, source: &str, table: &str) -> String {
 
 /// `create` for a model with attachments: files go to R2 once the values
 /// are valid, and are deleted again when the INSERT fails.
-fn create_with_files(files: &[&Field], validation: &str, sql: &str, params: &str, table: &str) -> String {
+fn create_with_files(files: &[&Field], validation: &str, sql: &str, params: &str, names: &ModelNames) -> String {
+    let (table, model) = (&names.plural, &names.model);
     let mut out = format!(
         "{validation}    // Files go to R2 once the values are valid; they are deleted again if the INSERT fails.\n"
     );
@@ -517,7 +630,7 @@ fn create_with_files(files: &[&Field], validation: &str, sql: &str, params: &str
     let stored = files.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(", ");
     write!(
         out,
-        "    let created = db.first(\"{sql}\", params).await;\n    if !matches!(created, Ok(Some(_))) {{\n        storage::delete_attachments(ctx, &[{stored}]).await?;\n    }}\n    created?.ok_or_else(|| Error::internal(\"INSERT ... RETURNING returned no row\"))\n"
+        "    let created: Result<Option<{model}>> = db.first(\"{sql}\", params).await;\n    if !matches!(created, Ok(Some(_))) {{\n        storage::delete_attachments(ctx, &[{stored}]).await?;\n    }}\n    let record = created?.ok_or_else(|| Error::internal(\"INSERT ... RETURNING returned no row\"))?;\n"
     )
     .expect("writing to a String");
     out
@@ -525,7 +638,8 @@ fn create_with_files(files: &[&Field], validation: &str, sql: &str, params: &str
 
 /// `update` for a model with attachments: new files go to R2 first; the
 /// replaced ones are deleted after the UPDATE (the new ones if it fails).
-fn update_with_files(files: &[&Field], validation: &str, sql: &str, params: &str, table: &str) -> String {
+fn update_with_files(files: &[&Field], validation: &str, sql: &str, params: &str, names: &ModelNames) -> String {
+    let (table, model) = (&names.plural, &names.model);
     let mut out = format!(
         "{validation}    // The current files: deleted from R2 once the row no longer points to them.\n    let Some(old) = find(ctx, id).await? else {{ return Ok(None) }};\n"
     );
@@ -555,7 +669,7 @@ fn update_with_files(files: &[&Field], validation: &str, sql: &str, params: &str
     }
     write!(
         out,
-        "    params.push(id.into_param());\n    let updated = db.first(\"{sql}\", params).await;\n    let unused = if matches!(updated, Ok(Some(_))) {{ [{}] }} else {{ [{}] }};\n    storage::delete_attachments(ctx, &unused).await?;\n    updated\n",
+        "    params.push(id.into_param());\n    let updated: Result<Option<{model}>> = db.first(\"{sql}\", params).await;\n    let unused = if matches!(updated, Ok(Some(_))) {{ [{}] }} else {{ [{}] }};\n    storage::delete_attachments(ctx, &unused).await?;\n    let updated = updated?;\n",
         replaced.join(", "),
         added.join(", ")
     )
@@ -563,13 +677,139 @@ fn update_with_files(files: &[&Field], validation: &str, sql: &str, params: &str
     out
 }
 
-/// `posts(ctx, page)` on the referenced model: the other side of `references`.
-fn has_many_fn(names: &ModelNames, target: &ModelNames, fields: &[Field]) -> String {
-    let column = fields.iter().find(|f| f.target.as_ref() == Some(target)).map(|f| f.name.as_str()).unwrap_or("id");
-    let (model, singular, plural) = (&names.model, &names.singular, &names.plural);
+/// `comments(ctx, page)` on the referenced model: the has-many side of `references`.
+fn has_many_fn(names: &ModelNames, target: &ModelNames, field: &Field) -> String {
+    let (model, singular, plural, column) = (&names.model, &names.singular, &names.plural, &field.name);
     format!(
         "    /// {} of this {}, newest first.\n    pub async fn {plural}(&self, ctx: &Ctx, page: ocre::Page) -> Result<Vec<crate::models::{singular}::{model}>> {{\n        ctx.db()?\n            .all(\n                \"SELECT * FROM {plural} WHERE {column} = ?1 ORDER BY id DESC LIMIT ?2 OFFSET ?3\",\n                params![self.id, page.limit, page.offset],\n            )\n            .await\n    }}\n",
         names.human_plural,
         target.human_singular.to_lowercase(),
+    )
+}
+
+/// `profile(ctx)` on the referenced model, for a unique reference (`user:references^`): has one.
+fn has_one_fn(names: &ModelNames, target: &ModelNames, field: &Field) -> String {
+    let (model, singular, column) = (&names.model, &names.singular, &field.name);
+    format!(
+        "    /// The {} of this {}, if any.\n    pub async fn {singular}(&self, ctx: &Ctx) -> Result<Option<crate::models::{singular}::{model}>> {{\n        crate::models::{singular}::query().eq(\"{column}\", self.id).first(&ctx.db()?).await\n    }}\n",
+        names.human_singular.to_lowercase(),
+        target.human_singular.to_lowercase(),
+    )
+}
+
+/// `tags(ctx, page)` on `Post` for the join model `Tagging post:references
+/// tag:references`: the `other` side of the join, through it.
+fn has_many_through_fn(join: &ModelNames, field: &Field, other: &Field) -> String {
+    let target = field.target.as_ref().expect("references have a target");
+    let far = other.target.as_ref().expect("references have a target");
+    let (join_table, column, other_column) = (&join.plural, &field.name, &other.name);
+    let (far_table, far_singular, far_model) = (&far.plural, &far.singular, &far.model);
+    format!(
+        "    /// {} of this {}, through {join_table}, most recently linked first.\n    pub async fn {far_table}(&self, ctx: &Ctx, page: ocre::Page) -> Result<Vec<crate::models::{far_singular}::{far_model}>> {{\n        ctx.db()?\n            .all(\n                \"SELECT {far_table}.* FROM {far_table} JOIN {join_table} ON {join_table}.{other_column} = {far_table}.id WHERE {join_table}.{column} = ?1 ORDER BY {join_table}.id DESC LIMIT ?2 OFFSET ?3\",\n                params![self.id, page.limit, page.offset],\n            )\n            .await\n    }}\n",
+        far.human_plural,
+        target.human_singular.to_lowercase(),
+    )
+}
+
+/// Eager loading for a `references` field, in the model that holds it:
+/// `preload_<targets>` (belongs-to side) and `for_<targets>` (has-many side).
+fn preload_fns(names: &ModelNames, field: &Field) -> String {
+    let target = field.target.as_ref().expect("references have a target");
+    let (model, lower_plural) = (&names.model, names.human_plural.to_lowercase());
+    let (target_plural, target_singular, target_model) = (&target.plural, &target.singular, &target.model);
+    let column = &field.name;
+    let ids = if field.optional {
+        format!("records.iter().filter_map(|record| record.{column}).collect()")
+    } else {
+        format!("records.iter().map(|record| record.{column}).collect()")
+    };
+    format!(
+        r#"
+/// The {target_lower_plural} of `records` by id, in one query per 100 ids: show a
+/// list of {lower_plural} with their {target_lower} without one query per row.
+pub async fn preload_{target_plural}(
+    ctx: &Ctx,
+    records: &[{model}],
+) -> Result<std::collections::HashMap<i64, crate::models::{target_singular}::{target_model}>> {{
+    let mut ids: Vec<i64> = {ids};
+    ids.sort_unstable();
+    ids.dedup();
+    let rows = crate::models::{target_singular}::find_many(ctx, &ids).await?;
+    Ok(rows.into_iter().map(|row| (row.id, row)).collect())
+}}
+
+/// Every {lower} of the given {target_lower_plural}, newest first, in one query per
+/// 100 ids: the has-many side preloaded for a list. Not paginated: keep the
+/// list of ids short.
+pub async fn for_{target_plural}(ctx: &Ctx, {column}s: &[i64]) -> Result<Vec<{model}>> {{
+    let db = ctx.db()?;
+    let mut rows = Vec::new();
+    for chunk in {column}s.chunks(100) {{
+        rows.extend(query().is_in("{column}", chunk.iter().copied()).order_desc("id").all(&db).await?);
+    }}
+    Ok(rows)
+}}
+"#,
+        target_lower_plural = target.human_plural.to_lowercase(),
+        target_lower = target.human_singular.to_lowercase(),
+        lower = names.human_singular.to_lowercase(),
+    )
+}
+
+/// The Rust enum of `status:enum:draft,published`: stored as its text, with
+/// `ALL`, `as_str`, `Display`, `FromStr` and `IntoParam`.
+fn enum_rs(field: &str, enumeration: &Enumeration) -> String {
+    let name = &enumeration.type_name;
+    let mut variants = String::new();
+    let mut texts = String::new();
+    for (i, value) in enumeration.values.iter().enumerate() {
+        let variant = Enumeration::variant(value);
+        let default = if i == 0 { "    #[default]\n" } else { "" };
+        write!(variants, "{default}    #[serde(rename = \"{value}\")]\n    {variant},\n").expect("writing to a String");
+        writeln!(texts, "            Self::{variant} => \"{value}\",").expect("writing to a String");
+    }
+    let all = enumeration.values.iter().map(|v| format!("Self::{}", Enumeration::variant(v))).collect::<Vec<_>>();
+    format!(
+        r#"
+/// Values of `{field}`, stored as their text (a `CHECK` in the migration
+/// refuses others). Add a value: a variant here and a migration rebuilding
+/// the `CHECK` (`ocre g migration rebuild_<table>`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub enum {name} {{
+{variants}}}
+
+impl {name} {{
+    /// Every value, in declaration order (select boxes, filters).
+    pub const ALL: [Self; {count}] = [{all}];
+
+    /// The stored text.
+    pub fn as_str(self) -> &'static str {{
+        match self {{
+{texts}        }}
+    }}
+}}
+
+impl std::fmt::Display for {name} {{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{
+        f.write_str(self.as_str())
+    }}
+}}
+
+impl std::str::FromStr for {name} {{
+    type Err = String;
+
+    fn from_str(text: &str) -> std::result::Result<Self, String> {{
+        Self::ALL.into_iter().find(|value| value.as_str() == text).ok_or_else(|| format!("unknown value `{{text}}`"))
+    }}
+}}
+
+impl ocre::IntoParam for {name} {{
+    fn into_param(self) -> ocre::Param {{
+        ocre::IntoParam::into_param(self.as_str())
+    }}
+}}
+"#,
+        count = enumeration.values.len(),
+        all = all.join(", "),
     )
 }

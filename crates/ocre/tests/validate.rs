@@ -83,6 +83,33 @@ fn dates_and_datetimes() {
 }
 
 #[test]
+fn times_uuids_and_decimals() {
+    for ok in ["00:00", "23:59", "09:30:15"] {
+        assert!(Validator::new().time("at", ok).is_valid(), "{ok}");
+    }
+    for bad in ["24:00", "9:30", "09:60", "09:30:60", "", "09:30:00:00"] {
+        assert!(!Validator::new().time("at", bad).is_valid(), "{bad}");
+    }
+    for ok in ["67e55044-10b1-426f-9247-bb680e5fe0c8", "67E55044-10B1-426F-9247-BB680E5FE0C8"] {
+        assert!(Validator::new().uuid("id", ok).is_valid(), "{ok}");
+    }
+    for bad in
+        ["", "67e55044-10b1-426f-9247", "67e5504410b1426f9247bb680e5fe0c8", "g7e55044-10b1-426f-9247-bb680e5fe0c8"]
+    {
+        assert!(!Validator::new().uuid("id", bad).is_valid(), "{bad}");
+    }
+    for ok in ["0", "19.99", "-3", "+0.5", "0012.000"] {
+        assert!(Validator::new().decimal("n", ok).is_valid(), "{ok}");
+    }
+    for bad in ["", "-", "1.", ".5", "1e3", "1,5", " 1", "1.2.3", "--1"] {
+        assert!(!Validator::new().decimal("n", bad).is_valid(), "{bad}");
+    }
+    let mut v = Validator::new();
+    v.time("at", "x").uuid("id", "x").decimal("n", "x");
+    assert_eq!(messages(&mut v), ["At is not a valid time", "Id is not a valid UUID", "N is not a decimal number"]);
+}
+
+#[test]
 fn every_failure_is_collected_with_rails_messages() {
     let mut v = Validator::new();
     v.required("title", "  ")
@@ -139,4 +166,64 @@ fn merges_errors_from_another_validator() {
     let err = parsed.merge(model).finish().unwrap_err();
     let Error::Invalid(fields) = err else { panic!("expected Invalid") };
     assert_eq!(fields.iter().map(|f| f.field.as_str()).collect::<Vec<_>>(), ["pages", "title"]);
+}
+
+#[test]
+fn rails_style_checks() {
+    let mut v = Validator::new();
+    v.exclusion("username", "ada", &["admin"]).length("zip", "75001", 5).acceptance("terms", true);
+    v.greater_than("n", 2, 1).greater_than_or_equal_to("n", 1, 1).less_than("n", 1, 2).less_than_or_equal_to("n", 2, 2);
+    v.other_than("n", 1, 2)
+        .confirmation("password", "a", "a")
+        .absence("nickname", "")
+        .format("slug", "a-1", |c| c != ' ');
+    assert_eq!(messages(&mut v), Vec::<String>::new());
+    v.exclusion("username", "admin", &["admin"]).length("zip", "7500", 5).acceptance("terms", false);
+    v.greater_than("n", 1, 1).greater_than_or_equal_to("n", 0, 1).less_than("n", 2, 2).less_than_or_equal_to("n", 3, 2);
+    v.other_than("n", 2, 2)
+        .confirmation("password", "a", "b")
+        .absence("nickname", "x")
+        .format("slug", "a b", |c| c != ' ');
+    assert_eq!(
+        messages(&mut v),
+        [
+            "Username is reserved",
+            "Zip is the wrong length (should be 5 characters)",
+            "Terms must be accepted",
+            "N must be greater than 1",
+            "N must be greater than or equal to 1",
+            "N must be less than 2",
+            "N must be less than or equal to 2",
+            "N must be other than 2",
+            "Password confirmation doesn't match Password",
+            "Nickname must be blank",
+            "Slug is invalid",
+        ]
+    );
+}
+
+#[test]
+fn custom_messages_replace_only_the_last_failed_check() {
+    let mut v = Validator::new();
+    v.required("title", "").message("needs a title");
+    v.required("body", "text").message("ignored: the check passed");
+    v.range("pages", 0, 1..=5).message("must be positive");
+    v.required("summary", "ok").message("not applied: the last check passed");
+    assert_eq!(v.errors().len(), 2);
+    assert_eq!(messages(&mut v), ["Title needs a title", "Pages must be positive"]);
+    assert!(v.errors().is_empty());
+    // The first bound that fails is the only error of a range check.
+    v.range("pages", 9, 1..=5);
+    assert_eq!(messages(&mut v), ["Pages must be less than or equal to 5"]);
+}
+
+#[test]
+fn enum_values_from_form_text() {
+    let mut v = Validator::new();
+    assert_eq!(v.one_of::<bool>("flag", "true"), Some(true));
+    assert_eq!(v.optional_one_of::<bool>("flag", ""), None);
+    assert_eq!(v.optional_one_of::<bool>("flag", "false"), Some(false));
+    assert!(v.is_valid());
+    assert_eq!(v.optional_one_of::<bool>("flag", "maybe"), None);
+    assert_eq!(messages(&mut v), ["Flag is not included in the list"]);
 }

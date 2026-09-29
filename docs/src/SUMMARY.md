@@ -11,7 +11,10 @@
 
 - [Models and migrations](guides/models.md)
 - [Validations](guides/validations.md)
-- [Controllers, routing, views and htmx](guides/controllers.md)
+- [Controllers and routing](guides/controllers.md)
+- [Views, helpers and forms](guides/views.md)
+- [htmx](guides/htmx.md)
+- [Assets](guides/assets.md)
 - [JSON APIs and GraphQL](guides/json-apis.md)
 - [Sessions, flash and security](guides/security.md)
 - [Authentication](guides/authentication.md)

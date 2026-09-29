@@ -4,7 +4,7 @@ Ocre protects every app by default against session tampering, cross-site request
 
 ## Before you start
 
-Nothing to install to read this page. The framework parts are in the `ocre` crate (`session.rs`, `protect.rs`, `password.rs`, `token.rs`, `jwt.rs`, `storage.rs`, `realtime.rs`, `error.rs`); the authentication parts exist in an app after `ocre g auth` (`src/auth.rs`, `src/auth_api.rs`, `src/models/user.rs`, `src/models/auth_token.rs`, `src/models/api_key.rs`). Everything depends on one secret, `SECRET_KEY_BASE`, which `ocre new` writes to `.dev.vars` and `ocre deploy` uploads once (see [Configuration](../reference/configuration.md#secret_key_base)).
+Nothing to install to read this page. The framework parts are in the `ocre` crate (`session.rs`, `protect.rs`, `security.rs` and `security/`, `password.rs`, `token.rs`, `jwt.rs`, `oauth.rs`, `storage.rs`, `realtime.rs`, `error.rs`); the authentication parts exist in an app after `ocre g auth` (`src/auth.rs`, `src/auth_api.rs`, `src/models/user.rs`, `src/models/auth_token.rs`, `src/models/api_key.rs`, and with its options `src/models/user_session.rs` and `src/oauth.rs`). Everything depends on one secret, `SECRET_KEY_BASE`, which `ocre new` writes to `.dev.vars` and `ocre deploy` uploads once (see [Configuration](../reference/configuration.md#secret_key_base)).
 
 ## At a glance
 
@@ -14,17 +14,18 @@ Nothing to install to read this page. The framework parts are in the `ocre` crat
 | Cross-site request forgery | Browsers' cross-site unsafe requests get 403, without tokens | `ocre::serve` | Never change data in a `GET` handler |
 | Cross-origin reads by other sites | No CORS headers unless `ALLOWED_ORIGINS` lists the origin | `ocre::serve` | List only origins you control |
 | Clickjacking, MIME sniffing | `X-Frame-Options: SAMEORIGIN`, `X-Content-Type-Options: nosniff` and more | `ocre::serve` | none |
-| XSS in pages | askama escapes `{{ value }}` | templates | Never mark user input `\|safe` |
-| SQL injection | Values bind to `?1, ?2` placeholders through `params![...]` | `Db` | Never build SQL with `format!` from input |
+| Requests for other host names | 403 for hosts not in `ALLOWED_HOSTS`, when set | `ocre::serve` | List your domains |
+| XSS in pages | askama escapes `{{ value }}`; generated full-stack apps send a Content-Security-Policy without inline scripts | templates, `src/lib.rs` | Never mark user input `\|safe` unless it went through `ocre::security::sanitize` |
+| SQL injection | Values bind to `?1, ?2` placeholders through `params![...]`; `Query` takes column names as `&'static str` | `Db`, `Query` | Never build SQL with `format!` from input |
 | Stolen database: passwords | PBKDF2-HMAC-SHA256 digests, 100,000 iterations | `ocre::password` | none |
 | Stolen database: links and keys | Only SHA-256 digests of tokens are stored | `ocre::token`, auth models | Keep it that way for your own tokens |
 | JWT algorithm confusion | Only `HS256` is accepted, `none` included in the refusal | `ocre::jwt` | Keep TTLs short |
 | Uploaded HTML or SVG running as the app | Served as `application/octet-stream` downloads | `ocre::storage::serve` | Check who may download |
 | Cross-site WebSocket hijacking | Handshakes checked like forms | `ocre::serve`, `src/realtime.rs` | Authorize channels in `connect` |
 | Leaking internals in errors | Internal messages are logged, clients see `Internal server error` | `ocre::Error` | Use `Error::internal` for unexpected failures |
-| Open redirect after login | Only local paths are remembered and followed | `src/auth.rs` | none |
+| Open redirect after login | Only local paths are remembered and followed (`ocre::security::url_from`) | `src/auth.rs` | Use `url_from` for your own redirects |
 | Account enumeration | Same answers whether an email has an account; a password hash runs either way | auth controllers, `user.rs` | none |
-| Brute force, credential stuffing | Nothing: no rate limiting | none | Add Cloudflare rate limiting rules before going public |
+| Brute force, credential stuffing | 10 attempts a minute per IP address and action on every route that checks a password or sends an email | `src/auth_api.rs` (`throttle`), `ocre::security::rate_limit` | Keep the `AUTH_RATE_LIMITER` binding; limit your own costly routes |
 
 ## SECRET_KEY_BASE: one secret, two keys
 
@@ -35,19 +36,19 @@ Both the session key and the JWT key are derived from the `SECRET_KEY_BASE` Work
 
 `ocre secret` generates 128 hexadecimal characters (512 bits). A value shorter than 64 characters is refused: handlers that use the session or a JWT answer 500, and the log names the fix; other routes keep working.
 
-`ocre deploy` uploads a new secret only when the Worker has none, and never replaces an existing one. Rotating it yourself (`ocre secret | npx wrangler secret put SECRET_KEY_BASE`) signs every user out and invalidates every JWT at once; API keys and emailed links, stored as digests in D1, keep working. Anyone who learns the secret can forge a session for any user id and mint JWTs: rotate it if it leaks.
+`ocre deploy` uploads a new secret only when the Worker has none, and never replaces an existing one. Rotating it yourself (`ocre secret | npx wrangler secret put SECRET_KEY_BASE`) signs every user out and invalidates every JWT at once, which is what you want after a leak; API keys and emailed links, stored as digests in D1, keep working. For a planned rotation, put the old value in the `SECRET_KEY_BASE_PREVIOUS` secret first: keys derived from it still decrypt cookies (which are re-encrypted with the new key on the same response) and verify JWTs, but never encrypt or sign anything new. Anyone who learns the secret can forge a session for any user id and mint JWTs: rotate it, without `SECRET_KEY_BASE_PREVIOUS`, if it leaks.
 
 ## Sessions
 
-The session is a JSON object stored in the `_ocre_session` cookie, encrypted and authenticated with AES-256-GCM, like Rails' default cookie store. The browser can neither read nor change it; a cookie that does not decrypt (tampered, or made with an older key) starts an empty session. Nothing is stored on the server: sessions cost no D1 row and no KV operation.
+The session is a JSON object stored in the `_ocre_session` cookie, encrypted and authenticated with AES-256-GCM, like Rails' default cookie store. The browser can neither read nor change it; a cookie that does not decrypt (tampered, or made with a key that is neither `SECRET_KEY_BASE` nor listed in `SECRET_KEY_BASE_PREVIOUS`) starts an empty session. Nothing is stored on the server: sessions cost no D1 row and no KV operation.
 
-The cookie is sent with `HttpOnly`, `SameSite=Lax`, `Path=/`, and `Secure` on HTTPS requests, without `Expires` or `Max-Age`, so browsers treat it as a session cookie. A session that would exceed 4,096 bytes fails the request with a 500 whose log says to store ids rather than records.
+The cookie is sent with `HttpOnly`, `SameSite=Lax`, `Path=/`, and `Secure` on HTTPS requests. By default it has no `Expires` or `Max-Age`, so browsers treat it as a session cookie; `session.remember_for(seconds)` adds `Max-Age` ("remember me"). A session that would exceed 4,096 bytes fails the request with a 500 whose log says to store ids rather than records.
 
 What a cookie store implies:
 
-- **No server-side revocation.** Logging out clears the browser's cookie, but a copy of the cookie taken earlier still decrypts and still holds the user id, until `SECRET_KEY_BASE` changes. There is no idle timeout or expiry inside the session.
+- **Revocation needs an expiry or D1.** Logging out clears the browser's cookie, but a copy taken earlier still decrypts. `session.expire_in(seconds)` and `remember_for` store an expiry inside the encrypted cookie, checked on every request, so a copy stops working after it; `ocre g auth` signs users in for two weeks. To end one session, or all of a user's sessions, before that, `ocre g auth --db-sessions` keeps a row per session in D1 and the cookie holds only a random token whose digest finds it: deleting the row signs that device out on its next request.
 - **No fixation.** `auth::sign_in` empties the session before storing `user_id` (pending flash messages stay), so nothing from before the login carries over, and there is no server-side session id to fix in advance.
-- **Ids only.** The generated auth code stores `user_id` and, while redirecting to the login page, the page to return to. Put ids in the session, never records or secrets.
+- **Ids only.** The generated auth code stores `user_id` (or the session token) and, while redirecting to the login page, the page to return to. Put ids in the session, never records, balances, nonces or secrets: an old copy of the cookie could be replayed until it expires.
 
 ## Cross-site request forgery without tokens
 
@@ -84,7 +85,11 @@ Every response gets these headers unless the handler set its own value:
 | `X-Permitted-Cross-Domain-Policies` | `none` |
 | `Strict-Transport-Security` | `max-age=63072000` (two years), on HTTPS requests only |
 
-There is no `Content-Security-Policy` by default; set one in a handler or a layer if your pages need it.
+Full-stack apps made by `ocre new` also add a `Content-Security-Policy` (scripts only from the app and `unpkg.com`, no inline scripts or `on*=` handlers, `object-src 'none'`, `frame-ancestors 'self'`) and a `Permissions-Policy` (camera, microphone, geolocation, payment and USB off) as layers in `src/lib.rs`, built with `ocre::security::ContentSecurityPolicy` and `PermissionsPolicy`; a handler's own header or a nested router's layer overrides them. API-only apps get neither, since they serve no HTML.
+
+## Host authorization
+
+When the `ALLOWED_HOSTS` variable is set (`"example.com, .example.com"`), a request whose `Host` is not listed gets `403 Forbidden: blocked host` before the session, the CSRF check or any handler runs; a leading `.` allows subdomains, and `localhost`, `127.0.0.1` and `[::1]` always pass for `ocre dev`. DNS rebinding cannot reach a Worker (Cloudflare routes only your own host names to it), so the point on Workers is to answer only on your domain and not on `workers.dev` or preview URLs.
 
 ## Passwords
 
@@ -167,16 +172,18 @@ A WebSocket handshake is a `GET`, but browsers send cookies with it and let any 
 
 ## Errors
 
-`Error::Internal` (and any `worker::Error` converted with `?`) is logged as `[ocre] <message>` and answered as `Internal server error`, in HTML pages, JSON (`{"error": {"status": 500, "message": "Internal server error"}}`) and GraphQL alike. A failed D1 query logs D1's error and the SQL with its `?N` placeholders; Ocre does not add the bound values. Client errors (400, 404, 413, 422) show their message, which you choose.
+`Error::Internal` (and any `worker::Error` converted with `?`) is logged as `[ocre] <message>` and answered as `Internal server error`, in HTML pages, JSON (`{"error": {"status": 500, "message": "Internal server error"}}`) and GraphQL alike. A failed D1 query logs D1's error and the SQL with its `?N` placeholders; Ocre does not add the bound values. Client errors (400, 404, 413, 422, 429) show their message, which you choose. To log request parameters yourself, pass them through `ocre::security::filter_parameters` or `filter_json`, which replace passwords, tokens, keys and similar values with `[FILTERED]`.
+
+## OAuth sign-in
+
+`ocre g auth --oauth github,google` uses the authorization code flow with PKCE (`ocre::oauth`). The random `state` and the PKCE verifier are kept in the encrypted session between the redirect and the callback; the callback compares the state in constant time, so another site cannot sign a visitor in to the attacker's account (login CSRF). The client secret stays in a Worker secret and is only sent from the Worker to the provider's token endpoint. An existing account is linked only through an email address the provider reports as verified, and a new account created that way has no password.
 
 ## What Ocre does not do yet
 
-- **Rate limiting.** Login, sign-up, magic-link, password-reset and token routes accept unlimited attempts, and each password check costs about 5 ms of CPU. Before going public, add [Cloudflare rate limiting rules](https://developers.cloudflare.com/waf/rate-limiting-rules/) for `/login`, `/signup`, `/magic_link`, `/passwords` and `/api/auth/*` (see [Deployment](../guides/deployment.md#before-going-public-rate-limiting)).
-- **Email confirmation.** Sign-up does not verify that the address belongs to the user.
-- **Sign out everywhere.** Sessions last until logout or until `SECRET_KEY_BASE` changes; changing a password does not end other sessions.
+- **Sign out everywhere** needs `ocre g auth --db-sessions`; cookie sessions end at logout, at their expiry (`expire_in`) or when `SECRET_KEY_BASE` changes.
 - **Roles and permissions.** Authorization is the ownership checks you write.
-- **Two-factor authentication and account lockout.**
-- **A default Content-Security-Policy.**
+- **Two-factor authentication and account lockout.** Rate limiting slows guessing; it does not lock an account.
+- **Encrypted or signed cookies other than the session.** Put such values in the session.
 
 ## See also
 

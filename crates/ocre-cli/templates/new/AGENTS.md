@@ -28,38 +28,62 @@ on stdout (`"ok": true|false`, plus `error` and `hint` on failure).
 | Resource with an uploaded file (R2; adds the `STORAGE` binding) | `ocre g scaffold Photo title:string image:attachment notes:attachment?` |
 | JSON REST resource, `/api/posts` | `ocre g api Post title:string body:text` |
 | Same, also on `/graphql` (costs CPU, see below) | `ocre g api Post title:string --graphql` |
+| Model + `index`/`show` actions to fill in (lighter than scaffold) | `ocre g resource Tag name:string^ color:enum:red,green,blue` |
+| Pages or JSON endpoints without a model (GET actions) | `ocre g controller Pages about contact` (`--api` for JSON, `--auth` for signed-in users) |
 | Add columns (SQL inferred from the name) | `ocre g migration add_slug_to_posts slug:string?` |
 | Remove a column | `ocre g migration remove_slug_from_posts` |
+| Add / remove an index (column names, in order) | `ocre g migration add_index_to_posts author_id created_at` (`add_unique_index_to_posts slug`, `remove_index_from_posts author_id created_at`) |
+| Rename a column / a table; drop a table | `ocre g migration rename_body_to_content_in_posts`, `rename_posts_to_articles`, `drop_posts` |
+| Change a column's type, NOT NULL, DEFAULT or CHECK (SQLite table rebuild) | `ocre db schema`, then `ocre g migration rebuild_posts` and edit its CREATE TABLE |
 | Empty migration (data changes, custom SQL) | `ocre g migration backfill_slugs` |
-| Authentication (users, login, magic link, password reset, JWT, API keys; once) | `ocre g auth` |
-| Emails to send (one function per email) | `ocre g mailer User welcome password_reset` |
+| Authentication (users, login, magic link, password reset, JWT, API keys; once) | `ocre g auth` (`--db-sessions` to list/revoke devices, `--oauth github,google`) |
+| Emails to send (one function per email; previews at `/ocre/dev/mailers` in `ocre dev`) | `ocre g mailer User welcome password_reset` |
 | Receive email (Email Routing) | `ocre g mailbox` |
 | Background job (Cloudflare Queues) | `ocre g job SendWelcome user_id:integer` |
-| Scheduled task (Cron Trigger, UTC) | `ocre g schedule nightly_cleanup "0 3 * * *"` |
-| Run a scheduled task now (`ocre dev` running) | `curl 'http://localhost:8787/cdn-cgi/local/scheduled?cron=0+3+*+*+*'` |
+| Job on its own queue (never waits behind others) | `ocre g job SendCode user_id:integer --queue urgent` |
+| Scheduled task (Cron Trigger, UTC; English or cron) | `ocre g schedule nightly_cleanup "every day at 3am"` |
+| List scheduled tasks; run one now (`ocre dev` running) | `ocre schedules`, `ocre schedules run nightly_cleanup` |
 | Cache values in Workers KV (adds the `CACHE` binding) | `ocre g cache` |
 | Translations: set up (first code = default), add a locale | `ocre g locale en fr`, then `ocre g locale de` |
+| Preview a generator without writing; overwrite / keep existing files | `ocre g scaffold Post title:string --pretend` (`--force`, `--skip`) |
+| Undo a generator run (from `.ocre/generated/`; commit that directory) | `ocre destroy scaffold Post` (`--pretend`, `--force`) |
+| Customize generated code: copy templates to `.ocre/templates/` | `ocre g override controller` (no argument: list) |
+| App's own generator in `.ocre/generators/<name>/`, then run it | `ocre g generator service`, then `ocre g service Billing amount:integer` |
+| Apply a template of ocre commands (one per line) | `ocre template setup.ocre` |
 | Keys missing from a locale (fails if any) | `ocre i18n missing` |
 | Apply migrations locally | `ocre migrate` |
 | Pending migrations | `ocre migrate --status` |
-| Load seed data (`db/seeds.sql`) | `ocre db seed` |
+| Load seed data (`db/seeds.sql`); empty the tables first | `ocre db seed` (`ocre db seed --replant`) |
 | Recreate local database (migrations + seeds) | `ocre db reset` |
+| Set up or update the local database (safe to repeat) | `ocre db prepare` |
+| Empty every local table / delete the local database | `ocre db truncate` / `ocre db drop` |
+| Last applied migration | `ocre db version` |
+| Current schema of every table into `db/schema.sql` | `ocre db schema` |
 | Query the database (JSON rows with `--json`) | `ocre sql "SELECT * FROM posts LIMIT 5"` |
 | Run locally (http://localhost:8787) | `ocre dev` |
 | List routes (method, path, handler) | `ocre routes` (or `ocre routes posts`) |
 | New secret value | `ocre secret` |
+| Secret names locally and deployed; upload production values | `ocre secrets list`, `ocre secrets push GITHUB_CLIENT_SECRET --file .prod.vars` |
+| Check tools, bindings, migrations, secrets (fails on a problem) | `ocre doctor` |
+| Versions and configuration; code size; TODO/FIXME comments | `ocre about`, `ocre stats`, `ocre notes` |
 | Cloudflare login (browser; once) | `ocre login` |
 | Deploy + remote migrations | `ocre deploy` |
 | Type-check | `cargo check --target wasm32-unknown-unknown` |
+| Unit tests + type-check (`--e2e`: also `tests/e2e.sh` against a local server, `$BASE_URL`) | `ocre test` |
 
-Field types: `string`, `text`, `integer`, `float`, `boolean`, `date`
-(`YYYY-MM-DD`), `datetime`, `references` (`author:references` adds
-`author_id`, a foreign key deleted with its parent), `attachment` (a file in
-R2 stored as `<name>_key`, `_filename`, `_content_type`, `_size` columns; must
-be optional `?` in JSON APIs), `json` (any JSON value as
-`ocre::serde_json::Value`, stored as JSON text; build values with
-`ocre::serde_json::json!`; cannot be unique `^`). Suffix `?` makes a field
-optional (NULL allowed), `^` unique. Integers must stay within
+Field types: `string`, `text`, `integer`, `float`, `decimal` (exact, as
+text), `boolean`, `date` (`YYYY-MM-DD`), `time`, `datetime`, `uuid`,
+`enum:draft,published` (a Rust enum in the model, stored as text with a
+`CHECK`; cannot be unique, not with `--graphql`), `references`
+(`author:references` adds `author_id`, a foreign key deleted with its parent;
+`author:references?` sets it to NULL instead; `user:references^` is a
+has-one; a model with only references, `Tagging post:references
+tag:references`, is a join model giving `post.tags(ctx, page)`),
+`attachment` (a file in R2 stored as `<name>_key`, `_filename`,
+`_content_type`, `_size` columns; must be optional `?` in JSON APIs), `json`
+(any JSON value as `ocre::serde_json::Value`, stored as JSON text; build
+values with `ocre::serde_json::json!`; cannot be unique `^`). Suffix `?`
+makes a field optional (NULL allowed), `^` unique. Integers must stay within
 ±`ocre::MAX_SAFE_INTEGER` (2^53 - 1): D1 returns numbers as JavaScript
 numbers; generated validations already reject larger values.
 
@@ -67,14 +91,16 @@ numbers; generated validations already reject larger values.
 
 ```
 src/lib.rs          entry point and router; keep the `// ocre:` marker comments
-src/models/<model>.rs  the model: struct, New<Model>/<Model>Changes, validate(),
-                    all/count/find/find_many/create/update/delete, associations
+src/models/<model>.rs  the model: struct, New<Model>/<Model>Changes, validate(), query(),
+                    all/count/find/find_many/create/update/delete, preload_<x>/for_<x>,
+                    associations, before_/after_ create/update/delete callbacks
 src/<plural>.rs     HTML resource: form parsing, handlers, routes (calls the model)
 src/<plural>_api.rs JSON resource: REST handlers and GraphQL resolvers (call the model)
 src/graphql.rs      GraphQL schema (when used); keep the `// ocre:graphql-*` markers
 src/auth.rs         after `ocre g auth`: CurrentUser/OptionalUser extractors, sign_in/sign_out (HTML apps)
 src/auth_api.rs     after `ocre g auth`: BearerUser extractor, /api/auth/* (token, me, keys)
-src/mailers/<name>.rs  functions building `ocre::mail::Email`; templates in templates/mailers/<name>/<action>.{txt,html}
+src/mailers/<name>.rs  functions building `ocre::mail::Email`; templates in templates/mailers/<name>/<action>.{txt,html}, extending templates/mailers/layout.{txt,html}
+src/mailers/mod.rs  `defaults(email)` applied to every mailer's email; `PREVIEWS` (keep `// ocre:mailer-previews`)
 src/mailbox.rs      incoming email handler, called by the `email` event in src/lib.rs
 src/jobs/<name>.rs  a job: serde struct of arguments + `perform(self, ctx)`
 src/jobs/mod.rs     `Job` enum and `perform` match (dispatch); keep the `// ocre:job*` markers
@@ -87,7 +113,7 @@ locales/<code>.yml  translations (after `ocre g locale`), declared in `ocre::loc
 public/             static files (CSS, images, robots.txt), served by Cloudflare before the Worker runs
 migrations/         numbered D1 SQL migrations, applied in order
 wrangler.toml       Cloudflare config; the D1 binding must be named DB; MAIL_FROM under [vars]
-                    the JOBS queue ([[queues.*]]) and [triggers] crons are added by the generators;
+                    the JOBS queue ([[queues.*]], JOBS_<NAME> per named queue) and [triggers] crons are added by the generators;
                     [[kv_namespaces]] CACHE by `ocre g cache` (`ocre deploy` writes its id: commit it)
 .dev.vars           local secrets and overrides for `ocre dev` (SECRET_KEY_BASE, MAIL_ADAPTER=log); never commit it
 ```
@@ -96,10 +122,25 @@ wrangler.toml       Cloudflare config; the D1 binding must be named DB; MAIL_FRO
 
 - Handlers are plain axum handlers taking `State(ctx): State<Ctx>`. Do not add
   `#[worker::send]`; Ocre types are already `Send`.
-- SQL goes through `ctx.db()?` with `?1, ?2` placeholders and `params![...]`.
-  Never build SQL with `format!` from user input.
-- Read rows with `db.all::<T>`, `db.first::<T>` (`INSERT ... RETURNING *` to get
-  the new row), write with `db.execute` (returns rows changed).
+- Queries: start from the model's `query()` (an `ocre::Query<T>`):
+  `post::query().eq("published", true).order_desc("id").page(page).all(&ctx.db()?)`;
+  `.first(&db)` (find_by), `.count`, `.exists`, `.pluck(&db, "id")`,
+  `.aggregate(&db, "SUM(price)")`, `.paginate(&db, page)` (`Paginated<T>`),
+  `.update_all(&db, vec![("col", v.into_param())])`, `.delete_all(&db)`.
+  Conditions: `eq ne gt gte lt lte between is_in not_in is_null like contains
+  starts_with ends_with`, `any(|q| ..)` for OR, `not(|q| ..)`,
+  `where_sql("x > ?", params![..])`. Scopes are plain
+  `fn published(q: Query<Post>) -> Query<Post>` applied with `.scope(published)`.
+  Column names are `&'static str`: map user input to a fixed column with a
+  `match` (sort by `Direction`, which deserializes from `asc`/`desc`).
+- Raw SQL goes through `ctx.db()?` with `?1, ?2` placeholders and
+  `params![...]`; never build SQL with `format!` from user input (`LIKE`
+  patterns: `ocre::escape_like`). `db.all::<T>`, `db.first::<T>`
+  (`INSERT ... RETURNING *` to get the new row), `db.execute` (rows changed).
+- Transactions: D1 has no `BEGIN`; statements that must all apply or none go
+  in one `ctx.db()?.batch(vec![Statement::new(sql, params![..]), query.update_statement(..)])`.
+  Put conditions in the write (`UPDATE ... WHERE stock >= ?1`) and check the
+  rows changed instead of read-then-write.
 - Booleans are INTEGER 0/1 in SQLite: read them with
   `#[serde(deserialize_with = "ocre::bool_from_sql")]`. JSON columns hold
   JSON text: bind a `serde_json::Value` with `params![value]` and read it
@@ -108,22 +149,56 @@ wrangler.toml       Cloudflare config; the D1 binding must be named DB; MAIL_FRO
 - Missing record: `.or_404()?`. Bad input: `Error::bad_request("...")`.
   Unexpected failure: `Error::internal("...")` (logged, not shown to users).
 - Validation: collect every problem with `ocre::Validator` (`required`,
-  `max_length`, `range`, `email`, `inclusion`, `date`, `check`, ...) and end
-  with `v.finish()?`, which returns `Error::Invalid` (422). JSON answers
+  `min_length`/`max_length`/`length`, `range`, `greater_than`..., `email`,
+  `inclusion`/`exclusion`, `format(field, v, |c| ..)`, `confirmation`,
+  `acceptance`, `date`/`time`/`datetime`, `one_of::<Enum>`, `check`,
+  `.message("..")` to replace the last message) and end with `v.finish()?`,
+  which returns `Error::Invalid` (422). JSON answers
   `{"error": {"fields": {"title": ["can't be blank"]}}}`; generated HTML forms
   re-render with the messages and the typed values.
 - Data rules live in the model (`src/models/<model>.rs`): `validate()` for
   checks without the database, `create`/`update` for uniqueness and foreign
-  keys. Handlers and GraphQL resolvers only call model functions. After a
-  migration that changes columns, update the model struct, `New<Model>`,
-  `<Model>Changes`, `validate()` and the SQL in `create`/`update`.
-- Load associations for many rows with `find_many(ctx, &ids)` (one query),
-  never `find` in a loop.
+  keys, the `before_*`/`after_*` callbacks at the end of the file for
+  normalizing input and side effects (a `before_*` `Err` stops the write; an
+  `after_*` `Err` does not undo it). Handlers and GraphQL resolvers only call
+  model functions. After a migration that changes columns, update the model
+  struct, `New<Model>`, `<Model>Changes`, `validate()` and the SQL in
+  `create`/`update`.
+- Load associations for many rows at once: `comment::preload_posts(ctx, &comments)`
+  (HashMap by id), `comment::for_posts(ctx, &post_ids)`, `find_many(ctx, &ids)`;
+  never an association or `find` in a loop.
+- Migrations are forward-only (no down/rollback): fix mistakes with a new
+  migration. Encrypted columns: `ocre::encryption::Encrypted` (or
+  `Deterministic` to look up with `eq`) as the row field type. Another D1
+  database: `ctx.db_named("BINDING")?`.
 - Templates escape `{{ value }}` by default; never mark user input `|safe`.
 - Change the schema only with a new migration file; never edit an applied one.
 - New module: generators register it in `src/lib.rs`. By hand, add
   `mod name;` under `// ocre:modules` and `.merge(name::routes())` under
   `// ocre:routes`. Keep `// ocre:models` and `// ocre:associations` too.
+- URLs: each HTML controller has `pub mod paths` (`paths::index()`,
+  `paths::new()`, `paths::show(id)`, `paths::edit(id)`, `paths::delete(id)`);
+  redirect with `Redirect::to(&paths::show(id))`, link in its templates with
+  `{{ paths::show(post.id) }}` and elsewhere `crate::posts::paths::show(id)`.
+  When you change a route, change `paths` too. Nested routes use
+  `Path((post_id, id)): Path<(i64, i64)>`; namespaces `.nest("/admin", admin::routes())`.
+- Errors render `templates/error.html` through `error_page` in src/lib.rs;
+  keep `.fallback(not_found)` and `.layer(map_response(error_page))` last in
+  `routes()` (before the i18n layer).
+- View helpers: `use ocre::filters;` in the controller, then
+  `{{ price|number_to_currency("$") }}`, `{{ post.created_at|time_ago_in_words }} ago`,
+  `{{ post.created_at|strftime("%b %-d, %Y") }}`, `number_with_delimiter`,
+  `number_to_human_size`, `excerpt`, `highlight`; askama's `truncate`,
+  `linebreaksbr`, `pluralize`. The same functions are in `ocre::helpers`.
+- One action serving HTML and JSON: take `format: ocre::Format` (Accept
+  header) and `match` it. Client IP: `ocre::RemoteIp`; request id:
+  `ocre::RequestId`; back to the previous page: `ocre::redirect_back(&headers, "/")`;
+  generated files: `ocre::storage::send_data(bytes, "name.csv", "text/csv", Disposition::Download)`.
+- htmx: the layout boosts links and forms (`hx-boost`). For partial updates,
+  answer a fragment when `Htmx(true)` and a redirect otherwise; `ocre::HxRedirect`
+  for a full navigation from an htmx request. Pagination links:
+  `page.previous()` / `page.next(rows.len())` and `?{{ p.query() }}`. No inline
+  `<script>` or `on*=` attributes: scripts go in `public/`.
 - JSON handlers return `ApiResult<T>` (errors become `{"error": {"status",
   "message"}}`), take bodies with `ocre::Json<T>` and lists with `Page`.
   Optional fields use `#[serde(default, deserialize_with = "ocre::optional")]`
@@ -138,11 +213,23 @@ wrangler.toml       Cloudflare config; the D1 binding must be named DB; MAIL_FRO
   redirect; the next page takes `flash: ocre::Flash` and its template shows
   `flash.notice()` / `flash.alert()`.
 - CSRF protection is automatic: browsers' cross-site POST/PUT/PATCH/DELETE get
-  403. Forms need no token. Another site (a separate frontend) that must call
-  the app: list its origin in `ALLOWED_ORIGINS` under `[vars]` in
-  wrangler.toml (comma-separated); that also enables CORS for it.
+  403. Forms and `fetch()` calls need no token. Another site (a separate
+  frontend) that must call the app: list its origin in `ALLOWED_ORIGINS` under
+  `[vars]` in wrangler.toml (comma-separated); that also enables CORS for it.
+  `ALLOWED_HOSTS = "example.com, .example.com"` answers only on those hosts.
 - Security headers (nosniff, SAMEORIGIN framing, referrer policy, HSTS on
   HTTPS) are added to every response; a handler that sets one keeps its value.
+  Full-stack apps also set a Content-Security-Policy in src/lib.rs: no inline
+  scripts or `onclick=`; use `ocre::security::CspNonce` for an inline script.
+- Request data: read forms and JSON into structs that list only the fields a
+  visitor may set (never `user_id` or roles: take them from `CurrentUser`).
+  SQL: values only through `?1` + `params![..]` or `Query` methods, never
+  `format!`; map a user-chosen sort onto a fixed column name. User HTML:
+  `ocre::security::sanitize` before `|safe`. Redirect targets from the
+  request: `ocre::security::url_from`.
+- Rate limiting: `ocre::security::rate_limit(&ctx, "BINDING", &key).await?`
+  (429 when over) with a `[[ratelimits]]` binding in wrangler.toml; key by
+  `ocre::remote_ip(&headers)` or user id.
 - `GET /up` is the health check; keep it cheap (no database).
 - Email: build it in a mailer (`src/mailers/`), send it from the handler with
   `ocre::mail::send(&ctx, mailers::user::welcome(&address)?).await?`. Validate
@@ -153,26 +240,39 @@ wrangler.toml       Cloudflare config; the D1 binding must be named DB; MAIL_FRO
   (`[[send_email]]` binding `EMAIL`; free plan: only verified addresses of the
   account). Unset in production = `send` fails with an error naming the fix.
   Put data in the template structs; `.txt` templates are not HTML-escaped.
+  More on an `Email`: `.cc(..)`, `.bcc(..)`, `.also_to(..)`, `.reply_to(..)`,
+  `.header(..)`, `.attach(filename, content_type, bytes)`, `.inline(cid, ..)`
+  (HTML `<img src="cid:..">`). In `ocre dev`: previews and the emails sent at
+  `http://localhost:8787/ocre/dev/mailers`, as JSON at
+  `/ocre/dev/mailers/sent.json` (read emailed links there in scripts).
 - Background jobs: anything slow, retryable or not needed for the response
   (emails, calls to other APIs, bulk updates) goes in a job. Enqueue with
-  `ocre::jobs::enqueue(&ctx, &Job::SendWelcome(SendWelcome { user_id })).await?`
-  (`use crate::jobs::{Job, SendWelcome};`), or `enqueue_in(&ctx, &job,
-  Duration::from_secs(n))` (24 h max). Job fields are the arguments: pass ids
+  `SendWelcome { user_id }.perform_later(&ctx).await?`
+  (`use crate::jobs::SendWelcome;`), or `ocre::jobs::enqueue_in(&ctx,
+  &Job::SendWelcome(..), Duration::from_secs(n))` (24 h max), or many at once
+  with `ocre::jobs::enqueue_all(&ctx, &jobs)` (never a loop of enqueues). Job
+  fields are the arguments: pass ids
   and small values (128 KB max), load records in `perform`. `perform` returns
-  `Err` to retry (30 s, 1 min, 3 min, 9 min, 27 min, then the
+  `Err(Error::NotFound)` or another 4xx error to drop the job (logged, not
+  retried), any other `Err` to retry (30 s, 1 min, 3 min, 9 min, 27 min, then the
   `<app>-jobs-failed` dead-letter queue); jobs may run twice, so make them
   safe to repeat. Never rename a `Job` variant or change its fields while
   messages may be queued: they would be dropped (`[ocre jobs] dropped message`).
-  In `ocre dev` jobs run within ~5 s; read the `[ocre jobs]` lines.
+  In `ocre dev` jobs run within ~5 s; read the `[ocre jobs]` lines. Queues have
+  no priorities: urgent jobs get their own queue (`--queue urgent`).
 - Email from a request: prefer `ocre::mail::deliver_later(&ctx, email).await?`
-  (sent by the jobs queue, retried) once the app has a job; `send` otherwise.
-- Scheduled tasks: `ocre g schedule`; the task `run(ctx)` must stay within
-  10 ms CPU: query ids, then enqueue one job per item. Crons are UTC; a failed
-  run is logged (`[ocre cron]`), not retried.
+  (sent by the jobs queue, retried; `deliver_in` to delay it) once the app has
+  a job; `send` otherwise.
+- Scheduled tasks: `ocre g schedule <name> "<when>"` ("every 15 minutes",
+  "every weekday at 6pm", or a cron expression); the task `run(ctx)` must stay within
+  10 ms CPU: query ids, then enqueue jobs (`enqueue_all`). Crons are UTC; a failed
+  run is logged (`[ocre cron]`), not retried. Cron Triggers never fire in
+  `ocre dev`: `ocre schedules run <name>` fires one.
 - Incoming email: `src/mailbox.rs` `receive(ctx, email)`; `email.to()`,
   `subject()`, `text()`, `header(..)`; `email.reject("reason")` bounces,
   `email.forward("verified@address").await?` forwards; an `Err` bounces.
-  Test locally with `curl 'http://localhost:8787/cdn-cgi/local/email?from=a@example.com&to=b@example.com' --data-binary @message.eml`
+  Test locally with the form at `http://localhost:8787/ocre/dev/mailbox`, or
+  `curl 'http://localhost:8787/cdn-cgi/local/email?from=a@example.com&to=b@example.com' --data-binary @message.eml`
   (the message needs a `Message-ID` header).
 
 - Authentication (after `ocre g auth`):
@@ -184,9 +284,10 @@ wrangler.toml       Cloudflare config; the D1 binding must be named DB; MAIL_FRO
     and answers 401 JSON otherwise. Put it before `Json(..)` in the arguments.
   - Ownership: filter queries by `user.id` (`WHERE user_id = ?1`) and return
     `Error::NotFound` (or `Error::Forbidden`) for other users' records.
-  - Sign in only through `auth::sign_in(&session, &user)?` (it resets the
-    session) and out with `auth::sign_out(&session)?`; never store more than
-    the user id in the session.
+  - Sign in only through `auth::sign_in(&ctx, &session, &headers, &user, remember).await?`
+    (it resets the session and returns the page to go to) and out with
+    `auth::sign_out(&ctx, &session).await?`; never store more than the user id
+    in the session.
   - Passwords: `ocre::password::hash` / `verify` only (PBKDF2 via WebCrypto,
     about 5 ms CPU per call: one per request at most). Never log or return
     passwords, tokens or digests; `User` never serializes `password_digest`.
@@ -200,8 +301,12 @@ wrangler.toml       Cloudflare config; the D1 binding must be named DB; MAIL_FRO
     `DELETE /api/auth/keys/{id}`. In code: `models::api_key::create(&ctx, user.id, NewApiKey { name })`.
   - Magic-link and reset emails print in the `ocre dev` output
     (`[ocre mail]`); open the link from there.
-  - No rate limiting: before going public, add Cloudflare rate limiting rules
-    for /login, /signup, /magic_link, /passwords and /api/auth/*.
+  - Every route that checks a password or sends an email calls
+    `auth_api::throttle(&ctx, &headers, "<action>").await?` (binding
+    `AUTH_RATE_LIMITER`, 10 a minute per IP): do the same in new ones.
+  - `--db-sessions` apps: sessions are D1 rows (`/account/sessions` revokes
+    them). `--oauth` apps: secrets `<PROVIDER>_CLIENT_ID` and
+    `<PROVIDER>_CLIENT_SECRET` in .dev.vars and `npx wrangler secret put`.
 
 - Files (`attachment` fields, `ocre::storage`, R2 binding `STORAGE`):
   - Rules live in the model: `pub const IMAGE: Rules { max_bytes, content_types }`

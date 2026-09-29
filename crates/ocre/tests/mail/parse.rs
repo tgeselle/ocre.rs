@@ -58,15 +58,29 @@ fn multipart_alternative_in_mixed_with_attachment() {
         \n\
         attached\n\
         --outer; b\n\
-        Content-Type: image/png\n\
+        Content-Type: image/png; name=\"=?UTF-8?Q?logo=C3=A9.png?=\"\n\
+        Content-ID: <logo@x>\n\
+        Content-Transfer-Encoding: base64\n\
         \n\
-        xxx\n\
+        AQID\n\
         --outer; b--\n\
         epilogue\n";
     let message = Message::parse(raw.as_bytes());
     assert_eq!(message.header("Subject"), Some("Report"));
     assert_eq!(message.text.as_deref(), Some("Café = softbreakx =ZZ end="), "malformed escapes are kept");
     assert_eq!(message.html.as_deref(), Some("<p>café</p>"));
+    let files: Vec<_> = message
+        .attachments
+        .iter()
+        .map(|a| (a.filename.as_str(), a.content_type.as_str(), a.content.as_slice(), a.content_id.as_deref()))
+        .collect();
+    assert_eq!(
+        files,
+        [
+            ("notes.txt", "text/plain", b"attached".as_slice(), None),
+            ("logoé.png", "image/png", [1, 2, 3].as_slice(), Some("logo@x")),
+        ]
+    );
 }
 
 #[test]
@@ -75,6 +89,8 @@ fn first_text_part_wins_and_crlf_boundaries() {
                Content-Type: text/html\r\n\r\n<b>unterminated</b>\r\n";
     let message = Message::parse(raw.as_bytes());
     assert_eq!(message.text.as_deref(), Some("first"));
+    assert_eq!(message.attachments[0].filename, "attachment", "a later text part is a nameless attachment");
+    assert_eq!(message.attachments[0].content, b"second");
     assert_eq!(message.html.as_deref(), Some("<b>unterminated</b>\r\n"), "no closing delimiter keeps the last part");
 }
 
@@ -83,7 +99,7 @@ fn empty_parts_and_multiparts_without_boundary() {
     let message = Message::parse(b"Content-Type: multipart/alternative; boundary=b\n\n--b\n\nbody\n--b\n--b--\n");
     assert_eq!(message.text.as_deref(), Some("body"), "the empty last part is ignored");
     let message = Message::parse(b"Content-Type: multipart/mixed\n\n--b\n\ntext\n--b--\n");
-    assert_eq!(message, Message { headers: message.headers.clone(), text: None, html: None });
+    assert_eq!(message, Message { headers: message.headers.clone(), ..Message::default() });
 }
 
 #[test]

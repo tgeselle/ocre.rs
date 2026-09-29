@@ -4,8 +4,8 @@ Rails-like Rust web framework for Cloudflare Workers, designed to run on the
 Workers **free plan** and to be written by **AI agents**.
 
 Status: early. The core crate, the `ocre` CLI and an example app run with
-`wrangler dev` and in production on the free plan; jobs, auth and realtime are
-not built yet.
+`wrangler dev` and in production on the free plan, including auth, background
+jobs, email and realtime; [ROADMAP.md](ROADMAP.md) lists what is missing.
 
 ## Quick start
 
@@ -41,24 +41,40 @@ explanations, each page also as Markdown (`<page>.md`), with
 | `ocre g model <Model> field:type...` | Migration and `src/models/<model>.rs`: struct, validations, queries, associations |
 | `ocre g scaffold <Model> field:type... [--realtime]` | Model (unless it exists) plus HTML CRUD: handlers, routes, templates; registers modules in `src/lib.rs`. `--realtime`: the index page updates live in every open browser (see [Realtime](#realtime)). In an API-only app: same as `ocre g api` |
 | `ocre g api <Model> field:type... [--graphql]` | Model (unless it exists) plus JSON REST resource under `/api/<plural>`; `--graphql` also exposes it on `/graphql` |
-| `ocre g auth` | Authentication generated into the app: users, sign-up/login/logout pages, password reset and magic links by email, JWTs and API keys (see [Authentication](#authentication)). Runs once |
-| `ocre g migration <name> [field:type...]` | Numbered migration; `create_<table>`, `add_<x>_to_<table>` and `remove_<x>_from_<table>` get their SQL from the name and fields |
-| `ocre g mailer <Name> action...` | `src/mailers/<name>.rs`, one function per action returning an `ocre::mail::Email`, with `templates/mailers/<name>/<action>.{txt,html}` (text built with `format!` in API-only apps) |
+| `ocre g resource <Model> field:type... [--api]` | Model (unless it exists) plus `index` and `show` actions (HTML pages, or JSON) to fill in |
+| `ocre g controller <Name> [action...] [--api] [--auth]` | GET actions in `src/<name>.rs` with a page each (or JSON under `/api/<name>`); `--auth` for signed-in users only |
+| `ocre g auth [--db-sessions] [--oauth github,google]` | Authentication generated into the app: users, sign-up/login/logout pages, password reset, magic links and email confirmation by email, rate limits, JWTs and API keys; `--db-sessions` tracks sessions in D1, `--oauth` adds "Continue with GitHub / Google" (see [Authentication](#authentication)). Runs once |
+| `ocre g migration <name> [field:type...]` | Numbered migration; SQL from the name: `create_<table>`, `add_<x>_to_<table>`, `remove_<x>_from_<table>`, `add_index_to_<table> col...`, `add_unique_index_to_<table>`, `remove_index_from_<table>`, `rename_<a>_to_<b>_in_<table>`, `rename_<table>_to_<new>`, `drop_<table>`, `rebuild_<table>` (from `db/schema.sql`) |
+| `ocre g mailer <Name> action...` | `src/mailers/<name>.rs`, one function per action returning an `ocre::mail::Email`, with `templates/mailers/<name>/<action>.{txt,html}` extending shared layouts (text built with `format!` in API-only apps); `src/mailers/mod.rs` holds app-wide `defaults` and the `PREVIEWS` served at `/ocre/dev/mailers` |
 | `ocre g mailbox` | `src/mailbox.rs` for incoming email, wired to the Worker's `email` event in `src/lib.rs` |
-| `ocre g job <Name> [field:type...]` | `src/jobs/<name>.rs` (arguments + `perform`), added to the `Job` enum and `perform` match in `src/jobs/mod.rs`; the first job wires the `JOBS` queue and the `queue` event (see [Background jobs](#background-jobs-and-scheduled-tasks)) |
-| `ocre g schedule <name> "<cron>"` | `src/schedules/<name>.rs`, run by a Cron Trigger added to `[triggers] crons`, dispatched by cron in `src/schedules/mod.rs`; the first one wires the `scheduled` event |
+| `ocre g job <Name> [field:type...] [--queue <name>]` | `src/jobs/<name>.rs` (arguments + `perform`), added to the `Job` enum and `perform` match in `src/jobs/mod.rs`; the first job wires the `JOBS` queue and the `queue` event; `--queue urgent` sends it to its own queue `<app>-jobs-urgent` (see [Background jobs](#background-jobs-and-scheduled-tasks)) |
+| `ocre g schedule <name> "<when>"` | `src/schedules/<name>.rs`, run by a Cron Trigger added to `[triggers] crons`, dispatched by cron in `src/schedules/mod.rs`; `<when>` is plain English (`"every day at 3am"`, `"every 15 minutes"`) or a cron expression; the first one wires the `scheduled` event |
 | `ocre g cache` | Adds the `CACHE` Workers KV binding to `wrangler.toml` for `ocre::cache::fetch` (see [Caching](#caching)) |
 | `ocre g locale <code>...` | `locales/<code>.yml` per code, declared in `ocre::locales!(...)` in `src/lib.rs`; the first run makes its first code the default locale and adds the `I18n` layer to `routes()` (see [Translations](#translations)) |
+| `ocre g override [path...]` | Copies generator templates (`controller/view.html`, or all of `controller`) into `.ocre/templates/`, which replace the built-in ones until deleted; without paths, lists them |
+| `ocre g generator <name>` / `ocre g <name> <Name> [args...]` | An app generator in `.ocre/generators/<name>/` (templated files and marker insertions), then runs it |
+| `ocre g ... --pretend` / `--force` / `--skip` | Every generator: show without writing / overwrite existing files / keep them. Runs are recorded in `.ocre/generated/` |
+| `ocre destroy <generator> [Name]` (`ocre d`) | Undoes a recorded generator run: deletes its files, removes the lines it added (Cargo.toml and wrangler.toml stay); `--pretend`, `--force` |
+| `ocre template <file or URL>` | Applies an application template: one ocre command per line (generators, `migrate`, `cargo add`...), local commands only |
 | `ocre migrate [--remote]` | Apply D1 migrations |
 | `ocre migrate --status [--remote]` | Show wrangler's pending-migrations table; `--json` lists them in `pending` |
-| `ocre db seed [--remote]` | Run `db/seeds.sql` |
+| `ocre db seed [--remote] [--replant]` | Run `db/seeds.sql`; `--replant` (local) empties the tables first |
 | `ocre db reset` | Local only: delete `.wrangler/state/v3/d1`, apply migrations, run `db/seeds.sql` if present |
+| `ocre db create [--remote]` / `db prepare` | Create the database (remote: the D1 database when missing) / local, safe to repeat: migrate, seed a new database |
+| `ocre db drop` / `db truncate` | Local only: delete the local database / delete every row, keep tables and migrations |
+| `ocre db version [--remote]` / `db schema [--remote]` | Last applied migration / write the `CREATE` statements to `db/schema.sql` |
 | `ocre sql "<query>" [--remote]` | Run SQL and print the rows as a table; `--json` returns wrangler's results in `rows` |
 | `ocre dev [--port N]` | Checks locale files, applies local migrations, then `wrangler dev` |
+| `ocre test [--e2e] [-- args]` | `cargo test`, then the wasm32 check; `--e2e` also runs `tests/e2e.sh` against a `wrangler dev` started for the run (`BASE_URL`) |
 | `ocre deploy` | Existing database: migrate, then deploy. New database: deploy (creates it), then migrate. Uploads a new `SECRET_KEY_BASE` only when the Worker has none (an existing one is never rotated). Creates the queues `wrangler.toml` names when missing, the KV namespaces without an `id` (then writes the id into `wrangler.toml`), and the R2 buckets of `[[r2_buckets]]` when missing. Refuses locale files the Worker could not load |
 | `ocre i18n missing` | Keys of the default locale missing from other locales (with the plural forms each language needs), undeclared or invalid locale files; fails when there is any |
 | `ocre routes [filter]` | The app's routes (method, path, handler), read from `src/lib.rs` and the modules it merges; `--json` returns `routes` |
+| `ocre schedules` / `ocre schedules run <task> [--port N]` | The crons of `wrangler.toml` and their tasks (`--json` returns `schedules`); `run` fires one task on the running `ocre dev` through wrangler's local scheduled endpoint |
 | `ocre secret` | New random `SECRET_KEY_BASE` value (128 hex characters), like `rails secret` |
+| `ocre secrets list` / `ocre secrets push NAME... [--file F]` | Secret names in `.dev.vars` and on the deployed Worker / upload values from a git-ignored file in one `wrangler secret bulk` |
+| `ocre doctor` | Checks the wasm target, Node.js, the login, bindings for what the code uses, pending migrations and secrets; fails on a failed check |
+| `ocre about` / `ocre version` | Versions, mode, bindings, variable names and Ocre features / CLI and app versions |
+| `ocre stats [dir...]` / `ocre notes [--annotations T,U]` | Lines of code per part of the app / TODO, FIXME, OPTIMIZE comments |
 
 `ocre new` flags:
 
@@ -72,15 +88,21 @@ explanations, each page also as Markdown (`<page>.md`), with
 | `--deploy` / `--no-deploy` | Deploy right away (implies `--login`) | no deploy |
 | `--yes`, `-y` | Never prompt, even in a terminal | |
 | `--ocre-path <dir>` | Use a local `crates/ocre` instead of the git dependency | git |
+| `--template <file or URL>`, `-m` | Apply an application template to the new app (see `ocre template`) | none |
 
-Field types: `string`, `text`, `integer`, `float`, `boolean`, `date`,
-`datetime`, `references` (`author:references` adds `author_id` with a foreign
-key, `ON DELETE CASCADE`), `attachment` (a file in R2, see [Files](#files)),
+Field types: `string`, `text`, `integer`, `float`, `decimal` (exact, as
+text), `boolean`, `date`, `time`, `datetime`, `uuid`, `enum:a,b` (a Rust
+enum stored as text with a `CHECK`), `references` (`author:references` adds
+`author_id` with a foreign key, `ON DELETE CASCADE`; `SET NULL` when
+optional; `author:references:writer_id` names the column), `attachment` (a
+file in R2, see [Files](#files)),
 `json` (any JSON value, `ocre::serde_json::Value`, stored as text in a `TEXT`
 column with `CHECK (json_valid(...))`; JSON APIs take and return the value
 itself, GraphQL uses the `JSON` scalar, scaffold forms a `<textarea>` checked
 with `Validator::json`). Suffixes: `?` optional (NULL allowed), `^` unique
-(not for `attachment` and `json`).
+(not for `attachment`, `json` and `enum`; `user:references^` is a has-one).
+Aliases: `int`, `small_int`, `big_int` (integer), `double` (float), `bool`,
+`date_time`, `jsonb`.
 Scaffold routes: `GET /posts`, `GET /posts/new`, `POST /posts`,
 `GET /posts/{id}`, `GET /posts/{id}/edit`, `POST /posts/{id}` (update),
 `POST /posts/{id}/delete`.
@@ -88,19 +110,40 @@ Scaffold routes: `GET /posts`, `GET /posts/new`, `POST /posts`,
 ## Models
 
 Models are plain generated Rust, not derive macros: `ocre g model Post
-title:string^ author:references` writes `src/models/post.rs` with the `Post`
-struct, `NewPost` and `PostChanges` (the create and update inputs), their
-`validate()`, and `all`, `count`, `find`, `find_many`, `create`, `update`,
-`delete`, plus `post.author(&ctx)` and, in `author.rs`, `author.posts(&ctx,
-page)`. Every query and rule is visible in one file, so people and agents can
-read, grep and change it.
+title:string^ status:enum:draft,published author:references` writes
+`src/models/post.rs` with the `Post` struct, a `Status` enum, `NewPost` and
+`PostChanges` (the create and update inputs), their `validate()`, `query()`,
+`all`, `count`, `find`, `find_many`, `create`, `update`, `delete`, empty
+`before_*`/`after_*` callbacks, `post.author(&ctx)`,
+`preload_authors(&ctx, &posts)` and, in `author.rs`, `author.posts(&ctx,
+page)`. `author:references?` is optional (`ON DELETE SET NULL`),
+`user:references^` is a has-one, and a model with only references
+(`Tagging post:references tag:references`) is a join model with
+`post.tags(&ctx, page)`. Every query and rule is visible in one file, so
+people and agents can read, grep and change it.
 
-Validation collects every error before answering, with Rails' messages:
-`create` and `update` add uniqueness ("has already been taken") and
-foreign-key ("must exist") checks. A failed validation is `Error::Invalid`,
-status 422: HTML forms re-render with the messages and the typed values, JSON
-answers `{"error": {"status": 422, "message": "Validation failed", "fields":
-{"title": ["can't be blank"]}}}`, GraphQL puts `fields` in `extensions`.
+`ocre::Query` builds single-table queries with bound values:
+`post::query().eq("published", true).contains("title", term).order_desc("id").paginate(&db, page)`,
+plus scopes as plain functions, `any`/`not`, `is_in`, `between`, joins,
+`group_by`/`having`, `count`, `exists`, `pluck`, `aggregate`, `update_all`
+and `delete_all`. `db.batch(..)` is the transaction (D1 has no `BEGIN`).
+Migrations are forward-only SQL: `ocre g migration` infers
+`add_x_to_t`, `remove_x_from_t`, `add_index_to_t`, `rename_a_to_b_in_t`,
+`drop_t` and `rebuild_t` (SQLite's table rebuild, from `ocre db schema`);
+undo with a new migration or D1 Time Travel. `ocre::encryption` has
+`Encrypted`/`Deterministic` column types, and `ctx.db_named("ANALYTICS")`
+reaches another D1 database.
+
+Validation collects every error before answering, with Rails' messages
+(`required`, lengths, comparisons, `inclusion`/`exclusion`, `format`,
+`confirmation`, `acceptance`, `.message(..)`...): `create` and `update` add
+uniqueness ("has already been taken") and foreign-key ("must exist") checks.
+A failed validation is `Error::Invalid`, status 422: HTML forms re-render
+with the messages and the typed values, JSON answers `{"error": {"status":
+422, "message": "Validation failed", "fields": {"title": ["can't be
+blank"]}}}`, GraphQL puts `fields` in `extensions`. See the
+[models](docs/src/guides/models.md) and
+[validations](docs/src/guides/validations.md) guides.
 
 ## JSON APIs
 
@@ -108,7 +151,7 @@ answers `{"error": {"status": 422, "message": "Validation failed", "fields":
 
 | Route | Effect |
 |---|---|
-| `GET /api/posts?limit=&offset=` | List, newest first; `limit` 1-100 (default 50) |
+| `GET /api/posts?limit=&offset=` | List, newest first; `limit` 1-100 (default 50); `Link` header to the next/previous pages |
 | `GET /api/posts/{id}` | One record |
 | `POST /api/posts` | Create; every field required; `201` |
 | `PATCH /api/posts/{id}` | Update only the fields sent |
@@ -143,10 +186,13 @@ failure. Generators never overwrite files.
 - **Sessions** in an encrypted cookie (AES-256-GCM, key derived from the
   `SECRET_KEY_BASE` secret), like Rails' cookie store: no database rows or KV
   operations. Handlers take `session: ocre::Session` (`get`, `insert`,
-  `remove`, `clear`). `ocre new` writes a local secret to `.dev.vars` (git
-  ignored); `ocre deploy` creates the production one.
+  `remove`, `clear`, `expire_in`, `remember_for`). `ocre new` writes a local
+  secret to `.dev.vars` (git ignored); `ocre deploy` creates the production
+  one; `SECRET_KEY_BASE_PREVIOUS` rotates it without signing anyone out.
 - **Flash**: `session.flash("notice", "...")` before a redirect; the next page
   takes `flash: ocre::Flash`. Scaffolds show "Post was successfully created."
+- **Host authorization** for the host names in the `ALLOWED_HOSTS` Worker
+  variable (Rails' `config.hosts`); other hosts get 403.
 - **CSRF protection** without tokens: unsafe requests (POST, PUT, PATCH,
   DELETE) and WebSocket handshakes that a browser sends from another site
   (`Sec-Fetch-Site`, or `Origin` against `Host` for older browsers) get 403,
@@ -157,11 +203,25 @@ failure. Generators never overwrite files.
   `X-Frame-Options: SAMEORIGIN`, `Referrer-Policy:
   strict-origin-when-cross-origin`, `X-XSS-Protection: 0`,
   `X-Permitted-Cross-Domain-Policies: none`, and HSTS on HTTPS. A handler's own
-  value wins.
+  value wins. Generated full-stack apps add a Content-Security-Policy and a
+  Permissions-Policy in `src/lib.rs`.
 
-Generated apps also have `GET /up` (health check) and `public/`, served by
+`ocre::security` adds what an app calls itself: `rate_limit` (Workers Rate
+Limiting binding), `url_from` (safe redirects), `sanitize`/`strip_tags`,
+`json_escape`, `filter_parameters`, `BasicAuth`. See the
+[security guide](docs/src/guides/security.md).
+
+Generated apps also have `GET /up` (health check), `public/`, served by
 Workers Static Assets before the Worker runs, so static files cost no Worker
-request or CPU.
+request or CPU, and `templates/error.html`, the page for every error (404,
+422, 500...) through `ocre::error_page`. Each HTML controller has a `paths`
+module (`paths::show(id)`) for redirects and links; the layout boosts links
+and forms with htmx (`hx-boost`), and the index pages paginate with
+`page.previous()` / `page.next(rows.len())`. Templates format values with
+`use ocre::filters;` (`{{ price|number_to_currency("$") }}`,
+`{{ post.created_at|time_ago_in_words }}`, `strftime`, `excerpt`...). See the
+[controllers](docs/src/guides/controllers.md), [views](docs/src/guides/views.md),
+[htmx](docs/src/guides/htmx.md) and [assets](docs/src/guides/assets.md) guides.
 
 ## Email
 
@@ -174,7 +234,7 @@ real API key still never sends by accident:
 
 | `MAIL_ADAPTER` | Delivery | Configuration | Free-plan limits (September 2026) |
 |---|---|---|---|
-| `log` | Prints the whole email (headers, text, HTML) to the Worker console between `[ocre mail]` lines, like Rails' letter_opener. `ocre new` writes `MAIL_ADAPTER=log` to `.dev.vars`, which overrides `[vars]` in `ocre dev` | none | none |
+| `log` | Prints the whole email (headers, text, HTML, one line per attachment) to the Worker console between `[ocre mail]` lines, like Rails' letter_opener; in `ocre dev` it keeps the last 20 for `/ocre/dev/mailers`. `ocre new` writes `MAIL_ADAPTER=log` to `.dev.vars`, which overrides `[vars]` in `ocre dev` | none | none |
 | `resend` | `POST https://api.resend.com/emails` | `RESEND_API_KEY` secret (`npx wrangler secret put RESEND_API_KEY`), `MAIL_FROM` on a domain verified in Resend | [Resend free plan](https://resend.com/docs/knowledge-base/account-quotas-and-limits): 100 emails a day, 3,000 a month, one domain; any recipient |
 | `cloudflare` | Cloudflare Email Service through the `EMAIL` [send_email binding](https://developers.cloudflare.com/email-service/api/send-emails/workers-api/) (uncomment `[[send_email]]` in `wrangler.toml`; `ocre dev` simulates it) | `MAIL_FROM` on a domain onboarded to Email Service | [Workers Free](https://developers.cloudflare.com/email-service/platform/pricing/): only verified destination addresses of the account (fine for mail to yourself); any recipient needs Workers Paid (3,000 a month included, then $0.35 per 1,000) |
 
@@ -184,10 +244,28 @@ password-reset mail on the free plan, use Resend. An invalid recipient
 (`Validator::email`'s rule) is a 400; a missing `MAIL_FROM`, key or binding is
 a 500 whose log says what to add.
 
+An `Email` takes more recipients (`.also_to(..)`, `.cc(..)`, `.bcc(..)`, 50 at
+most), `.reply_to(..)`, `.from(..)` (instead of `MAIL_FROM`), extra headers
+(`.header("In-Reply-To", ..)`), files (`.attach(filename, content_type,
+bytes)`) and inline images (`.inline(content_id, ..)`, shown by
+`<img src="cid:...">`). `ocre::mail::address_with_name(name, address)` quotes
+a user-typed display name.
+
 `ocre g mailer User welcome password_reset` writes `src/mailers/user.rs` with
 `welcome(to) -> Result<Email>` and `password_reset(to)`, rendering
 `templates/mailers/user/<action>.txt` (not HTML-escaped) and `.html` with
-askama; add fields to the template structs for the data an email needs.
+askama; both extend `templates/mailers/layout.{txt,html}`. Add fields to the
+template structs for the data an email needs. The first mailer also writes
+`src/mailers/mod.rs`: `defaults(email)`, applied to every mailer's email (a
+sender, a bcc, a header), and `PREVIEWS`, one per action.
+`.merge(ocre::mail::dev_routes(mailers::PREVIEWS))` in `routes()` serves, in
+debug builds only (`ocre dev`; 404 after `ocre deploy`), the previews at
+`/ocre/dev/mailers`, the emails the `log` adapter printed (and as JSON at
+`/ocre/dev/mailers/sent.json`, for end-to-end tests), and a form at
+`/ocre/dev/mailbox` that delivers a test email to the mailbox.
+
+`ocre::mail::deliver_later(&ctx, email)` and `deliver_in(&ctx, email, delay)`
+send from the jobs queue (see [Background jobs](#background-jobs-and-scheduled-tasks)).
 
 Receiving uses [Email Routing](https://developers.cloudflare.com/email-service/local-development/routing/)
 (free and unlimited on every plan): `ocre g mailbox` writes `src/mailbox.rs`
@@ -203,7 +281,7 @@ async fn email(message: worker::ForwardableEmailMessage, env: worker::Env, _ctx:
 `mailbox::receive(ctx, email)` gets an `InboundEmail`: envelope `from()` and
 `to()`, decoded `subject()`, `header(name)`, `headers()`, `text()` and
 `html()` (parsed from multipart, quoted-printable, base64 and RFC 2047
-headers; attachments are skipped), `raw()` bytes, plus `reject(reason)`
+headers), `attachments()` (the other parts, decoded), `raw()` bytes, plus `reject(reason)`
 (bounce) and `forward(address).await` (to a verified destination address).
 An `Err` from the handler is logged and bounces the email. In the dashboard,
 Email Routing > Routing rules sends an address to the Worker. Locally, while
@@ -278,8 +356,8 @@ resizing, and cleanup of files whose rows are removed by `ON DELETE CASCADE`.
 
 Jobs run on [Cloudflare Queues](https://developers.cloudflare.com/queues/),
 which the [Workers Free plan includes since February 2026](https://developers.cloudflare.com/changelog/post/2026-02-04-queues-free-plan/).
-The app's Worker is both the producer and the consumer of one queue,
-`<app>-jobs`, bound as `JOBS`.
+The app's Worker is both the producer and the consumer of its queues:
+`<app>-jobs`, bound as `JOBS`, plus one per named queue.
 
 `ocre g job SendWelcome user_id:integer` writes `src/jobs/send_welcome.rs`
 (a serde struct with the arguments and `async fn perform(self, ctx: &Ctx)`)
@@ -300,13 +378,24 @@ message:
 ```rust
 use crate::jobs::{Job, SendWelcome};
 
+SendWelcome { user_id: user.id }.perform_later(&ctx).await?; // generated in each job
 ocre::jobs::enqueue(&ctx, &Job::SendWelcome(SendWelcome { user_id: user.id })).await?;
 ocre::jobs::enqueue_in(&ctx, &job, Duration::from_secs(3600)).await?; // 24 hours at most
+ocre::jobs::enqueue_all(&ctx, &jobs).await?; // one sendBatch call per 100 jobs
 ```
+
+Queues have no priorities: `ocre g job SendCode user_id:integer --queue urgent`
+gives a job its own queue, `<app>-jobs-urgent` (binding `JOBS_URGENT`, its own
+consumer waiting at most 1 s), and its `perform_later` sends there; in code,
+`ocre::jobs::queue(&ctx, "urgent").enqueue(&job)` (also `enqueue_in`,
+`enqueue_all`). The same `queue` event and `perform` run every queue.
 
 A message is JSON text, `{"at": <due unix time>, "job": {"send_welcome": {"user_id": 1}}}`.
 `consume` runs the messages of a batch one after the other: `Ok` acknowledges
-the message (`[ocre jobs] send_welcome done` in the log); `Err` logs the error
+the message (`[ocre jobs] send_welcome done` in the log); an error another try
+cannot fix (`NotFound`, `BadRequest`, `Unauthorized`, `Forbidden`, `Invalid`,
+`PayloadTooLarge`: Rails' `discard_on`) is logged as `discarded, not retried`
+and acknowledged; any other `Err` logs the error
 and retries the message after twice the time since it was due, 30 s at least
 (30 s, 1 min, 3 min, 9 min, 27 min). Queues' own `retry()` counter stops
 after `max_retries = 5`, then moves the message to the dead-letter queue
@@ -319,19 +408,25 @@ write them to be safe to repeat.
 `ocre::mail::deliver_later(&ctx, email).await?` is Rails' `deliver_later`:
 it checks the email and the mail configuration like `send` (a bad address is
 still a 400), enqueues it, and the consumer sends it with `send`, retrying
-provider failures. It needs the queue that the first `ocre g job` wires.
+provider failures; `deliver_in(&ctx, email, delay)` delays it. It needs the
+queue that the first `ocre g job` wires.
 
-`ocre g schedule nightly_cleanup "0 3 * * *"` writes
+`ocre g schedule nightly_cleanup "every day at 3am"` writes
 `src/schedules/nightly_cleanup.rs` (`async fn run(ctx: &Ctx)`), adds the
-expression to `[triggers] crons` in `wrangler.toml` and a match arm to
+expression (`0 3 * * *`) to `[triggers] crons` in `wrangler.toml` and a match arm to
 `src/schedules/mod.rs`; the first schedule adds the `scheduled` entry point,
-which calls `ocre::jobs::cron(event, env, schedules::run)`. Cron times are UTC
+which calls `ocre::jobs::cron(event, env, schedules::run)`. The schedule is
+plain English (`"every 15 minutes"`, `"every weekday at 6pm"`, `"midnight on
+tuesdays"`, `"monthly"`) or a cron expression
 ([syntax](https://developers.cloudflare.com/workers/configuration/cron-triggers/#supported-cron-expressions));
-a failed run is logged (`[ocre cron] ... failed`) and not retried. Locally,
-`wrangler dev` runs the queue in-process, and a cron fires on request:
+times are UTC. A failed run is logged (`[ocre cron] ... failed`) and not
+retried. `ocre schedules` lists the crons and their tasks. Locally,
+`wrangler dev` runs the queue in-process, and a cron fires on request, from
+another terminal while `ocre dev` runs:
 
 ```sh
-curl 'http://localhost:8787/cdn-cgi/local/scheduled?cron=0+3+*+*+*'
+ocre schedules run nightly_cleanup
+curl 'http://localhost:8787/cdn-cgi/local/scheduled?cron=0+3+*+*+*'   # the same
 ```
 
 `ocre deploy` runs `wrangler queues info` for every queue named in
@@ -345,7 +440,7 @@ Free-plan budget (September 2026):
 |---|---|---|
 | [Queues operations](https://developers.cloudflare.com/queues/platform/pricing/) | 10,000 a day; a message costs 3 (write, read, delete), each retry 1 more read, a dead-lettered message 1 more write | One message per job; about 3,300 jobs a day |
 | [Retention](https://developers.cloudflare.com/queues/platform/limits/) | 24 hours on Free (not configurable) | Retries stop long before: the last one comes after about 40 minutes |
-| [Message size](https://developers.cloudflare.com/queues/platform/limits/) | 128 KB | `enqueue` refuses larger jobs with an error naming the fix (pass ids) |
+| [Message size](https://developers.cloudflare.com/queues/platform/limits/) | 128 KB; 100 messages and 256 KB per `sendBatch` | `enqueue` refuses larger jobs with an error naming the fix (pass ids); `enqueue_all` splits lists into batches |
 | [Delay](https://developers.cloudflare.com/queues/configuration/batching-retries/#delay-messages) | 24 hours, on send and on retry | `enqueue_in` refuses longer delays |
 | [Batches](https://developers.cloudflare.com/queues/configuration/batching-retries/) | up to 100 messages, 60 s wait | `max_batch_size = 10`, `max_batch_timeout = 5`: one consumer run (one Worker request) per 10 jobs |
 | [CPU](https://developers.cloudflare.com/workers/platform/limits/#cpu-time) | 10 ms per invocation on Free, for requests, cron runs and (like any Worker invocation) consumer batches | Jobs should be I/O (D1, mail, `fetch`); lower `max_batch_size` for CPU-heavy jobs |
@@ -359,18 +454,26 @@ and change, and the framework only provides small primitives.
 
 | File | Full-stack | API-only | Contents |
 |---|---|---|---|
-| `migrations/*_create_users.sql` | yes | yes | `users`: `email` (unique, `COLLATE NOCASE`), `password_digest` |
+| `migrations/*_create_users.sql` | yes | yes | `users`: `email` (unique, `COLLATE NOCASE`), `password_digest`, `confirmed_at` |
 | `migrations/*_create_auth_tokens.sql` | yes | | single-use emailed tokens (`purpose`, `digest`, `expires_at`) |
 | `migrations/*_create_api_keys.sql` | yes | yes | `api_keys`: `user_id`, `name`, `digest` (unique), `last_used_at` |
-| `src/models/user.rs` | yes | yes | `User`, `NewUser` (email format, password 8 to 128 characters), `create`, `authenticate`, `update_password`; emails trimmed and lowercased |
-| `src/models/auth_token.rs` | yes | | `issue`, `peek`, `consume` (15 minutes, single use) |
+| `src/models/user.rs` | yes | yes | `User`, `NewUser` (email format, password 8 to 128 characters), `create`, `authenticate`, `update_password`, `confirm`, `delete`; emails trimmed and lowercased |
+| `src/models/auth_token.rs` | yes | | `issue`, `peek`, `consume` (15 minutes, a day for email confirmation; single use) |
 | `src/models/api_key.rs` | yes | yes | `create` (returns the key once), `for_user`, `revoke`, `authenticate` |
-| `src/auth.rs` | yes | | `CurrentUser` (redirects to `/login`, then back), `OptionalUser`, `sign_in`, `sign_out` |
-| `src/registrations.rs` | yes | | `GET/POST /signup`, `GET /account` (an example protected page) |
+| `src/auth.rs` | yes | | `CurrentUser` (redirects to `/login`, then back), `ConfirmedUser`, `OptionalUser`, `sign_in` ("remember me", two-week expiry), `sign_out` |
+| `src/registrations.rs` | yes | | `GET/POST /signup`, `GET /account` (an example protected page), `POST /account/delete` |
 | `src/sessions.rs` | yes | | `GET/POST /login`, `POST /logout`, `GET/POST /magic_link`, `GET/POST /magic_link/{token}` |
 | `src/passwords.rs` | yes | | `GET /passwords/new`, `POST /passwords`, `GET/POST /passwords/{token}` |
+| `src/confirmations.rs` | yes | | email confirmation: `POST /confirmations`, `GET/POST /confirmations/{token}` |
 | `templates/auth/*.html` | yes | | the pages |
-| `src/auth_api.rs` | yes | yes | `BearerUser`; `POST /api/auth/signup`, `POST /api/auth/token` (JWT, 1 hour), `GET /api/auth/me`, `GET/POST /api/auth/keys`, `DELETE /api/auth/keys/{id}` |
+| `src/auth_api.rs` | yes | yes | `BearerUser`, `throttle`; `POST /api/auth/signup`, `POST /api/auth/token` (JWT, 1 hour), `GET/DELETE /api/auth/me`, `GET/POST /api/auth/keys`, `DELETE /api/auth/keys/{id}` |
+| `wrangler.toml` | yes | yes | the `AUTH_RATE_LIMITER` binding: 10 attempts a minute per IP address on every route that checks a password or sends an email |
+
+Options (full-stack apps): `--db-sessions` keeps each session in D1
+(`user_sessions`: IP, browser, last activity) with `/account/sessions` to see
+and sign out devices; `--oauth github,google` adds "Continue with GitHub /
+Google" (OAuth 2.0 with PKCE, `ocre::oauth`, an `identities` table, the
+`<PROVIDER>_CLIENT_ID` and `<PROVIDER>_CLIENT_SECRET` secrets).
 
 ```rust
 use crate::auth::CurrentUser;        // HTML: visitors are redirected to /login
@@ -403,9 +506,11 @@ Security choices:
   an Apple M5 Max). A login request takes 9.5 ms in `wrangler dev` against 3.5
   ms for `GET /up`. Sign-up, login and password changes therefore use about
   half of the free plan's 10 ms CPU budget, and only those requests hash.
-- **Sessions**: the encrypted cookie holds only `user_id`. Login empties the
-  session before storing the id (no state carries over; with a cookie store
-  there is no server-side session id to fixate), logout clears it.
+- **Sessions**: the encrypted cookie holds only `user_id` (or, with
+  `--db-sessions`, a random token whose digest finds the D1 row) and an
+  expiry checked on every request. Login empties the session before storing
+  the id (no state carries over; with a cookie store there is no server-side
+  session id to fixate), logout clears it.
   `CurrentUser` remembers the page (GET only, local paths only: no open
   redirect) and returns there after login.
 - **Emailed tokens** (password reset, magic link): 256 random bits,
@@ -421,19 +526,16 @@ Security choices:
 - **JWT**: HS256 only (a token naming `none` or any other `alg` is refused),
   `sub` = user id, `iat`, `exp`. The key is derived from `SECRET_KEY_BASE`
   (HMAC-SHA256 with a fixed label, so it differs from the cookie key) rather
-  than a separate `JWT_SECRET`: one secret to create, upload and rotate, and
-  rotating it signs everyone out of sessions and tokens at once. JWTs cannot
+  than a separate `JWT_SECRET`: one secret to create, upload and rotate.
+  Replacing it signs everyone out of sessions and tokens at once, unless the
+  old value is kept in `SECRET_KEY_BASE_PREVIOUS` for a while. JWTs cannot
   be revoked before they expire (1 hour); use API keys for long-lived access.
 - **API keys**: 256 random bits shown once; stored as SHA-256 digests (a fast
   hash is enough for random secrets and costs no CPU), revocable,
   `last_used_at` written at most once an hour to save D1 writes.
 
-Not included yet: **rate limiting** (login, sign-up, token and email routes
-accept unlimited attempts; put [Cloudflare rate limiting
-rules](https://developers.cloudflare.com/waf/rate-limiting-rules/) in front of
-them before going public), email confirmation, "sign out everywhere" (sessions
-last until logout or until `SECRET_KEY_BASE` changes) and roles
-(`Error::Forbidden` is there for app checks).
+Not included yet: roles (`Error::Forbidden` is there for app checks),
+two-factor authentication and account lockout.
 
 ## Realtime
 
@@ -681,6 +783,14 @@ can reach private items while living apart from the code. Both crates set
 | `render(&template)` | askama template to `Html<String>` (feature `html`) |
 | `Htmx(is_htmx)` | Extractor: true when `HX-Request: true` (feature `html`) |
 | `option.or_404()?` | Missing record to 404 |
+| `ocre::error_page(response, \|error\| render(..))` / `ErrorPage` | Error responses rendered with the app's template (`map_response` layer in `routes()`) |
+| `format: Format` | Extractor: `Html`, `Json`, `Xml`, `Text` or `Other` from `Accept` (Rails' `respond_to`) |
+| `RemoteIp(ip)` / `RequestId(id)` | Extractors: client IP from `CF-Connecting-IP`; `CF-Ray` or `X-Request-Id` |
+| `ocre::redirect_back(&headers, fallback)` | 303 to the same-site `Referer`, else `fallback` |
+| `HxRedirect(path)` | `HX-Redirect` response: full navigation from an htmx request (feature `html`) |
+| `ocre::storage::send_data(bytes, filename, type, disposition)` | Generated bytes as a file download |
+| `page.previous()` / `page.next(rows)` / `page.query()` / `page.links(path, rows)` | Pagination links; `links` is a `Link` header response part |
+| `ocre::helpers::*` / `use ocre::filters;` | Rails' number, time and text helpers; as askama filters (feature `html`) |
 | `Error::bad_request(msg)` / `Error::internal(msg)` | 400 / 500; HTML page, or JSON through `ApiError` |
 | `ApiResult<T>`, `ApiError` | JSON error responses; `?` converts from `Error` |
 | `Json(value)`, `Created(value)` | JSON body extractor (invalid JSON is a JSON 400) and responses |
@@ -699,9 +809,11 @@ can reach private items while living apart from the code. Both crates set
 | `Error::Unauthorized` / `Error::Forbidden` | 401 / 403 |
 | `ocre::mail::send(&ctx, email)` | Send an `Email` (`Email::new(to, subject, text).html(..).reply_to(..)`) with the `MAIL_ADAPTER` adapter |
 | `ocre::mail::receive(message, env, handler)` | Worker `email` entry point; `handler(ctx, InboundEmail)` |
-| `ocre::mail::deliver_later(&ctx, email)` | Check now, send from the jobs queue (retried on failure) |
-| `ocre::jobs::enqueue(&ctx, &job)` / `enqueue_in(&ctx, &job, delay)` | Send a serde job to the `JOBS` queue (delay up to 24 h) |
-| `ocre::jobs::consume(batch, env, perform)` | Worker `queue` entry point: `perform(ctx, job)`, ack on `Ok`, retry with backoff on `Err`, drop undecodable messages |
+| `ocre::mail::deliver_later(&ctx, email)` / `deliver_in(&ctx, email, delay)` | Check now, send from the jobs queue (retried on failure) |
+| `ocre::mail::dev_routes(mailers::PREVIEWS)` | `ocre dev` pages (debug builds only): mailer previews and sent emails at `/ocre/dev/mailers`, a test-email form at `/ocre/dev/mailbox` |
+| `ocre::jobs::enqueue(&ctx, &job)` / `enqueue_in(&ctx, &job, delay)` / `enqueue_all(&ctx, &jobs)` | Send serde jobs to the `JOBS` queue (delay up to 24 h; `enqueue_all` in batches of 100) |
+| `ocre::jobs::queue(&ctx, "urgent").enqueue(&job)` | The same on a named queue (binding `JOBS_URGENT`) |
+| `ocre::jobs::consume(batch, env, perform)` | Worker `queue` entry point: `perform(ctx, job)`, ack on `Ok`, discard 4xx errors, retry others with backoff, drop undecodable messages |
 | `ocre::jobs::cron(event, env, run)` | Worker `scheduled` entry point: `run(ctx, cron)` |
 | `ocre::realtime::broadcast(&ctx, channel, message)` | Send HTML (or JSON text) to every WebSocket on `channel` (feature `realtime`) |
 | `realtime::prepend(target, html)` / `append` / `update` / `remove(id)` | htmx out-of-band swaps for broadcasts |

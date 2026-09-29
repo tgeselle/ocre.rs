@@ -2,15 +2,16 @@
 //!
 //! Rails' Active Job, on [Cloudflare Queues](https://developers.cloudflare.com/queues/)
 //! (in the Workers Free plan since February 2026). The app's Worker is both
-//! the producer and the consumer of one queue, `<app>-jobs`, bound as
-//! [`QUEUE_BINDING`]. A job is a serde value, usually the app's `Job` enum
-//! (`src/jobs/mod.rs`, written by `ocre g job`), and dispatch is a plain
-//! `match` in the app's `perform` function, not a registry.
+//! the producer and the consumer of its queues: `<app>-jobs`, bound as
+//! [`QUEUE_BINDING`], plus one per named queue (`<app>-jobs-urgent`, bound
+//! as `JOBS_URGENT`, see [`queue`]). A job is a serde value, usually the
+//! app's `Job` enum (`src/jobs/mod.rs`, written by `ocre g job`), and
+//! dispatch is a plain `match` in the app's `perform` function, not a registry.
 //!
-//! A handler enqueues with [`enqueue`] or
-//! [`enqueue_in`] and returns as soon as Cloudflare
-//! stored the message; the Worker's `queue` event runs it moments later
-//! through [`consume`]. Scheduled tasks run from the
+//! A handler enqueues with [`enqueue`], [`enqueue_in`] or [`enqueue_all`]
+//! (generated jobs wrap it as `job.perform_later(&ctx)`) and returns as soon
+//! as Cloudflare stored the message; the Worker's `queue` event runs it
+//! moments later through [`consume`]. Scheduled tasks run from the
 //! `scheduled` event through [`cron`]:
 //!
 //! ```no_run
@@ -61,15 +62,16 @@
 //! ```
 //!
 //! A message is JSON text, `{"at": <due unix time>, "job": {"send_welcome": {"user_id": 1}}}`.
-//! [`consume`] acknowledges a job that returns `Ok`,
-//! retries one that returns `Err` with a growing delay (30 s, 1 min, 3 min,
-//! 9 min, 27 min: twice the time since it was due), and drops, with a log
-//! line, a message it cannot decode (an unknown or changed job), so it is
-//! never retried forever. After `max_retries = 5` (wrangler.toml) Cloudflare
-//! moves a failing message to the dead-letter queue `<app>-jobs-failed`,
-//! kept 24 hours. Delivery is at-least-once: write jobs to be safe to
-//! repeat. Every line Ocre logs starts with [`LOG_PREFIX`]
-//! or [`CRON_LOG_PREFIX`].
+//! [`consume`] acknowledges a job that returns `Ok`; drops, with a log line,
+//! one that returns an error another try cannot fix (a 4xx
+//! [`Error`] such as `NotFound`: Rails' `discard_on`); retries any other
+//! `Err` with a growing delay (30 s, 1 min, 3 min, 9 min, 27 min: twice the
+//! time since it was due); and drops a message it cannot decode (an unknown
+//! or changed job), so it is never retried forever. After `max_retries = 5`
+//! (wrangler.toml) Cloudflare moves a failing message to the dead-letter
+//! queue `<app>-jobs-failed`, kept 24 hours. Delivery is at-least-once: write
+//! jobs to be safe to repeat. Every line Ocre logs starts with
+//! [`LOG_PREFIX`] or [`CRON_LOG_PREFIX`].
 //!
 //! # Free-plan budget (September 2026)
 //!
@@ -78,6 +80,7 @@
 //!   Ocre sends one message per job: about 3,300 jobs a day.
 //! - **Retention**: 24 hours on Free; the last retry comes after about 40 minutes.
 //! - **Message size**: 128 KB; [`enqueue`] refuses larger jobs (pass ids).
+//!   [`enqueue_all`] sends 100 messages (256 KB) per call.
 //! - **Delay**: 24 hours at most, on send and on retry;
 //!   [`enqueue_in`] refuses longer delays
 //!   ([`MAX_DELAY`]).
@@ -93,7 +96,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
-pub use crate::runtime::jobs::{consume, cron, enqueue, enqueue_in};
+pub use crate::runtime::jobs::{Queue, consume, cron, enqueue, enqueue_all, enqueue_in, queue};
 
 use crate::{Error, Result, mail::Email};
 
@@ -110,10 +113,23 @@ use crate::{Error, Result, mail::Email};
 /// ```
 pub const QUEUE_BINDING: &str = "JOBS";
 
+/// Name of the queue [`enqueue`] and [`enqueue_in`] use: `default`, bound as [`QUEUE_BINDING`].
+///
+/// Other queues (`ocre g job <Name> --queue urgent`) are bound as
+/// `JOBS_<NAME>` and used through [`queue`].
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(ocre::jobs::DEFAULT_QUEUE, "default");
+/// ```
+pub const DEFAULT_QUEUE: &str = "default";
+
 /// Prefix of every line Ocre logs about jobs, e.g. `[ocre jobs] send_welcome done`.
 ///
 /// [`consume`] logs `<prefix> <job> done`,
-/// `<prefix> <job> failed, retrying in <n> s: <error>` and
+/// `<prefix> <job> failed, retrying in <n> s: <error>`,
+/// `<prefix> <job> discarded, not retried: <error>` and
 /// `<prefix> dropped message <id>: <reason>`.
 ///
 /// # Examples
@@ -169,7 +185,7 @@ pub(crate) enum Payload {
     /// An app job, as serialized by the app (`{"send_welcome": {"user_id": 1}}`).
     Job(Value),
     /// An email to send with [`mail::send`](crate::mail::send).
-    Mail(Email),
+    Mail(Box<Email>),
 }
 
 /// The job as JSON.
@@ -240,12 +256,75 @@ pub(crate) fn retry_delay(now: i64, at: i64) -> u32 {
     waited.saturating_mul(2).clamp(RETRY_BASE_SECONDS, max)
 }
 
-/// Error for a missing `JOBS` queue binding.
-pub(crate) fn missing_queue(detail: &str) -> Error {
-    Error::internal(format!(
-        "the queue binding `{QUEUE_BINDING}` is missing ({detail}). Fix: run `ocre g job <Name>` once; it adds \
-         [[queues.producers]] binding = \"{QUEUE_BINDING}\" and the consumer to wrangler.toml"
-    ))
+/// Error for a missing queue producer binding.
+pub(crate) fn missing_queue(binding: &str, detail: &str) -> Error {
+    let fix = if binding == QUEUE_BINDING {
+        "run `ocre g job <Name>` once; it adds [[queues.producers]] binding = \"JOBS\" and the consumer".to_owned()
+    } else {
+        let name = binding.trim_start_matches("JOBS_").to_ascii_lowercase().replace('_', "-");
+        format!(
+            "run `ocre g job <Name> --queue {name}`; it adds [[queues.producers]] binding = \"{binding}\" and the consumer"
+        )
+    };
+    Error::internal(format!("the queue binding `{binding}` is missing ({detail}). Fix: {fix} to wrangler.toml"))
+}
+
+/// The producer binding of a named queue: `default` is `JOBS`, `urgent` is
+/// `JOBS_URGENT`, `low-priority` is `JOBS_LOW_PRIORITY`. A name that is not
+/// lowercase letters, digits and `-` is an error.
+pub(crate) fn binding(queue: &str) -> Result<String> {
+    let valid = !queue.is_empty()
+        && queue.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && !queue.starts_with('-')
+        && !queue.ends_with('-');
+    if !valid {
+        return Err(Error::internal(format!(
+            "invalid queue name {queue:?}. Fix: use lowercase letters, digits and `-`, e.g. \"urgent\", as in \
+             `ocre g job <Name> --queue urgent`"
+        )));
+    }
+    Ok(match queue {
+        DEFAULT_QUEUE => QUEUE_BINDING.to_owned(),
+        name => format!("{QUEUE_BINDING}_{}", name.to_ascii_uppercase().replace('-', "_")),
+    })
+}
+
+/// Most messages in one `sendBatch` call.
+pub(crate) const MAX_BATCH_MESSAGES: usize = 100;
+/// Most bytes in one `sendBatch` call: Queues' 256 KB, minus room for metadata.
+pub(crate) const MAX_BATCH_BYTES: usize = 250_000;
+
+/// Splits message bodies into `sendBatch` calls: 100 messages and 256 KB at most each, in order.
+pub(crate) fn batches(bodies: Vec<String>) -> Vec<Vec<String>> {
+    let mut out: Vec<Vec<String>> = Vec::new();
+    let mut size = 0;
+    for body in bodies {
+        let full = out
+            .last()
+            .is_none_or(|batch| batch.len() == MAX_BATCH_MESSAGES || size + body.len() + 100 > MAX_BATCH_BYTES);
+        if full {
+            out.push(Vec::new());
+            size = 0;
+        }
+        size += body.len() + 100;
+        out.last_mut().expect("pushed above").push(body);
+    }
+    out
+}
+
+/// Whether a failed job is dropped instead of retried: errors that another
+/// try cannot fix (a missing record, bad input, a refused permission), like
+/// Rails' `discard_on`. `Internal` and `TooManyRequests` are retried.
+pub(crate) fn discards(err: &Error) -> bool {
+    matches!(
+        err,
+        Error::NotFound
+            | Error::BadRequest(_)
+            | Error::Unauthorized
+            | Error::Forbidden
+            | Error::Invalid(_)
+            | Error::PayloadTooLarge(_)
+    )
 }
 
 /// The first 200 characters, for log lines.

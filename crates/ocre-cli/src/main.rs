@@ -5,15 +5,25 @@
 //! (`{"ok": true, ...}` or `{"ok": false, "error", "hint"}`) and all tool
 //! output (wrangler, cargo) goes to stderr.
 
+mod about;
 mod db;
+mod db_admin;
+mod destroy;
+mod doctor;
 mod generate;
 mod i18n;
 mod names;
 mod new;
+mod notes;
 mod output;
 mod project;
 mod routes;
+mod schedules;
 mod secret;
+mod secrets;
+mod stats;
+mod template;
+mod testing;
 mod wizard;
 mod wrangler;
 
@@ -21,6 +31,7 @@ use std::{path::PathBuf, process::ExitCode};
 
 use clap::{Parser, Subcommand};
 
+use generate::{Existing, GenerateOptions};
 use new::{NewArgs, Starter};
 use output::{CliError, Report};
 use project::Project;
@@ -80,12 +91,34 @@ enum Command {
         /// Use a local checkout of the `ocre` crate instead of the git dependency.
         #[arg(long)]
         ocre_path: Option<PathBuf>,
+        /// Application template to apply after creating the app: a file (or
+        /// https:// URL) of ocre commands, one per line (see `ocre template --help`).
+        #[arg(long, short = 'm')]
+        template: Option<String>,
     },
     /// Log in to Cloudflare (opens a browser) unless already logged in.
     Login,
-    /// Generate code (alias: `g`).
-    #[command(alias = "g", subcommand)]
-    Generate(GenerateCommand),
+    /// Generate code (alias: `g`). Every run is recorded in .ocre/generated/ for `ocre destroy`.
+    #[command(alias = "g")]
+    Generate(GenerateArgs),
+    /// Undo a generator run (alias: `d`): delete the files it created, take
+    /// out the lines it added (Cargo.toml and wrangler.toml changes stay).
+    ///
+    /// Example: `ocre destroy scaffold Post`. Refuses when generated files
+    /// changed since, unless --force.
+    #[command(alias = "d")]
+    Destroy {
+        /// Generator, as typed after `ocre g` (e.g. `scaffold`).
+        generator: String,
+        /// Name given to the generator (e.g. `Post`); default: its latest run.
+        name: Option<String>,
+        /// Delete generated files even if they changed; leave changed lines in place.
+        #[arg(long)]
+        force: bool,
+        /// Show what would be removed; change nothing.
+        #[arg(long)]
+        pretend: bool,
+    },
     /// Apply D1 migrations (local database unless --remote).
     Migrate {
         /// Apply to the production database on Cloudflare.
@@ -95,7 +128,7 @@ enum Command {
         #[arg(long)]
         status: bool,
     },
-    /// Database tasks: seed, reset.
+    /// Database tasks: create, drop, prepare, seed, reset, truncate, version, schema.
     #[command(subcommand)]
     Db(DbCommand),
     /// Run SQL on the D1 database (local unless --remote) and print the rows.
@@ -119,6 +152,13 @@ enum Command {
     ///
     /// Example: `ocre secret | npx wrangler secret put SECRET_KEY_BASE`.
     Secret,
+    /// Worker secrets (Ocre's credentials): list them, or upload values from a
+    /// git-ignored env file. Values are encrypted by Cloudflare and never
+    /// read back.
+    ///
+    /// Example: `ocre secrets push GITHUB_CLIENT_SECRET --file .prod.vars`.
+    #[command(subcommand)]
+    Secrets(SecretsCommand),
     /// List the app's HTTP routes, read from its source (no build).
     ///
     /// Example: `ocre routes posts` keeps routes whose method, path or handler contains "posts".
@@ -126,9 +166,103 @@ enum Command {
         /// Only routes whose method, path or handler contains this text (case-insensitive).
         filter: Option<String>,
     },
+    /// List the Cron Triggers of wrangler.toml and the task each runs; `run <task>`
+    /// fires one on the running `ocre dev`.
+    ///
+    /// Example: `ocre schedules`, `ocre schedules run nightly_cleanup`.
+    Schedules {
+        #[command(subcommand)]
+        action: Option<SchedulesCommand>,
+    },
     /// Translations: checks of the locale files (see `ocre g locale`).
     #[command(subcommand)]
     I18n(I18nCommand),
+    /// Apply an application template to this app: a text file (or https://
+    /// URL) with one ocre command per line, `#` for comments, e.g.
+    /// `g scaffold Post title:string`, `migrate`, `cargo add slug`. Only local
+    /// commands are allowed (generators, destroy, migrate, db, sql, i18n,
+    /// routes, cargo add/remove; no --remote).
+    ///
+    /// Example: `ocre template https://example.com/blog.ocre`.
+    Template {
+        /// Path or URL of the template.
+        source: String,
+    },
+    /// Print the versions of this CLI and of the app.
+    Version,
+    /// Versions and the app's configuration: Ocre crate and features, Rust
+    /// toolchain, compatibility date, bindings and triggers, variable names.
+    About,
+    /// Check the tools (Rust wasm target, Node.js, Cloudflare login) and the
+    /// app (bindings for what the code uses, pending migrations, secrets).
+    /// Exits with an error when a check fails.
+    Doctor,
+    /// Lines of code per part of the app (models, controllers, templates, tests...).
+    ///
+    /// Example: `ocre stats lib` also counts lib/.
+    Stats {
+        /// More directories to count, relative to the app root.
+        dirs: Vec<String>,
+    },
+    /// List TODO, FIXME and OPTIMIZE comments in src/, templates/, migrations/, tests/, db/ and locales/.
+    ///
+    /// Example: `ocre notes --annotations TODO,HACK`.
+    Notes {
+        /// Tags to look for instead of TODO, FIXME and OPTIMIZE.
+        #[arg(long, value_delimiter = ',')]
+        annotations: Vec<String>,
+    },
+    /// Run the app's checks: `cargo test`, then `cargo check --target
+    /// wasm32-unknown-unknown`; with --e2e, then tests/e2e.sh against one
+    /// `wrangler dev` started for the run. Stops at the first failure.
+    ///
+    /// Example: `ocre test --e2e`, or `ocre test -- models` to filter unit tests.
+    Test {
+        /// Also run tests/e2e.sh with BASE_URL set to a local server.
+        #[arg(long)]
+        e2e: bool,
+        /// Port of the server started for --e2e.
+        #[arg(long, default_value_t = 8788)]
+        port: u16,
+        /// Arguments passed to `cargo test` (after `--`).
+        #[arg(last = true)]
+        cargo_args: Vec<String>,
+    },
+}
+
+#[derive(clap::Args)]
+struct GenerateArgs {
+    /// Show the files that would be created or updated; write nothing.
+    #[arg(long, global = true)]
+    pretend: bool,
+    /// Overwrite files that already exist.
+    #[arg(long, global = true, conflicts_with = "skip")]
+    force: bool,
+    /// Keep files that already exist and generate the rest.
+    #[arg(long, global = true)]
+    skip: bool,
+    #[command(subcommand)]
+    command: GenerateCommand,
+}
+
+impl GenerateArgs {
+    /// clap leaves an app generator's arguments unparsed, global flags
+    /// included: takes them out.
+    fn take_custom_flags(&mut self, json: &mut bool) {
+        if let GenerateCommand::Custom(extra) = &mut self.command {
+            extra.retain(|arg| {
+                let flag = match arg.as_str() {
+                    "--pretend" => &mut self.pretend,
+                    "--force" => &mut self.force,
+                    "--skip" => &mut self.skip,
+                    "--json" => &mut *json,
+                    _ => return true,
+                };
+                *flag = true;
+                false
+            });
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -136,9 +270,11 @@ enum GenerateCommand {
     /// Table, migration and `src/models/<model>.rs` (queries, validations,
     /// associations). Scaffold and api create the model when it is missing.
     ///
-    /// Example: `ocre g model Post title:string^ body:text author:references`.
-    /// Types: string, text, integer, float, boolean, date, datetime, references, attachment, json;
-    /// suffix `?` for optional, `^` for unique.
+    /// Example: `ocre g model Post title:string^ body:text author:references status:enum:draft,published`.
+    ///
+    /// Types: string, text, integer (int, small_int, big_int), float (double), decimal, boolean (bool),
+    /// date, time, datetime (date_time), uuid, references, attachment, json (jsonb), enum:<value>,<value>...;
+    /// suffix `?` for optional, `^` for unique; `author:references:writer_id` names the foreign key.
     Model {
         /// Singular model name, PascalCase or snake_case (e.g. `BlogPost`).
         name: String,
@@ -176,13 +312,25 @@ enum GenerateCommand {
         graphql: bool,
     },
     /// Authentication, generated into the app: users (email + password), and in
-    /// full-stack apps sign-up/login/logout pages, password reset and magic-link
-    /// login by email, `CurrentUser`/`OptionalUser` extractors (src/auth.rs);
-    /// in every app a JSON API with JWTs and API keys and the `BearerUser`
-    /// extractor (src/auth_api.rs). Runs once per app.
+    /// full-stack apps sign-up/login/logout pages with "remember me", password
+    /// reset, magic-link login and email confirmation by email, account
+    /// deletion, `CurrentUser`/`ConfirmedUser`/`OptionalUser` extractors
+    /// (src/auth.rs); in every app a JSON API with JWTs and API keys and the
+    /// `BearerUser` extractor (src/auth_api.rs), and a rate limit on every route
+    /// that checks a password or sends an email (`AUTH_RATE_LIMITER` in
+    /// wrangler.toml). Runs once per app.
     ///
-    /// Example: `ocre g auth`, then `ocre migrate`.
-    Auth,
+    /// Example: `ocre g auth --db-sessions --oauth github`, then `ocre migrate`.
+    Auth {
+        /// Track sessions in D1 (`user_sessions`): /account/sessions lists the
+        /// signed-in devices and signs them out. Costs one D1 read per request.
+        #[arg(long)]
+        db_sessions: bool,
+        /// "Continue with ..." sign-in through OAuth providers (github, google),
+        /// comma-separated.
+        #[arg(long, value_delimiter = ',')]
+        oauth: Vec<String>,
+    },
     /// Numbered SQL migration. `create_<table>`, `add_<columns>_to_<table>` and
     /// `remove_<columns>_from_<table>` names get their SQL from the fields.
     ///
@@ -210,27 +358,33 @@ enum GenerateCommand {
     ///
     /// Example: `ocre g mailbox`.
     Mailbox,
-    /// Background job: `src/jobs/<name>.rs` (arguments + `perform`), added to
-    /// the `Job` enum and `perform` match in `src/jobs/mod.rs`. The first job
-    /// wires the `JOBS` queue (wrangler.toml) and the `queue` event (src/lib.rs).
+    /// Background job: `src/jobs/<name>.rs` (arguments, `perform_later` and
+    /// `perform`), added to the `Job` enum and `perform` match in
+    /// `src/jobs/mod.rs`. The first job wires the `JOBS` queue (wrangler.toml)
+    /// and the `queue` event (src/lib.rs); `--queue` adds a named queue.
     ///
     /// Example: `ocre g job SendWelcome user_id:integer`, then
-    /// `ocre::jobs::enqueue(&ctx, &Job::SendWelcome(SendWelcome { user_id })).await?`.
+    /// `SendWelcome { user_id }.perform_later(&ctx).await?`.
     Job {
         /// Job name, PascalCase or snake_case (e.g. `SendWelcome`; a `Job` suffix is dropped).
         name: String,
         /// Arguments as `name:type` (see `ocre g model --help`; no `^`).
         fields: Vec<String>,
+        /// Queue the job is sent to (lowercase, e.g. `urgent`): its own Cloudflare
+        /// queue and consumer, so it never waits behind the `default` queue.
+        #[arg(long)]
+        queue: Option<String>,
     },
     /// Scheduled task: `src/schedules/<name>.rs`, run by a Cron Trigger (UTC)
     /// added to `[triggers] crons` in wrangler.toml, dispatched by cron in
     /// `src/schedules/mod.rs`. The first one wires the `scheduled` event.
     ///
-    /// Example: `ocre g schedule nightly_cleanup "0 3 * * *"`.
+    /// Example: `ocre g schedule nightly_cleanup "every day at 3am"` or `ocre g schedule nightly_cleanup "0 3 * * *"`.
     Schedule {
         /// Task name in snake_case (e.g. `nightly_cleanup`).
         name: String,
-        /// Cron expression, five fields in UTC, quoted (e.g. "*/15 * * * *").
+        /// When, in UTC, quoted: plain English ("every 15 minutes", "every monday at 9am",
+        /// "midnight on tuesdays") or five cron fields ("*/15 * * * *").
         cron: String,
     },
     /// `CACHE` Workers KV binding in wrangler.toml for `ocre::cache::fetch`
@@ -248,6 +402,72 @@ enum GenerateCommand {
         #[arg(required = true)]
         codes: Vec<String>,
     },
+    /// Controller with GET actions: `src/<name>.rs` and a page per action in
+    /// `templates/<name>/` (HTML), or JSON under /api/<name> in an API-only
+    /// app or with --api. Without actions: `index`.
+    ///
+    /// Example: `ocre g controller Pages about contact` (GET /pages/about, /pages/contact).
+    Controller {
+        /// Controller name, PascalCase or snake_case (e.g. `Pages`; a `Controller` suffix is dropped).
+        name: String,
+        /// Action names in snake_case; `index` answers at the controller's root path.
+        actions: Vec<String>,
+        /// JSON actions under /api/<name> in a full-stack app.
+        #[arg(long)]
+        api: bool,
+        /// Signed-in users only (`CurrentUser`, or `BearerUser` for JSON); needs `ocre g auth`.
+        #[arg(long)]
+        auth: bool,
+    },
+    /// Model plus a controller with `index` and `show` over it (HTML pages, or
+    /// JSON in an API-only app or with --api): lighter than scaffold, to fill in.
+    ///
+    /// Example: `ocre g resource Post title:string body:text`.
+    Resource {
+        /// Singular model name, PascalCase or snake_case (e.g. `BlogPost`).
+        name: String,
+        /// Fields as `name:type` (see `ocre g model --help`).
+        #[arg(required = true)]
+        fields: Vec<String>,
+        /// JSON actions under /api/<plural> in a full-stack app.
+        #[arg(long)]
+        api: bool,
+    },
+    /// Copy generator templates into .ocre/templates/, where they replace the
+    /// built-in ones until deleted; without paths, list them.
+    ///
+    /// Example: `ocre g override controller/view.html`, or `ocre g override controller`.
+    Override {
+        /// Template paths, or generator names for all their templates.
+        paths: Vec<String>,
+    },
+    /// An app generator in .ocre/generators/<name>/, run as `ocre g <name> <Name> [args]`:
+    /// templated files (paths too) and lines to insert after markers.
+    ///
+    /// Example: `ocre g generator service`, then `ocre g service Billing`.
+    Generator {
+        /// Generator name in snake_case (e.g. `service`).
+        name: String,
+    },
+    /// Any other name runs the app generator in .ocre/generators/<name>/.
+    #[command(external_subcommand)]
+    Custom(Vec<String>),
+}
+
+#[derive(Subcommand)]
+enum SchedulesCommand {
+    /// Fire a scheduled task now on the running `ocre dev`, through wrangler's
+    /// local `/cdn-cgi/local/scheduled` endpoint (Cron Triggers only fire on
+    /// the deployed Worker).
+    ///
+    /// Example: `ocre schedules run nightly_cleanup`.
+    Run {
+        /// Task name, as in src/schedules/<task>.rs.
+        task: String,
+        /// Port `ocre dev` listens on.
+        #[arg(long, default_value_t = 8787)]
+        port: u16,
+    },
 }
 
 #[derive(Subcommand)]
@@ -259,15 +479,65 @@ enum I18nCommand {
 }
 
 #[derive(Subcommand)]
+enum SecretsCommand {
+    /// Secret names in .dev.vars and on the deployed Worker, side by side.
+    List,
+    /// Upload secrets to the deployed Worker, values read from --file (one
+    /// `wrangler secret bulk` call, then the temporary file is deleted).
+    Push {
+        /// Names of the secrets to upload.
+        names: Vec<String>,
+        /// `NAME=value` file to read the values from (git-ignored).
+        #[arg(long, default_value = ".dev.vars")]
+        file: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum DbCommand {
     /// Run db/seeds.sql (local database unless --remote).
     Seed {
         /// Seed the production database on Cloudflare.
         #[arg(long)]
         remote: bool,
+        /// Local only: empty every table first (keeps the tables and migrations).
+        #[arg(long)]
+        replant: bool,
     },
+    /// Create the local database, or with --remote the D1 database on Cloudflare when missing.
+    Create {
+        #[arg(long)]
+        remote: bool,
+    },
+    /// Local only: delete the local database (`ocre db prepare` recreates it).
+    Drop {
+        /// Refused: Ocre never deletes production data.
+        #[arg(long, hide = true)]
+        remote: bool,
+    },
+    /// Print the last applied migration (local unless --remote).
+    Version {
+        #[arg(long)]
+        remote: bool,
+    },
+    /// Local only: delete every row of every table, keeping tables and applied migrations.
+    Truncate {
+        /// Refused: Ocre never deletes production data.
+        #[arg(long, hide = true)]
+        remote: bool,
+    },
+    /// Local, safe to repeat: apply pending migrations; seed when the database was just created.
+    Prepare,
     /// Local only: delete the local database, apply every migration, then run db/seeds.sql if present.
     Reset,
+    /// Write the database's CREATE statements to db/schema.sql (local unless --remote).
+    ///
+    /// A snapshot to read, and the input of `ocre g migration rebuild_<table>`.
+    Schema {
+        /// Dump the production database on Cloudflare.
+        #[arg(long)]
+        remote: bool,
+    },
 }
 
 /// `--flag` / `--no-flag` pair: `None` when neither was given.
@@ -282,7 +552,10 @@ fn toggle(on: bool, off: bool) -> Option<bool> {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    if let Command::Generate(args) = &mut cli.command {
+        args.take_custom_flags(&mut cli.json);
+    }
     let json = cli.json;
     let result = match cli.command {
         Command::New {
@@ -299,6 +572,7 @@ fn main() -> ExitCode {
             no_deploy,
             yes,
             ocre_path,
+            template,
         } => {
             let args = NewArgs {
                 name,
@@ -310,57 +584,100 @@ fn main() -> ExitCode {
                 login: toggle(login, no_login),
                 deploy: toggle(deploy, no_deploy),
                 yes,
+                template,
             };
             new::run(args, json)
         }
         Command::Login => wrangler::login(json),
-        Command::Generate(GenerateCommand::Scaffold { name, fields, realtime }) => Project::find().and_then(|project| {
+        Command::Generate(args) => generate_command(args),
+        Command::Destroy { generator, name, force, pretend } => {
+            Project::find().and_then(|project| destroy::destroy(&project, &generator, name.as_deref(), force, pretend))
+        }
+        Command::I18n(I18nCommand::Missing) => Project::find().and_then(|project| i18n::missing(&project)),
+        Command::Migrate { remote, status: true } => db::status(remote, json),
+        Command::Migrate { remote, status: false } => wrangler::migrate(remote, json),
+        Command::Db(DbCommand::Seed { remote, replant: false }) => db::seed(remote, json),
+        Command::Db(DbCommand::Seed { remote, replant: true }) => db_admin::replant(remote, json),
+        Command::Db(DbCommand::Create { remote }) => db_admin::create(remote, json),
+        Command::Db(DbCommand::Drop { remote }) => db_admin::drop(remote),
+        Command::Db(DbCommand::Version { remote }) => db_admin::version(remote),
+        Command::Db(DbCommand::Truncate { remote }) => db_admin::truncate(remote, json),
+        Command::Db(DbCommand::Prepare) => db_admin::prepare(json),
+        Command::Template { source } => template::run(&source),
+        Command::Version => about::version(),
+        Command::About => about::about(),
+        Command::Doctor => doctor::doctor(),
+        Command::Stats { dirs } => Project::find().and_then(|project| stats::run(&project, &dirs)),
+        Command::Notes { annotations } => Project::find().and_then(|project| notes::run(&project, &annotations)),
+        Command::Test { e2e, port, cargo_args } => {
+            Project::find().and_then(|project| testing::run(&project, e2e, port, &cargo_args, json))
+        }
+        Command::Db(DbCommand::Reset) => db::reset(json),
+        Command::Db(DbCommand::Schema { remote }) => db::schema(remote, json),
+        Command::Sql { query, remote } => db::sql(&query, remote, json),
+        Command::Dev { port } => wrangler::dev(port, json),
+        Command::Deploy => wrangler::deploy(json),
+        Command::Secret => secret::run(),
+        Command::Secrets(SecretsCommand::List) => Project::find().and_then(|project| secrets::list(&project, json)),
+        Command::Secrets(SecretsCommand::Push { names, file }) => {
+            Project::find().and_then(|project| secrets::push(&project, &names, &file, json))
+        }
+        Command::Routes { filter } => Project::find().and_then(|project| routes::run(&project, filter.as_deref())),
+        Command::Schedules { action: None } => Project::find().and_then(|project| schedules::list(&project)),
+        Command::Schedules { action: Some(SchedulesCommand::Run { task, port }) } => {
+            Project::find().and_then(|project| schedules::run(&project, &task, port))
+        }
+    };
+    output::finish(result, json)
+}
+
+/// Runs a generator with the `--pretend`/`--force`/`--skip` flags.
+fn generate_command(args: GenerateArgs) -> CliResult {
+    let mut project = Project::find()?;
+    project.generate = GenerateOptions {
+        pretend: args.pretend,
+        existing: if args.force {
+            Existing::Force
+        } else if args.skip {
+            Existing::Skip
+        } else {
+            Existing::Fail
+        },
+        invocation: std::env::args().skip(1).collect(),
+    };
+    let project = &project;
+    match args.command {
+        GenerateCommand::Scaffold { name, fields, realtime } => {
             if project.api_only && realtime {
                 Err(CliError::new("--realtime updates HTML pages; this app is API-only").hint(
                     "run `ocre g scaffold` without --realtime; to push JSON to clients, see Realtime in the Ocre README",
                 ))
             } else if project.api_only {
-                generate::api(&project, &name, &fields, false)
+                generate::api(project, &name, &fields, false)
             } else {
-                generate::scaffold(&project, &name, &fields, realtime)
+                generate::scaffold(project, &name, &fields, realtime)
             }
-        }),
-        Command::Generate(GenerateCommand::Api { name, fields, graphql }) => {
-            Project::find().and_then(|project| generate::api(&project, &name, &fields, graphql))
         }
-        Command::Generate(GenerateCommand::Auth) => Project::find().and_then(|project| generate::auth(&project)),
-        Command::Generate(GenerateCommand::Migration { name, fields }) => {
-            Project::find().and_then(|project| generate::migration(&project, &name, &fields))
+        GenerateCommand::Api { name, fields, graphql } => generate::api(project, &name, &fields, graphql),
+        GenerateCommand::Auth { db_sessions, oauth } => {
+            generate::auth(project, &generate::AuthOptions { db_sessions, oauth })
         }
-        Command::Generate(GenerateCommand::Model { name, fields }) => {
-            Project::find().and_then(|project| generate::model(&project, &name, &fields))
+        GenerateCommand::Migration { name, fields } => generate::migration(project, &name, &fields),
+        GenerateCommand::Model { name, fields } => generate::model(project, &name, &fields),
+        GenerateCommand::Mailer { name, actions } => generate::mailer(project, &name, &actions),
+        GenerateCommand::Mailbox => generate::mailbox(project),
+        GenerateCommand::Job { name, fields, queue } => generate::job(project, &name, &fields, queue.as_deref()),
+        GenerateCommand::Schedule { name, cron } => generate::schedule(project, &name, &cron),
+        GenerateCommand::Cache => generate::cache(project),
+        GenerateCommand::Locale { codes } => generate::locale(project, &codes),
+        GenerateCommand::Controller { name, actions, api, auth } => {
+            generate::controller(project, &name, &actions, api, auth)
         }
-        Command::Generate(GenerateCommand::Mailer { name, actions }) => {
-            Project::find().and_then(|project| generate::mailer(&project, &name, &actions))
-        }
-        Command::Generate(GenerateCommand::Mailbox) => Project::find().and_then(|project| generate::mailbox(&project)),
-        Command::Generate(GenerateCommand::Job { name, fields }) => {
-            Project::find().and_then(|project| generate::job(&project, &name, &fields))
-        }
-        Command::Generate(GenerateCommand::Schedule { name, cron }) => {
-            Project::find().and_then(|project| generate::schedule(&project, &name, &cron))
-        }
-        Command::Generate(GenerateCommand::Cache) => Project::find().and_then(|project| generate::cache(&project)),
-        Command::Generate(GenerateCommand::Locale { codes }) => {
-            Project::find().and_then(|project| generate::locale(&project, &codes))
-        }
-        Command::I18n(I18nCommand::Missing) => Project::find().and_then(|project| i18n::missing(&project)),
-        Command::Migrate { remote, status: true } => db::status(remote, json),
-        Command::Migrate { remote, status: false } => wrangler::migrate(remote, json),
-        Command::Db(DbCommand::Seed { remote }) => db::seed(remote, json),
-        Command::Db(DbCommand::Reset) => db::reset(json),
-        Command::Sql { query, remote } => db::sql(&query, remote, json),
-        Command::Dev { port } => wrangler::dev(port, json),
-        Command::Deploy => wrangler::deploy(json),
-        Command::Secret => secret::run(),
-        Command::Routes { filter } => Project::find().and_then(|project| routes::run(&project, filter.as_deref())),
-    };
-    output::finish(result, json)
+        GenerateCommand::Resource { name, fields, api } => generate::resource(project, &name, &fields, api),
+        GenerateCommand::Override { paths } => generate::override_templates(project, &paths),
+        GenerateCommand::Generator { name } => generate::generator(project, &name),
+        GenerateCommand::Custom(args) => generate::custom(project, &args[0], &args[1..]),
+    }
 }
 
 /// Shorthand used by every command.

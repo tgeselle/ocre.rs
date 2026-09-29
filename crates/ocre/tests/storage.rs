@@ -250,3 +250,16 @@ fn a_missing_binding_names_the_wrangler_entry() {
     assert!(message.contains("[[r2_buckets]]\nbinding = \"STORAGE\""), "{message}");
     assert!(message.contains("no such binding"));
 }
+
+#[test]
+fn send_data_sends_generated_bytes_as_a_file() {
+    let response = send_data("a,b\n", "../export.csv", "text/csv; charset=utf-8", Disposition::Inline);
+    assert_eq!(header_of(&response, header::CONTENT_TYPE), "text/csv");
+    assert_eq!(header_of(&response, header::CONTENT_DISPOSITION), "attachment; filename=\"export.csv\"");
+    assert_eq!(header_of(&response, header::CONTENT_LENGTH), "4");
+    assert_eq!(body_text(response), "a,b\n");
+    let response = send_data(vec![1u8, 2], "chart.png", "image/png", Disposition::Inline);
+    assert_eq!(header_of(&response, header::CONTENT_DISPOSITION), "inline; filename=\"chart.png\"");
+    let response = send_data("<script>", "page.html", "text/html", Disposition::Inline);
+    assert_eq!(header_of(&response, header::CONTENT_TYPE), "application/octet-stream");
+}

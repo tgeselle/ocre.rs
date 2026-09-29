@@ -4,7 +4,7 @@ use askama::Template;
 use axum::{
     Form, Router,
     extract::{Path, State},
-    http::{StatusCode, Uri},
+    http::{HeaderMap, StatusCode, Uri},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
@@ -17,8 +17,9 @@ use serde::Deserialize;
 
 use crate::{
     auth::{origin, sign_out},
+    auth_api::throttle,
     models::{
-        auth_token::{self, PASSWORD_RESET, VALID_MINUTES},
+        auth_token::{self, PASSWORD_RESET, valid_minutes},
         user,
     },
     sessions::EmailForm,
@@ -56,15 +57,23 @@ async fn new(flash: Flash) -> Result<Html<String>> {
 }
 
 /// Emails a reset link. Same answer whether or not the email has an account.
-async fn create(State(ctx): State<Ctx>, session: Session, uri: Uri, Form(form): Form<EmailForm>) -> Result<Redirect> {
+async fn create(
+    State(ctx): State<Ctx>,
+    session: Session,
+    headers: HeaderMap,
+    uri: Uri,
+    Form(form): Form<EmailForm>,
+) -> Result<Redirect> {
+    throttle(&ctx, &headers, "password_reset").await?;
     if let Some(user) = user::find_by_email(&ctx, &form.email).await? {
         let token = auth_token::issue(&ctx, user.id, PASSWORD_RESET).await?;
         let link = format!("{}/passwords/{token}", origin(&uri));
+        let minutes = valid_minutes(PASSWORD_RESET);
         let text = format!(
-            "Open this link within {VALID_MINUTES} minutes to choose a new password:\n\n{link}\n\nIf you did not ask for it, ignore this email.\n"
+            "Open this link within {minutes} minutes to choose a new password:\n\n{link}\n\nIf you did not ask for it, ignore this email.\n"
         );
         let html = format!(
-            "<p><a href=\"{link}\">Choose a new password</a> (valid {VALID_MINUTES} minutes).</p><p>If you did not ask for it, ignore this email.</p>"
+            "<p><a href=\"{link}\">Choose a new password</a> (valid {minutes} minutes).</p><p>If you did not ask for it, ignore this email.</p>"
         );
         mail::send(&ctx, Email::new(&user.email, "Reset your password", text).html(html)).await?;
     }
@@ -100,7 +109,9 @@ async fn update(
         return invalid_link(&session);
     };
     user::update_password(&ctx, user_id, &form.password).await?;
-    sign_out(&session)?;
+    // The reset link was opened from the mailbox: the address is confirmed too.
+    user::confirm(&ctx, user_id).await?;
+    sign_out(&ctx, &session).await?;
     session.flash("notice", "Password updated. Log in with your new password.")?;
     Ok(Redirect::to("/login").into_response())
 }

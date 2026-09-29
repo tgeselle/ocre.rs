@@ -211,3 +211,67 @@ fn sql_rejects_unexpected_wrangler_output() {
     assert!(!ok);
     assert!(report["error"].as_str().unwrap().starts_with("unexpected `wrangler d1 execute --json` output"));
 }
+
+// ---------- ocre db schema ----------
+
+const SCHEMA_ROWS: &str = r#"[{"results":[{"sql":"CREATE TABLE posts (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    title TEXT\n)"},{"sql":"CREATE INDEX index_posts_on_title ON posts (title)"},{"sql":null}],"success":true}]"#;
+
+#[test]
+fn db_schema_dumps_create_statements_for_rebuild_migrations() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    sandbox.write_state("execute.json", SCHEMA_ROWS);
+    let (report, ok) = sandbox.json(&["db", "schema"], &root);
+    assert!(ok, "{report}");
+    assert_eq!(report["created"], json!(["db/schema.sql"]));
+    let call = &sandbox.calls()[0];
+    assert!(
+        call.starts_with("d1 execute shop --command SELECT sql FROM sqlite_master WHERE sql IS NOT NULL"),
+        "{call}"
+    );
+    assert!(call.ends_with("--local --json"), "{call}");
+    let schema = fs::read_to_string(root.join("db/schema.sql")).unwrap();
+    assert!(schema.starts_with("-- Schema of the local D1 database, written by `ocre db schema`"), "{schema}");
+    assert!(
+        schema.ends_with(
+            "\n\nCREATE TABLE posts (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    title TEXT\n);\n\n\
+             CREATE INDEX index_posts_on_title ON posts (title);\n"
+        ),
+        "{schema}"
+    );
+
+    let (report, ok) = sandbox.json(&["g", "migration", "rebuild_posts"], &root);
+    assert!(ok, "{report}");
+    assert_eq!(report["next"], json!(["ocre migrate", "update the model in src/models/ to match the new columns"]));
+    let migration = fs::read_to_string(root.join("migrations/0001_rebuild_posts.sql")).unwrap();
+    assert!(migration.contains("INSERT INTO posts_new (id, title) SELECT id, title FROM posts;\n"), "{migration}");
+    assert!(migration.contains("CREATE INDEX index_posts_on_title ON posts (title);\n"), "{migration}");
+
+    let (report, ok) = sandbox.json(&["db", "schema", "--remote"], &root);
+    assert!(ok, "{report}");
+    assert_eq!((&report["updated"], &report["remote"]), (&json!(["db/schema.sql"]), &json!(true)));
+    let schema = fs::read_to_string(root.join("db/schema.sql")).unwrap();
+    assert!(schema.starts_with("-- Schema of the remote D1 database"), "{schema}");
+
+    sandbox.write_state("execute.json", "not json");
+    let (report, ok) = sandbox.json(&["db", "schema"], &root);
+    assert!(!ok);
+    assert!(report["error"].as_str().unwrap().starts_with("unexpected `wrangler d1 execute --json` output"));
+}
+
+#[test]
+fn migrations_rename_drop_and_index_from_their_name() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    let (report, ok) = sandbox.json(&["g", "migration", "add_index_to_posts", "author_id", "created_at"], &root);
+    assert!(ok, "{report}");
+    assert_eq!(report["next"], json!(["ocre migrate"]));
+    let sql = fs::read_to_string(root.join("migrations/0001_add_index_to_posts.sql")).unwrap();
+    assert!(sql.ends_with("CREATE INDEX index_posts_on_author_id_and_created_at ON posts (author_id, created_at);\n"));
+    let (report, _) = sandbox.json(&["g", "migration", "rebuild_posts"], &root);
+    assert_eq!(report["error"], "db/schema.sql not found");
+    let (report, ok) = sandbox.json(&["g", "migration", "rename_title_to_headline_in_posts"], &root);
+    assert!(ok, "{report}");
+    let sql = fs::read_to_string(root.join("migrations/0002_rename_title_to_headline_in_posts.sql")).unwrap();
+    assert!(sql.ends_with("ALTER TABLE posts RENAME COLUMN title TO headline;\n"), "{sql}");
+}

@@ -80,3 +80,32 @@ fn pages_default_and_stay_within_bounds() {
         assert!(page(bad).is_err(), "{bad}");
     }
 }
+
+#[test]
+fn page_navigation_guesses_more_rows_from_a_full_page() {
+    let page = Page::new(10, 5).unwrap();
+    assert_eq!(page.next(10), Some(Page { limit: 10, offset: 15 }));
+    assert_eq!(page.next(9), None);
+    assert_eq!(page.previous(), Some(Page { limit: 10, offset: 0 }));
+    assert_eq!(Page { limit: 10, offset: i64::MAX }.next(10).unwrap().offset, i64::MAX);
+    assert_eq!(page.query(), "limit=10&offset=5");
+    assert_eq!(Page::new(50, 0).unwrap().query(), "offset=0");
+}
+
+#[test]
+fn page_links_list_next_prev_and_first() {
+    let link = |page: Page, path: &str, returned: usize| {
+        let response = (page.links(path, returned), ()).into_response();
+        response.headers().get("link").map(|value| value.to_str().unwrap().to_owned())
+    };
+    let first = Page::new(50, 0).unwrap();
+    assert_eq!(link(first, "/api/posts", 50).unwrap(), r#"</api/posts?offset=50>; rel="next""#);
+    assert_eq!(link(first, "/api/posts", 3), None);
+    let last = Page::new(50, 50).unwrap();
+    assert_eq!(
+        link(last, "/api/posts", 1).unwrap(),
+        r#"</api/posts?offset=0>; rel="prev", </api/posts?offset=0>; rel="first""#
+    );
+    // A path that is not a valid header value yields no header rather than a failure.
+    assert_eq!(link(first, "/api/\nposts", 50), None);
+}

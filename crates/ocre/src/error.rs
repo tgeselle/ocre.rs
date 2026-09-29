@@ -33,6 +33,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 /// | [`Forbidden`](Self::Forbidden) | 403 | `Forbidden` |
 /// | [`Invalid`](Self::Invalid) | 422 | `Validation failed` plus the field errors |
 /// | [`PayloadTooLarge`](Self::PayloadTooLarge) | 413 | its message |
+/// | [`TooManyRequests`](Self::TooManyRequests) | 429 | `Too many requests. Try again later.` |
 /// | [`Internal`](Self::Internal) | 500 | `Internal server error` (message logged) |
 ///
 /// # Examples
@@ -73,6 +74,10 @@ pub enum Error {
     ///
     /// See [`storage::Multipart`](crate::storage::Multipart).
     PayloadTooLarge(String),
+    /// 429 Too Many Requests: a rate limit was hit.
+    ///
+    /// Returned by [`security::rate_limit`](crate::security::rate_limit).
+    TooManyRequests,
     /// 500 Internal Server Error; the message goes to the Worker logs only.
     ///
     /// Logged as `[ocre] <message>` when the response is built; the client
@@ -136,6 +141,9 @@ impl Error {
             Self::Forbidden => (StatusCode::FORBIDDEN, "Forbidden".to_owned(), vec![]),
             Self::Invalid(fields) => (StatusCode::UNPROCESSABLE_ENTITY, "Validation failed".to_owned(), fields),
             Self::PayloadTooLarge(message) => (StatusCode::PAYLOAD_TOO_LARGE, message, vec![]),
+            Self::TooManyRequests => {
+                (StatusCode::TOO_MANY_REQUESTS, "Too many requests. Try again later.".to_owned(), vec![])
+            }
             Self::Internal(message) => {
                 log_internal(&message);
                 (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_owned(), vec![])
@@ -157,6 +165,7 @@ impl std::fmt::Display for Error {
                 write!(f, "invalid: {}", messages.join(", "))
             }
             Self::PayloadTooLarge(message) => write!(f, "payload too large: {message}"),
+            Self::TooManyRequests => f.write_str("too many requests"),
             Self::Internal(message) => write!(f, "internal error: {message}"),
         }
     }

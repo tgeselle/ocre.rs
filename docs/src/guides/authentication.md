@@ -1,6 +1,6 @@
 # Authentication
 
-This guide adds users to an Ocre app with `ocre g auth`: sign-up, login and logout pages, magic links and password resets by email, JWTs and API keys for JSON clients, then shows how to protect pages and endpoints and restrict records to their owner. All of it is generated app code you can read and change; the framework only provides small primitives (password hashing, tokens, JWTs).
+This guide adds users to an Ocre app with `ocre g auth`: sign-up, login ("remember me") and logout pages, magic links, password resets and email confirmation by email, account deletion, rate limits, JWTs and API keys for JSON clients, and optionally sessions tracked in D1 (`--db-sessions`) and "Continue with GitHub / Google" (`--oauth`). It then shows how to protect pages and endpoints and restrict records to their owner. All of it is generated app code you can read and change; the framework only provides small primitives (password hashing, tokens, JWTs, rate limits, OAuth).
 
 ## Before you start
 
@@ -29,6 +29,7 @@ In a full-stack app:
   create  src/registrations.rs
   create  src/sessions.rs
   create  src/passwords.rs
+  create  src/confirmations.rs
   create  templates/auth/signup.html
   create  templates/auth/login.html
   create  templates/auth/account.html
@@ -36,14 +37,30 @@ In a full-stack app:
   create  templates/auth/magic_link_show.html
   create  templates/auth/password_new.html
   create  templates/auth/password_edit.html
+  create  templates/auth/confirmation_show.html
   update  src/models/mod.rs
   update  src/lib.rs
+  update  wrangler.toml
 
 Next:
   ocre migrate
   ocre dev
   open http://localhost:8787/signup
 ```
+
+`wrangler.toml` gets the rate limiter used by every route that checks a password or sends an email (see [Rate limiting](#rate-limiting)):
+
+```toml
+# `ocre g auth`: login, sign-up, token and emailed-link routes allow 10 attempts
+# a minute per IP address and Cloudflare location (Workers Rate Limiting,
+# free plan, no storage used). `period` is 10 or 60 seconds.
+[[ratelimits]]
+name = "AUTH_RATE_LIMITER"
+namespace_id = "3530462"
+simple = { limit = 10, period = 60 }
+```
+
+The `namespace_id` is derived from the app name; two Workers of an account with the same id share counters.
 
 Then apply the migrations and start the app:
 
@@ -56,18 +73,27 @@ What each file holds, and which ones an API-only app (`ocre new --api`) gets:
 
 | File | Full-stack | API-only | Contents |
 |---|---|---|---|
-| `migrations/*_create_users.sql` | yes | yes | `users`: `email` (unique, `COLLATE NOCASE`), `password_digest`, timestamps |
-| `migrations/*_create_auth_tokens.sql` | yes | | Single-use emailed tokens: `user_id`, `purpose` (`password_reset` or `magic_link`), `digest` (unique), `expires_at` |
+| `migrations/*_create_users.sql` | yes | yes | `users`: `email` (unique, `COLLATE NOCASE`), `password_digest` (empty for OAuth-only users), `confirmed_at`, timestamps |
+| `migrations/*_create_auth_tokens.sql` | yes | | Single-use emailed tokens: `user_id`, `purpose` (`password_reset`, `magic_link` or `email_confirmation`), `digest` (unique), `expires_at` |
 | `migrations/*_create_api_keys.sql` | yes | yes | `api_keys`: `user_id`, `name`, `digest` (unique), `last_used_at` |
-| `src/models/user.rs` | yes | yes | `User` (never serializes `password_digest`), `NewUser` (email format, password 8 to 128 characters), `find`, `find_by_email`, `create`, `authenticate`, `update_password`; emails trimmed and lowercased |
-| `src/models/auth_token.rs` | yes | | `issue`, `peek`, `consume` (valid 15 minutes, single use) |
+| `src/models/user.rs` | yes | yes | `User` (never serializes `password_digest`; `confirmed()`, `has_password()`), `NewUser` (email format, password 8 to 128 characters), `find`, `find_by_email`, `create`, `create_confirmed`, `authenticate`, `update_password`, `confirm`, `delete`, `deletion_confirmed`; emails trimmed and lowercased |
+| `src/models/auth_token.rs` | yes | | `issue`, `peek`, `consume` (single use; valid 15 minutes, a day for email confirmation: `valid_minutes`) |
 | `src/models/api_key.rs` | yes | yes | `create` (returns the key once), `for_user`, `revoke`, `authenticate` |
-| `src/auth.rs` | yes | | `CurrentUser`, `OptionalUser`, `sign_in`, `sign_out`, `origin` |
-| `src/registrations.rs` | yes | | `GET/POST /signup`, `GET /account` (an example protected page) |
+| `src/auth.rs` | yes | | `CurrentUser`, `ConfirmedUser`, `OptionalUser`, `sign_in`, `sign_out`, `origin`, `SESSION_SECONDS`, `OAUTH_PROVIDERS` |
+| `src/registrations.rs` | yes | | `GET/POST /signup`, `GET /account` (an example protected page), `POST /account/delete` |
 | `src/sessions.rs` | yes | | `GET/POST /login`, `POST /logout`, `GET/POST /magic_link`, `GET/POST /magic_link/{token}` |
 | `src/passwords.rs` | yes | | `GET /passwords/new`, `POST /passwords`, `GET/POST /passwords/{token}` |
+| `src/confirmations.rs` | yes | | `send_confirmation`; `POST /confirmations` (a new link), `GET/POST /confirmations/{token}` |
 | `templates/auth/*.html` | yes | | The pages |
-| `src/auth_api.rs` | yes | yes | `BearerUser`; `POST /api/auth/signup`, `POST /api/auth/token`, `GET /api/auth/me`, `GET/POST /api/auth/keys`, `DELETE /api/auth/keys/{id}` |
+| `src/auth_api.rs` | yes | yes | `BearerUser`, `throttle`, `TOKEN_LOCATIONS`; `POST /api/auth/signup`, `POST /api/auth/token`, `GET/DELETE /api/auth/me`, `GET/POST /api/auth/keys`, `DELETE /api/auth/keys/{id}` |
+| `wrangler.toml` | yes | yes | The `AUTH_RATE_LIMITER` binding |
+
+Two options add more, in full-stack apps only:
+
+| Option | Adds |
+|---|---|
+| `--db-sessions` | `migrations/*_create_user_sessions.sql`, `src/models/user_session.rs`, `src/user_sessions.rs` and `templates/auth/user_sessions.html`; `src/auth.rs` stores sessions in D1 (see [Sessions tracked in D1](#sessions-tracked-in-d1)) |
+| `--oauth github,google` | `migrations/*_create_identities.sql`, `src/models/identity.rs`, `src/oauth.rs`, the providers' buttons on the login page, commented secrets in `.dev.vars` (see [Continue with GitHub or Google](#continue-with-github-or-google)) |
 
 In an API-only app the output is:
 
@@ -79,6 +105,7 @@ In an API-only app the output is:
   create  src/models/api_key.rs
   create  src/auth_api.rs
   update  src/lib.rs
+  update  wrangler.toml
 
 Next:
   ocre migrate
@@ -127,14 +154,16 @@ Set-Cookie: _ocre_session=HZlSU2bCVeNT7CWPgmbw2p6DaYDY9S%2FOB3S8Wu%2FiKTdXxippgj
 ...
 ```
 
-`GET /account` now shows the flash message and the user:
+`GET /account` now shows the flash message, the user, and a reminder to confirm the address (see [Email confirmation](#email-confirmation)):
 
 ```text
 <h1>Your account</h1>
-<p class="notice">Welcome! Your account is ready.</p>
+<p class="notice">Welcome! Your account is ready. Check your email to confirm your address.</p>
 ...
   <dt>Email</dt><dd>ada@example.com</dd>
   <dt>Member since</dt><dd>2026-09-29 04:32:55</dd>
+...
+  <p class="alert">Your email address is not confirmed yet.</p>
 ...
 ```
 
@@ -166,7 +195,21 @@ curl -s -c jar.txt -b jar.txt http://localhost:8787/login -d 'email=Ada@Example.
 303 http://localhost:8787/
 ```
 
-The failed login re-renders the form with "Invalid email or password." whether the email or the password was wrong. After a successful login the user goes back to the page that asked for it, or `/`.
+The failed login re-renders the form with "Invalid email or password." whether the email or the password was wrong. After a successful login the user goes back to the page that asked for it (only a path of this app: `ocre::security::url_from` refuses anything else), or `/`.
+
+### Remember me and session expiry
+
+Every sign-in lasts two weeks (`SESSION_SECONDS` in `src/auth.rs`). The expiry time is stored inside the encrypted session cookie and checked on every request, so a copied cookie stops working after it too. Without "Remember me" the cookie ends with the browser session; with the box ticked (`remember_me=1`) it is persistent:
+
+```sh
+curl -si -c jar.txt -b jar.txt http://localhost:8787/login -d 'email=ada@example.com&password=correct horse&remember_me=1' | grep -i set-cookie
+```
+
+```text
+Set-Cookie: _ocre_session=...; HttpOnly; SameSite=Lax; Path=/; Max-Age=1209600
+```
+
+`sign_in` calls `session.remember_for(SESSION_SECONDS)` or `session.expire_in(SESSION_SECONDS)`; use the same methods of `ocre::Session` for other expiring state (see [Sessions, flash and security](security.md#expiry-and-remember-me)).
 
 ## Magic links
 
@@ -257,7 +300,27 @@ curl -s http://localhost:8787/passwords/$T -d 'password=new password 2&password_
 303 http://localhost:8787/login
 ```
 
-A validation error does not use the token up, so the user can correct the form. A password change does not sign out other browsers: sessions live in cookies (see [What is not included](#what-is-not-included)).
+A validation error does not use the token up, so the user can correct the form. The reset also confirms the email address (the link was opened from the mailbox). A password change does not sign out other browsers with cookie sessions; with `--db-sessions`, "Sign out everywhere else" does (see [Sessions tracked in D1](#sessions-tracked-in-d1)).
+
+## Email confirmation
+
+Sign-up emails a confirmation link valid 24 hours (`src/confirmations.rs`); the account works before it is confirmed:
+
+```text
+[ocre mail] not sent (MAIL_ADAPTER = "log")
+From: shop <noreply@example.com>
+To: ada@example.com
+Subject: Confirm your email address
+
+Confirm your email address by opening this link within 24 hours:
+
+http://localhost:8787/confirmations/<token>
+...
+```
+
+Like magic links, `GET /confirmations/{token}` shows a button and `POST` uses the token up, sets `users.confirmed_at` and redirects to `/account` with "Thanks, your email address is confirmed." An invalid, expired or used link gets "That confirmation link is invalid or has expired." The account page of an unconfirmed user has a "Send a new confirmation link" button (`POST /confirmations`). Signing in with a magic link, resetting the password or signing in with an OAuth provider whose email is verified also confirms the address.
+
+Pages that need a confirmed address take `ConfirmedUser` instead of `CurrentUser` (next section).
 
 ## Protect HTML pages
 
@@ -266,9 +329,10 @@ Take one of the extractors from `src/auth.rs` as a handler argument:
 | Extractor | Gives | Visitor without a session |
 |---|---|---|
 | `CurrentUser(user): CurrentUser` | `User` | Redirected to `/login` with the alert "Please log in to continue."; for `GET` requests the page is remembered and the user comes back to it after logging in |
+| `ConfirmedUser(user): ConfirmedUser` | `User` with a confirmed email | Like `CurrentUser`; an unconfirmed user is redirected to `/account` with "Please confirm your email address first." |
 | `OptionalUser(user): OptionalUser` | `Option<User>` | `None`; the page renders |
 
-Both read `user_id` from the session and load the user with one D1 query. This module adds a dashboard for signed-in users and a greeting for everyone; register it with `mod dashboard;` under `// ocre:modules` and `.merge(dashboard::routes())` under `// ocre:routes` in `src/lib.rs`:
+They read `user_id` from the session and load the user with one D1 query (with `--db-sessions`, one query joining the session and the user). This module adds a dashboard for signed-in users and a greeting for everyone; register it with `mod dashboard;` under `// ocre:modules` and `.merge(dashboard::routes())` under `// ocre:routes` in `src/lib.rs`:
 
 ```rust,check
 // src/dashboard.rs
@@ -629,6 +693,22 @@ curl -s -X POST http://localhost:8787/api/auth/signup -H 'content-type: applicat
 {"error":{"fields":{"email":["is invalid"],"password":["is too short (minimum is 8 characters)"]},"message":"Validation failed","status":422}}
 ```
 
+## Account deletion
+
+`POST /account/delete` with `confirmation` (the password, or the email address for users without one) deletes the user and signs out; tokens, API keys, sessions and identities go with it (`ON DELETE CASCADE`). JSON clients send `DELETE /api/auth/me` with `{"password": "..."}`: 204, or 403 for a wrong password.
+
+## Rate limiting
+
+Every route that checks a password or sends an email calls `throttle(&ctx, &headers, "login")` (in `src/auth_api.rs`), which counts one attempt per action and client IP address (`ocre::remote_ip`) with `ocre::security::rate_limit` against the `AUTH_RATE_LIMITER` [Workers Rate Limiting binding](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/). Over 10 a minute the answer is `429 Too Many Requests` (JSON: `{"error":{"status":429,"message":"Too many requests. Try again later."}}`). The binding is on the free plan, uses no D1 or KV operation, and `ocre dev` simulates it; counters are per Cloudflare location and approximate. Change `limit` and `period` (10 or 60 seconds) in `wrangler.toml`.
+
+## Sessions tracked in D1
+
+With `ocre g auth --db-sessions`, each sign-in is a row of `user_sessions` (IP address, browser, last activity, expiry) and the cookie holds a random token whose SHA-256 digest finds the row (Rails 8's `Session` model). `/account/sessions` lists the signed-in devices, "Sign out" ends one, "Sign out everywhere else" ends all others; deleting a row signs that device out on its next request. Cost: every signed-in request reads the session and its user (one query, 2 D1 rows); `last_seen_at` is written at most once an hour.
+
+## Continue with GitHub or Google
+
+With `ocre g auth --oauth github,google`, the login page gets one button per provider. `src/oauth.rs` runs the OAuth 2.0 code flow with PKCE through `ocre::oauth`: `POST /auth/{provider}` stores a random `state` and PKCE verifier in the session and redirects to the provider; `GET /auth/{provider}/callback` checks the state, trades the code for a token, reads the profile, and signs in the user linked to that account (`identities` table), else the user with the same verified email (then linked), else a new confirmed user without a password. Register an OAuth app with the callback URL `https://<your host>/auth/<provider>/callback` (and one for `http://localhost:8787`), put `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` (or `GOOGLE_...`) in `.dev.vars`, and upload them with `ocre secrets push GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET --file <production values>`. A sign-in costs 2 or 3 subrequests of the 50 a free-plan request may make.
+
 ## Framework primitives
 
 The generated code is built on these `ocre` items; use them for your own flows (invitations, email confirmation, one-time codes):
@@ -652,7 +732,8 @@ Store only `token::digest(&token)` for secrets you email or show once, and look 
 ## Before going public
 
 - **Mail.** Magic links and password resets call `ocre::mail::send`. Without `MAIL_ADAPTER` in production, `POST /magic_link` and `POST /passwords` answer 500 and the log says `cannot send email: MAIL_ADAPTER is not set. Fix: ...`. For sign-up and reset mail to any address on the free plan, use Resend (100 emails a day, 3,000 a month, September 2026); see [Email](email.md#choose-an-adapter).
-- **Rate limiting.** Nothing limits attempts: login, sign-up, magic-link, reset and token routes accept unlimited requests, and each password check costs about 5.5 ms of CPU. Add [Cloudflare rate limiting rules](https://developers.cloudflare.com/waf/rate-limiting-rules/) for `/login`, `/signup`, `/magic_link`, `/passwords` and `/api/auth/*` before going public. These rules belong to a zone, so they need the app on a custom domain or route: requests to the `*.workers.dev` host are not covered ([workers.dev](https://developers.cloudflare.com/workers/configuration/routing/workers-dev/) recommends a custom domain for production). Inside the Worker, Cloudflare's [Rate Limiting binding](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/) is another option; Ocre does not wrap it.
+- **Rate limiting.** Keep the `AUTH_RATE_LIMITER` entry in `wrangler.toml` (see [Rate limiting](#rate-limiting)): each password check costs about 5.5 ms of CPU, and every emailed link costs a send from your mail quota. Its counters are per Cloudflare location and approximate; with a custom domain, a [Cloudflare WAF rate limiting rule](https://developers.cloudflare.com/waf/rate-limiting-rules/) on `/login`, `/signup`, `/magic_link`, `/passwords` and `/api/auth/*` adds a limit before the Worker runs (see [Deployment](deployment.md#before-going-public-rate-limiting)).
+- **OAuth.** With `--oauth`, upload the provider's `..._CLIENT_ID` and `..._CLIENT_SECRET` with `npx wrangler secret put`, and register the production callback URL with the provider.
 - **Secret.** `ocre deploy` creates `SECRET_KEY_BASE` on the first deploy; never commit `.dev.vars`.
 
 ## Security choices
@@ -660,16 +741,14 @@ Store only `token::digest(&token)` for secrets you email or show once, and look 
 In short (the reasoning is in [Security model](../explanations/security-model.md)):
 
 - **Passwords**: PBKDF2-HMAC-SHA256 with 100,000 iterations through WebCrypto, the most Workers accept (OWASP recommends 600,000; bcrypt or argon2 in WebAssembly would not fit in 10 ms of CPU). A login with an unknown email hashes too, so response times do not reveal accounts.
-- **Sessions**: the encrypted cookie holds only `user_id`; login empties the session first, logout clears it. `CurrentUser` only returns to local paths (no open redirect).
-- **Emailed tokens**: 256 random bits, stored as SHA-256 digests, valid 15 minutes, used up by one `DELETE ... RETURNING` (single use even under concurrent requests); a new request cancels the previous link; links open a page whose button `POST`s. Links use the request's origin.
-- **JWTs**: HS256 only, key derived from `SECRET_KEY_BASE` with a fixed label (so it differs from the cookie key); no separate `JWT_SECRET`. Rotating `SECRET_KEY_BASE` signs everyone out of sessions and tokens at once.
+- **Sessions**: the encrypted cookie holds only `user_id` (with `--db-sessions`, a random session token whose digest finds the D1 row) and its expiry; login empties the session first, logout clears it. `CurrentUser` only returns to local paths (no open redirect).
+- **Emailed tokens**: 256 random bits, stored as SHA-256 digests, valid 15 minutes (email confirmation links: a day), used up by one `DELETE ... RETURNING` (single use even under concurrent requests); a new request cancels the previous link; links open a page whose button `POST`s. Links use the request's origin.
+- **JWTs**: HS256 only, key derived from `SECRET_KEY_BASE` with a fixed label (so it differs from the cookie key); no separate `JWT_SECRET`. Rotating `SECRET_KEY_BASE` signs everyone out of sessions and tokens at once, unless the old value is kept in `SECRET_KEY_BASE_PREVIOUS` for a while (see [Rotating SECRET_KEY_BASE without signing everyone out](security.md#rotating-secret_key_base-without-signing-everyone-out)).
 - **API keys**: 256 random bits shown once, stored as SHA-256 digests, revocable; `last_used_at` written at most once an hour to save D1 writes.
 
 ## What is not included
 
-- Rate limiting (see [Before going public](#before-going-public)).
-- Email confirmation of new accounts.
-- "Sign out everywhere": sessions last until logout, the end of the browser session, or a `SECRET_KEY_BASE` change; a password reset does not end other sessions.
+- Revoking cookie sessions before they expire, unless you use `--db-sessions`.
 - Roles and permissions: `Error::Forbidden` is there for your own checks.
 - Revoking a JWT before it expires (use API keys for long-lived access).
 

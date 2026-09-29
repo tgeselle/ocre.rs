@@ -5,7 +5,7 @@ This page documents every `ocre g` generator: its arguments and flags, the namin
 ## Before you start
 
 - An Ocre app created with [`ocre new`](cli.md#ocre-new). Run generators from its root or any directory below it (the CLI looks for the nearest `wrangler.toml`).
-- Generators only write files: they need no network, no wrangler and no Cloudflare account. Run [`ocre migrate`](cli.md#ocre-migrate) after the ones that add migrations, and `cargo check --target wasm32-unknown-unknown` to type-check the result.
+- Generators only write files: they need no network, no wrangler and no Cloudflare account. Run [`ocre migrate`](cli.md#ocre-migrate) after the ones that add migrations, and `cargo check --target wasm32-unknown-unknown` (or [`ocre test`](cli.md#ocre-test)) to type-check the result.
 - Keep the `// ocre:...` marker comments of generated files (`// ocre:modules` and `// ocre:routes` in `src/lib.rs`, `// ocre:models` in `src/models/mod.rs`...): generators insert lines right after them.
 
 The examples below were run with `ocre 0.1.0` on an app created by `ocre new blog --starter blog`, in the order of this page.
@@ -13,8 +13,9 @@ The examples below were run with `ocre 0.1.0` on an app created by `ocre new blo
 ## How generators behave
 
 - **All or nothing.** A generator computes every change first and writes nothing until the whole generation succeeded, so a failure never leaves half a resource.
-- **Never overwrite.** A generator creates new files and only edits existing ones by inserting lines at markers (or appending blocks to `wrangler.toml`). When a file it would create exists, it stops with `<path> already exists` and the hint ``generators create new files only; edit the existing file, or add a migration with `ocre g migration` ``. Running a generator twice is therefore an error, not a no-op. To change a table after its migration was applied, add a migration with [`ocre g migration`](#ocre-g-migration).
-- **Report.** The human output lists `  create  <path>` and `  update  <path>` lines, then `Next:` steps. With `--json` it is one object with `command` (`generate <generator>`), `created`, `updated` and `next` (see [the --json contract](cli.md#global-flag-json)).
+- **Never overwrite by default.** A generator creates new files and only edits existing ones by inserting lines at markers (or appending blocks to `wrangler.toml`). When a file it would create exists, it stops with `<path> already exists` and the hint ``generators create new files only: pass --skip to keep the existing file, --force to overwrite it, or edit it (`ocre g migration` for tables)``. Lines already present after a marker are not inserted twice. To change a table after its migration was applied, add a migration with [`ocre g migration`](#ocre-g-migration).
+- **Report.** The human output lists `  create  <path>`, `  update  <path>` and `  skip    <path>` lines, then `Next:` steps. With `--json` it is one object with `command` (`generate <generator>`), `created`, `updated`, `skipped`, `pretend` and `next` (see [the --json contract](cli.md#global-flag-json)).
+- **Recorded.** Every run that writes something saves what it changed in `.ocre/generated/NNNN_<generator>_<name>.json` (see [Generation records and ocre destroy](#generation-records-and-ocre-destroy)). Commit the directory with the code.
 - **Full-stack or API-only.** An app created with `ocre new --api` has `[package.metadata.ocre] mode = "api"` in `Cargo.toml`. There, `ocre g scaffold` generates a JSON API (like `ocre g api`), and `auth` and `mailer` generate no HTML.
 - **Migrations** are numbered after the highest existing number: `migrations/0002_create_comments.sql`, then `0003_...`.
 - **Marker errors.** When a marker a generator needs is missing, it fails with ``<file> is missing the `<marker>` marker`` and a hint saying where to put it back.
@@ -24,31 +25,118 @@ The examples below were run with `ocre 0.1.0` on an app created by `ocre new blo
 | [`ocre g model`](#ocre-g-model) | Migration and `src/models/<model>.rs` |
 | [`ocre g scaffold`](#ocre-g-scaffold) | Model (unless it exists) plus HTML CRUD pages; `--realtime` for live updates |
 | [`ocre g api`](#ocre-g-api) | Model (unless it exists) plus a JSON REST resource; `--graphql` for GraphQL |
-| [`ocre g auth`](#ocre-g-auth) | Users, sessions, password reset, magic links, JWT and API keys (once per app) |
-| [`ocre g migration`](#ocre-g-migration) | One numbered SQL migration |
+| [`ocre g resource`](#ocre-g-resource) | Model (unless it exists) plus `index` and `show` actions to fill in |
+| [`ocre g controller`](#ocre-g-controller) | A module of GET actions, with a page each (or JSON) |
+| [`ocre g auth`](#ocre-g-auth) | Users, sessions, password reset, magic links, email confirmation, JWT and API keys; `--db-sessions`, `--oauth` (once per app) |
+| [`ocre g migration`](#ocre-g-migration) | One numbered SQL migration, its SQL inferred from the name |
 | [`ocre g mailer`](#ocre-g-mailer) | Functions building emails, with templates |
 | [`ocre g mailbox`](#ocre-g-mailbox) | The handler of incoming email (once per app) |
 | [`ocre g job`](#ocre-g-job) | A background job on Cloudflare Queues |
 | [`ocre g schedule`](#ocre-g-schedule) | A task run by a Cron Trigger |
 | [`ocre g cache`](#ocre-g-cache) | The `CACHE` Workers KV binding |
 | [`ocre g locale`](#ocre-g-locale) | Translation files |
+| [`ocre g override`](#ocre-g-override) | Copies of generator templates in `.ocre/templates/`, which then replace the built-in ones |
+| [`ocre g generator`](#ocre-g-generator) | An app generator in `.ocre/generators/<name>/` |
+| [`ocre g <name>`](#app-generators-ocre-g-name) | Runs the app generator `.ocre/generators/<name>/` |
+
+## Generator flags
+
+Every generator accepts these flags, before or after its arguments:
+
+| Flag | Effect |
+|---|---|
+| `--pretend` | Computes and reports the changes (`create`, `update` and `skip` lines, then `(--pretend: nothing was written)`; `"pretend": true` in JSON), writes nothing and records nothing |
+| `--force` | Overwrites files the generator creates when they already exist (they are reported as `update`) |
+| `--skip` | Keeps files that already exist (reported as `skip`) and generates the rest |
+
+`--force` and `--skip` cannot be combined. Neither changes how existing files such as `src/lib.rs` are edited: lines are inserted at markers once.
+
+```sh
+ocre g scaffold Draft title:string --pretend
+```
+
+```text
+  create  migrations/0004_create_drafts.sql
+  create  src/models/draft.rs
+  create  src/drafts.rs
+  create  templates/drafts/index.html
+  create  templates/drafts/show.html
+  create  templates/drafts/new.html
+  create  templates/drafts/edit.html
+  create  templates/drafts/_form.html
+  update  src/models/mod.rs
+  update  src/lib.rs
+(--pretend: nothing was written)
+
+Next:
+  ocre migrate
+  ocre dev
+  open http://localhost:8787/drafts
+```
+
+Running a controller generator again, keeping what exists:
+
+```sh
+ocre g controller Pages about --skip
+```
+
+```text
+  skip    src/pages.rs
+  skip    templates/pages/about.html
+
+Next:
+  ocre dev
+  open http://localhost:8787/pages/about
+```
+
+## Generation records and ocre destroy
+
+Each generator run that changes files writes a JSON record in `.ocre/generated/`, numbered like migrations (`0003_controller_pages.json`): the command as typed, the generator, its first argument, each file created with a SHA-256 of its contents, and for each file updated the lines added and removed around a context line. [`ocre destroy <generator> [NAME]`](cli.md#ocre-destroy) reads the latest matching record and undoes the run: it deletes the files created and takes out the lines added (Cargo.toml and wrangler.toml changes stay). It refuses when a created file changed since, unless `--force`.
+
+```sh
+ocre g scaffold Temp name:string
+ocre destroy scaffold Temp
+```
+
+```text
+  update  src/models/mod.rs
+  update  src/lib.rs
+  remove  migrations/0004_create_temps.sql
+  remove  src/models/temp.rs
+  remove  src/temps.rs
+  remove  templates/temps/index.html
+  remove  templates/temps/show.html
+  remove  templates/temps/new.html
+  remove  templates/temps/edit.html
+  remove  templates/temps/_form.html
+  remove  .ocre/generated/0005_scaffold_temp.json
+
+Next:
+  if `ocre migrate` already applied migrations/0004_create_temps.sql, its tables and columns stay: undo them with a new migration (`ocre g migration ...`)
+```
+
+Apps created before records existed have none for their earlier runs: `ocre destroy` then says ``no recorded `ocre g ...` run to destroy``.
 
 ## Fields
 
-`model`, `scaffold`, `api`, `migration` and `job` take fields as `name:type`, with optional suffixes: `?` makes the field optional (the column accepts `NULL`, the Rust type is an `Option`), `^` makes it unique (a unique index plus a "has already been taken" check). Both can be combined (`slug:string?^`). The types, detailed in [Field types](field-types.md):
+`model`, `scaffold`, `api`, `resource`, `migration` and `job` take fields as `name:type`, with optional suffixes: `?` makes the field optional (the column accepts `NULL`, the Rust type is an `Option`), `^` makes it unique (a unique index plus a "has already been taken" check). Both can be combined (`slug:string?^`). The types, detailed in [Field types](field-types.md):
 
 | Type | SQL column | Rust type | Notes |
 |---|---|---|---|
 | `string` | `TEXT` | `String` | One-line text; required unless `?` |
 | `text` | `TEXT` | `String` | Multi-line text (a textarea in forms); required unless `?` |
-| `integer` | `INTEGER` | `i64` | Validated within ±(2^53 - 1), the integers D1 returns exactly |
-| `float` | `REAL` | `f64` | |
-| `boolean` | `INTEGER NOT NULL DEFAULT 0` | `bool` | A checkbox; cannot be `?` |
+| `integer` (`int`, `small_int`, `big_int`) | `INTEGER` | `i64` | Validated within ±(2^53 - 1), the integers D1 returns exactly |
+| `float` (`double`) | `REAL` | `f64` | |
+| `decimal` | `TEXT` | `String` | Exact number such as `19.99` (money); validated as a decimal |
+| `boolean` (`bool`) | `INTEGER NOT NULL DEFAULT 0` | `bool` | A checkbox; cannot be `?` |
 | `date` | `TEXT` | `String` | Validated as `YYYY-MM-DD` |
-| `datetime` | `TEXT` | `String` | Validated as a date and time |
-| `references` | `<name>_id INTEGER REFERENCES <plural>(id) ON DELETE CASCADE`, indexed | `i64` | `author:references` adds `author_id`; `src/models/author.rs` must exist; validated as "must exist" |
+| `time` | `TEXT` | `String` | Validated as `HH:MM[:SS]` |
+| `datetime` (`date_time`) | `TEXT` | `String` | Validated as a date and time |
+| `uuid` | `TEXT` | `String` | Validated as a hyphenated UUID |
+| `references` | `<name>_id INTEGER REFERENCES <plural>(id) ON DELETE CASCADE` (`SET NULL` when `?`), indexed | `i64` | `author:references` adds `author_id`, `author:references:writer_id` names the column; `src/models/author.rs` must exist; validated as "must exist" |
 | `attachment` | four columns: `<name>_key`, `<name>_filename`, `<name>_content_type` (`TEXT`), `<name>_size` (`INTEGER`) | `ocre::storage::Upload` when received, `Attachment` when stored | A file in R2; cannot be `^`; cannot be named `edit`, `delete` or `new`; must be `?` in JSON APIs; adds the `STORAGE` R2 bucket to `wrangler.toml` |
-| `json` | `TEXT CHECK (json_valid(<name>))` | `ocre::serde_json::Value` | Any JSON value; cannot be `^` |
+| `json` (`jsonb`) | `TEXT CHECK (json_valid(<name>))` | `ocre::serde_json::Value` | Any JSON value; cannot be `^` |
+| `enum:<a>,<b>...` | `TEXT CHECK (<name> IN ('a', 'b'))` | a Rust enum generated in the model (`status` gives `Status`) | A `<select>` in forms; cannot be `^`; not with `--graphql` |
 
 Field names are snake_case, start with a lowercase letter, and must not be reserved: `id`, `created_at` and `updated_at` (every table gets them), Rust keywords (`type`, `match`, `mod`, `ref`, `self`, `use`, `where`, `yield`...), and these SQL keywords: `and`, `asc`, `by`, `case`, `check`, `default`, `desc`, `from`, `group`, `index`, `join`, `key`, `limit`, `not`, `null`, `offset`, `or`, `order`, `primary`, `references`, `select`, `table`, `unique`, `values`. Two fields cannot produce the same column (an attachment `avatar` takes `avatar_key`, `avatar_filename`, `avatar_content_type` and `avatar_size`).
 
@@ -59,17 +147,22 @@ Field errors (shared by every generator that takes fields):
 | ``field `title` has no type`` | ``write fields as `name:type`, e.g. `title:string` `` |
 | ``invalid field name `<name>` `` | ``use snake_case starting with a letter, e.g. `published_at` `` |
 | ``field name `type` is reserved`` | ``` `id`, `created_at` and `updated_at` are generated; Rust and SQL keywords are not allowed. Pick another name, e.g. `kind` for `type` ``` |
-| ``unknown field type `strng` for `title` `` | ``types: string, text, integer, float, boolean, date, datetime, references, attachment, json; add `?` for optional, `^` for unique`` |
+| ``unknown field type `strng` for `title` `` | ``types: string, text, integer (int, small_int, big_int), float (double), decimal, boolean (bool), date, time, datetime (date_time), uuid, references, attachment, json (jsonb), enum:<value>,<value>...; add `?` for optional, `^` for unique`` |
 | ``boolean field `done` cannot be optional`` | ``booleans are true or false (a checkbox); drop the `?` `` |
 | ``attachment `a` cannot be unique`` | ``every stored file gets its own random key already; drop the `^` `` |
 | ``json field `v` cannot be unique`` | ``a unique index compares JSON text, where key order and spacing differ; drop the `^` `` |
+| ``enum `s` has no values`` | ``list them after the type, e.g. `s:enum:draft,published` `` |
+| ``invalid values `A,b` for enum `s` `` | ``list distinct snake_case values after the type, e.g. `status:enum:draft,published` `` |
+| ``enum `s` cannot be unique`` | ``a few values cannot be unique across many rows; drop the `^` `` |
+| ``invalid foreign key column `writer` for `author` `` | ``name the column in snake_case ending in `_id`, e.g. `author:references:writer_id` `` |
+| ``type `string` of `title` takes no `:long` `` | ``only `references` (the foreign key column, e.g. `author:references:writer_id`) and `enum` (its values, e.g. `status:enum:draft,published`) take an argument`` |
 | ``attachment name `edit` clashes with a scaffold route`` | ``` `/<plural>/{id}/edit` is taken; pick another name, e.g. `edit_file` ``` |
 | ``field `a_key` is listed twice`` | ``names must differ, and `<name>:attachment` also takes `<name>_key`, `<name>_filename`, `<name>_content_type` and `<name>_size` `` |
 | `src/models/owner.rs does not exist` (for `owner:references`) | ``generate the referenced model first, e.g. `ocre g model Owner name:string` `` |
 
 ## Model names
 
-`model`, `scaffold` and `api` take a singular model name, in PascalCase, snake_case, kebab-case or with spaces (`BlogPost`, `blog_post`, `blog-post`). It is split into words, which give every other name:
+`model`, `scaffold`, `api` and `resource` take a singular model name, in PascalCase, snake_case, kebab-case or with spaces (`BlogPost`, `blog_post`, `blog-post`). It is split into words, which give every other name:
 
 | Input | Struct | Module and file | Table, plural module, URL segment | Human |
 |---|---|---|---|---|
@@ -247,7 +340,7 @@ Next:
   curl http://localhost:8787/api/posts
 ```
 
-Errors: the field and name errors; `src/<plural>.rs already exists` (or a template) when the pages exist; in an API-only app, `--realtime updates HTML pages; this app is API-only` with the hint ``run `ocre g scaffold` without --realtime; to push JSON to clients, see Realtime in the Ocre README``. See [Controllers, routing, views and htmx](../guides/controllers.md), [File storage](../guides/files.md) and [Realtime](../guides/realtime.md).
+Errors: the field and name errors; `src/<plural>.rs already exists` (or a template) when the pages exist; in an API-only app, `--realtime updates HTML pages; this app is API-only` with the hint ``run `ocre g scaffold` without --realtime; to push JSON to clients, see Realtime in the Ocre README``. See [Controllers and routing](../guides/controllers.md), [Views, helpers and forms](../guides/views.md), [File storage](../guides/files.md) and [Realtime](../guides/realtime.md).
 
 ## ocre g api
 
@@ -300,26 +393,119 @@ Routes of `src/products_api.rs`:
 
 Failed validations answer `422` with `{"error": {"fields": {"title": ["can't be blank"]}}}`. With `--graphql`, the first API creates `src/graphql.rs` (the schema, served by `ocre::graphql::routes` on `GET /graphql` for GraphiQL and `POST /graphql`), turns on Ocre's `graphql` feature and adds the `async-graphql` dependency in `Cargo.toml`; later `--graphql` APIs add their queries and mutations after the `// ocre:graphql-queries` and `// ocre:graphql-mutations` markers.
 
-Errors: the field and name errors; ``attachment `f` must be optional in a JSON API`` with the hint ``JSON cannot carry a file, so create cannot require one: use `f:attachment?`, then upload with `curl -X PUT -F f=@file http://localhost:8787/api/<plural>/1/f` ``; `src/<plural>_api.rs already exists`. See [JSON APIs and GraphQL](../guides/json-apis.md).
+Errors: the field and name errors; ``attachment `f` must be optional in a JSON API`` with the hint ``JSON cannot carry a file, so create cannot require one: use `f:attachment?`, then upload with `curl -X PUT -F f=@file http://localhost:8787/api/<plural>/1/f` ``; with `--graphql`, ``enum `state` is not supported with --graphql yet`` with the hint ``use `state:string` checked with `v.inclusion(...)` in the model, or generate the JSON API without --graphql``; `src/<plural>_api.rs already exists`. See [JSON APIs and GraphQL](../guides/json-apis.md).
+
+## ocre g resource
+
+```text
+ocre g resource <NAME> <FIELDS>... [--api]
+```
+
+| Argument or flag | Default | Meaning |
+|---|---|---|
+| `NAME` | required | Singular model name |
+| `FIELDS` | required, at least one | `name:type` fields |
+| `--api` | off | JSON actions under `/api/<plural>` in a full-stack app (always JSON in an API-only app) |
+
+Lighter than a scaffold: the model (unless `src/models/<model>.rs` exists) and a controller with `index` (paginated list, newest first) and `show` over it, to fill in with the actions you need. In a full-stack app it writes `src/<plural>.rs` with a `paths` module and the pages `templates/<plural>/index.html` and `show.html`; in JSON mode `src/<plural>_api.rs` answers `GET /api/<plural>` and `GET /api/<plural>/{id}`. The module is registered in `src/lib.rs`.
+
+```sh
+ocre g resource Tag name:string^ color:enum:red,green,blue
+```
+
+```text
+  create  migrations/0003_create_tags.sql
+  create  src/models/tag.rs
+  create  src/tags.rs
+  create  templates/tags/index.html
+  create  templates/tags/show.html
+  update  src/models/mod.rs
+  update  src/lib.rs
+
+Next:
+  ocre migrate
+  ocre dev
+  open http://localhost:8787/tags
+```
+
+```json
+{"command":"generate resource","created":["migrations/0003_create_tags.sql","src/models/tag.rs","src/tags.rs","templates/tags/index.html","templates/tags/show.html"],"next":["ocre migrate","ocre dev","open http://localhost:8787/tags"],"ok":true,"updated":["src/models/mod.rs","src/lib.rs"]}
+```
+
+With `--api`, the last next step is `curl http://localhost:8787/api/<plural>`. The files come from the `resource/` templates, which [`ocre g override`](#ocre-g-override) copies for editing. Errors: the field and name errors, and `<path> already exists`.
+
+## ocre g controller
+
+```text
+ocre g controller <NAME> [ACTIONS]... [--api] [--auth]
+```
+
+| Argument or flag | Default | Meaning |
+|---|---|---|
+| `NAME` | required | Controller name, PascalCase or snake_case; a `Controller` suffix is dropped (`PagesController` gives `pages`). Not a Rust keyword, not ending in `api` |
+| `ACTIONS` | `index` | Action names in snake_case, one GET route each; `index` answers at the controller's root path |
+| `--api` | off | JSON actions under `/api/<name>` in a full-stack app (always JSON in an API-only app) |
+| `--auth` | off | Signed-in users only: handlers take `CurrentUser` (HTML) or `BearerUser` (JSON). Needs `src/auth.rs` (or `src/auth_api.rs`) from [`ocre g auth`](#ocre-g-auth) |
+
+Creates a module of GET actions, like `rails generate controller`: in a full-stack app `src/<name>.rs` with one askama view struct per action, a `paths` module (`paths::about()`), and a page per action, `templates/<name>/<action>.html`, extending `layout.html`; in JSON mode `src/<name>_api.rs` with one `ApiResult<Json<...>>` handler per action. The module is registered in `src/lib.rs`.
+
+```sh
+ocre g controller Pages about contact
+```
+
+```text
+  create  src/pages.rs
+  create  templates/pages/about.html
+  create  templates/pages/contact.html
+  update  src/lib.rs
+
+Next:
+  ocre dev
+  open http://localhost:8787/pages/about
+```
+
+```json
+{"command":"generate controller","created":["src/pages.rs","templates/pages/about.html","templates/pages/contact.html"],"next":["ocre dev","open http://localhost:8787/pages/about"],"ok":true,"updated":["src/lib.rs"]}
+```
+
+`ocre g controller Metrics summary --api` creates `src/metrics_api.rs` with `GET /api/metrics/summary`, answering `{"message": "Edit summary in src/metrics_api.rs"}` until you change it; its next step is `curl http://localhost:8787/api/metrics/summary`. The files come from the `controller/` templates.
+
+Errors:
+
+| Error | Hint |
+|---|---|
+| ``invalid controller name `type` `` | ``use a name starting with a letter that is not a Rust keyword and does not end in `api`, e.g. `Pages` or `Dashboard` `` |
+| ``invalid action name `type` `` | ``use snake_case starting with a letter, not a Rust keyword nor `routes`/`paths`, e.g. `about` or `contact_us` `` |
+| ``action `about` is listed twice`` | `list each action once` |
+| ``--auth needs src/auth.rs, which `ocre g auth` creates`` (`src/auth_api.rs` in JSON mode) | ``run `ocre g auth` and `ocre migrate` first, or generate the controller without --auth`` |
+| `src/<name>.rs already exists` | the generic hint (`--skip`, `--force`) |
+
+See [Controllers, routing, views and htmx](../guides/controllers.md).
 
 ## ocre g auth
 
 ```text
-ocre g auth
+ocre g auth [--db-sessions] [--oauth <provider,...>]
 ```
 
-No arguments. Generates authentication into the app, like Rails 8's authentication generator, so every rule is visible and editable there. It runs once per app.
+No positional arguments. Generates authentication into the app, like Rails 8's authentication generator, so every rule is visible and editable there. It runs once per app.
 
-In a full-stack app:
+| Option | Effect |
+|---|---|
+| `--db-sessions` | Tracks each sign-in in D1 (`user_sessions`: IP address, browser, last activity, expiry); `/account/sessions` lists the signed-in devices and signs them out. Costs one D1 read per signed-in request |
+| `--oauth github,google` | "Continue with GitHub / Google" buttons on the login page (OAuth 2.0 code flow with PKCE, `ocre::oauth`). Accepts `github` and `google`, comma-separated or repeated |
+
+In a new full-stack app:
 
 ```sh
 ocre g auth
 ```
 
 ```text
-  create  migrations/0003_create_users.sql
-  create  migrations/0004_create_auth_tokens.sql
-  create  migrations/0005_create_api_keys.sql
+  create  migrations/0001_create_users.sql
+  create  migrations/0002_create_auth_tokens.sql
+  create  migrations/0003_create_api_keys.sql
+  create  src/models/mod.rs
   create  src/models/user.rs
   create  src/models/api_key.rs
   create  src/models/auth_token.rs
@@ -328,6 +514,7 @@ ocre g auth
   create  src/registrations.rs
   create  src/sessions.rs
   create  src/passwords.rs
+  create  src/confirmations.rs
   create  templates/auth/signup.html
   create  templates/auth/login.html
   create  templates/auth/account.html
@@ -335,8 +522,9 @@ ocre g auth
   create  templates/auth/magic_link_show.html
   create  templates/auth/password_new.html
   create  templates/auth/password_edit.html
-  update  src/models/mod.rs
+  create  templates/auth/confirmation_show.html
   update  src/lib.rs
+  update  wrangler.toml
 
 Next:
   ocre migrate
@@ -345,22 +533,38 @@ Next:
 ```
 
 ```json
-{"command":"generate auth","created":["migrations/0003_create_users.sql","migrations/0004_create_auth_tokens.sql","migrations/0005_create_api_keys.sql","src/models/user.rs","src/models/api_key.rs","src/models/auth_token.rs","src/auth_api.rs","src/auth.rs","src/registrations.rs","src/sessions.rs","src/passwords.rs","templates/auth/signup.html","templates/auth/login.html","templates/auth/account.html","templates/auth/magic_link_new.html","templates/auth/magic_link_show.html","templates/auth/password_new.html","templates/auth/password_edit.html"],"next":["ocre migrate","ocre dev","open http://localhost:8787/signup"],"ok":true,"updated":["src/models/mod.rs","src/lib.rs"]}
+{"command":"generate auth","created":["migrations/0001_create_users.sql","migrations/0002_create_auth_tokens.sql","migrations/0003_create_api_keys.sql","src/models/mod.rs","src/models/user.rs","src/models/api_key.rs","src/models/auth_token.rs","src/auth_api.rs","src/auth.rs","src/registrations.rs","src/sessions.rs","src/passwords.rs","src/confirmations.rs","templates/auth/signup.html","templates/auth/login.html","templates/auth/account.html","templates/auth/magic_link_new.html","templates/auth/magic_link_show.html","templates/auth/password_new.html","templates/auth/password_edit.html","templates/auth/confirmation_show.html"],"next":["ocre migrate","ocre dev","open http://localhost:8787/signup"],"ok":true,"updated":["src/lib.rs","wrangler.toml"]}
 ```
+
+In an app that already has models, `src/models/mod.rs` is updated instead of created, and the migrations take the next numbers.
 
 | File | Contents |
 |---|---|
-| `src/models/user.rs`, `api_key.rs`, `auth_token.rs` | Users (email and password), API keys, and single-use tokens for password reset and magic links (full-stack only) |
-| `src/auth.rs` | The `CurrentUser` and `OptionalUser` extractors and sign-in/sign-out helpers (full-stack only) |
-| `src/registrations.rs` | `GET`/`POST /signup`, `GET /account` |
-| `src/sessions.rs` | `GET`/`POST /login`, `POST /logout`, magic-link login (`/magic_link`, `/magic_link/{token}`) |
+| `src/models/user.rs`, `api_key.rs`, `auth_token.rs` | Users (email, password digest, `confirmed_at`), API keys, and single-use emailed tokens for password reset, magic links and email confirmation (full-stack only) |
+| `src/auth.rs` | The `CurrentUser`, `ConfirmedUser` and `OptionalUser` extractors, `sign_in`/`sign_out`, `SESSION_SECONDS` (two weeks) and `OAUTH_PROVIDERS` (full-stack only) |
+| `src/registrations.rs` | `GET`/`POST /signup`, `GET /account`, `POST /account/delete` |
+| `src/sessions.rs` | `GET`/`POST /login` ("remember me"), `POST /logout`, magic-link login (`/magic_link`, `/magic_link/{token}`) |
 | `src/passwords.rs` | Password reset: `/passwords/new`, `POST /passwords`, `/passwords/{token}` |
-| `src/auth_api.rs` | In every app: the `BearerUser` extractor, `POST /api/auth/signup`, `POST /api/auth/token` (JWT), `GET /api/auth/me`, and API keys (`GET`/`POST /api/auth/keys`, `DELETE /api/auth/keys/{id}`) |
+| `src/confirmations.rs` | Email confirmation: `POST /confirmations` (send a new link), `/confirmations/{token}` |
+| `src/auth_api.rs` | In every app: the `BearerUser` extractor, `throttle`, `POST /api/auth/signup`, `POST /api/auth/token` (JWT), `GET`/`DELETE /api/auth/me`, and API keys (`GET`/`POST /api/auth/keys`, `DELETE /api/auth/keys/{id}`) |
 | `templates/auth/*.html` | The pages (full-stack only) |
+| `wrangler.toml` | The `AUTH_RATE_LIMITER` `[[ratelimits]]` binding (10 requests a minute, `namespace_id` derived from the app name), used by `throttle` on every route that checks a password or sends an email; not added again when present |
 
-In an API-only app, only the JSON part is generated: `create_users` and `create_api_keys` migrations, the `user` and `api_key` models and `src/auth_api.rs`; the last next step is a `curl -X POST http://localhost:8787/api/auth/signup ...` command.
+`ocre g auth --db-sessions --oauth github,google` also creates `migrations/*_create_user_sessions.sql`, `migrations/*_create_identities.sql`, `src/models/user_session.rs`, `src/models/identity.rs`, `src/user_sessions.rs` (`GET /account/sessions`, `POST /account/sessions/{id}/delete`, `POST /account/sessions/others/delete`), `src/oauth.rs` (`POST /auth/{provider}`, `GET /auth/{provider}/callback`) and `templates/auth/user_sessions.html`, links the sessions page from `account.html`, and appends commented `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET` (and `GOOGLE_...`) lines to `.dev.vars`. One extra next step per provider:
 
-Error: `this app already has a User model or a users table` when `src/models/user.rs` or a `*_create_users.sql` migration exists, with the hint ``` `ocre g auth` creates both and runs once per app; to start over, remove src/models/user.rs and the create_users migration ```. See [Authentication](../guides/authentication.md).
+```text
+  register an OAuth app with github (callback https://<your host>/auth/github/callback), put GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET in .dev.vars, then `npx wrangler secret put GITHUB_CLIENT_ID` and `npx wrangler secret put GITHUB_CLIENT_SECRET`
+```
+
+In an API-only app, only the JSON part is generated: `create_users` and `create_api_keys` migrations, the `user` and `api_key` models, `src/auth_api.rs` and the rate limiter in `wrangler.toml`; the last next step is a `curl -X POST http://localhost:8787/api/auth/signup ...` command.
+
+Errors:
+
+- `this app already has a User model or a users table` when `src/models/user.rs` or a `*_create_users.sql` migration exists, with the hint ``` `ocre g auth` creates both and runs once per app; to start over, remove src/models/user.rs and the create_users migration ```.
+- ``unknown OAuth provider `twitter` `` with the hint `--oauth accepts github, google (comma-separated)`.
+- `--db-sessions and --oauth need HTML pages, and this app is API-only`, with the hint ``run `ocre g auth` without them: JSON clients use JWTs and API keys, which `DELETE /api/auth/keys/{id}` revokes``.
+
+See [Authentication](../guides/authentication.md).
 
 ## ocre g migration
 
@@ -371,7 +575,7 @@ ocre g migration <NAME> [FIELDS]...
 | Argument | Required | Meaning |
 |---|---|---|
 | `NAME` | yes | snake_case migration name |
-| `FIELDS` | no | Columns as `name:type` |
+| `FIELDS` | no | Columns as `name:type`, or column names for the index names below |
 
 Creates `migrations/NNNN_<name>.sql`, starting with `-- Migration: <name>` and a comment reminding that applied migrations must not be edited. The SQL is inferred from the name, like Rails:
 
@@ -379,10 +583,19 @@ Creates `migrations/NNNN_<name>.sql`, starting with `-- Migration: <name>` and a
 |---|---|
 | `create_<table>` | `CREATE TABLE <table>` with the fields, `id`, `created_at`, `updated_at` and indexes, as `ocre g model` writes it |
 | `add_<anything>_to_<table>` | One `ALTER TABLE <table> ADD COLUMN` per column, then the indexes. Fields are required |
-| `remove_<column>_from_<table>` | `ALTER TABLE <table> DROP COLUMN <column>`; with fields, one `DROP COLUMN` per field column instead |
+| `remove_<column>_from_<table>` | `DROP INDEX IF EXISTS index_<table>_on_<column>` (SQLite refuses to drop an indexed column), then `ALTER TABLE <table> DROP COLUMN <column>`; with fields, one `DROP COLUMN` per field column instead, after dropping the indexes of the unique and reference fields |
+| `add_index_to_<table> <column>...` | `CREATE INDEX index_<table>_on_<a>_and_<b> ON <table> (<a>, <b>)`, columns in the order given (names only, no types) |
+| `add_unique_index_to_<table> <column>...` | The same with `CREATE UNIQUE INDEX` |
+| `remove_index_from_<table> <column>...` | `DROP INDEX IF EXISTS index_<table>_on_<a>_and_<b>` |
+| `rename_<column>_to_<new>_in_<table>` | `ALTER TABLE <table> RENAME COLUMN <column> TO <new>` |
+| `rename_<table>_to_<new>` | `ALTER TABLE <table> RENAME TO <new>` |
+| `drop_<table>` | `DROP TABLE <table>` |
+| `rebuild_<table>` | SQLite's table rebuild, copied from the table's definition in `db/schema.sql` (written by [`ocre db schema`](cli.md#ocre-db-schema)): create `<table>_new`, copy the rows, drop the old table, rename, recreate its indexes, between `PRAGMA defer_foreign_keys` lines. Edit its `CREATE TABLE` to change what `ALTER TABLE` cannot (a column's type, `NOT NULL`, `DEFAULT`, `CHECK`, `REFERENCES`, an enum's values) |
 | anything else, no fields | An empty migration to fill in (data changes, custom SQL) |
 
-Existing rows need a value for a new `NOT NULL` column, so `add_..._to_...` adds `DEFAULT ''` to required text, date and datetime columns, `DEFAULT 0` to required numbers, `DEFAULT '{}'` to required `json` columns (optional `json?` columns stay `NULL`), and booleans already default to 0. References and attachments must be optional there.
+`rename_...`, `drop_...` and `rebuild_...` take no fields. After them, and after the field forms, the next steps remind you to update the model; the index forms only print `ocre migrate`.
+
+Existing rows need a value for a new `NOT NULL` column, so `add_..._to_...` adds `DEFAULT ''` to required text, date, time, datetime, decimal and uuid columns, `DEFAULT 0` to required numbers, `DEFAULT '{}'` to required `json` columns, the first value to required `enum` columns (optional columns stay `NULL`), and booleans already default to 0. References and attachments must be optional there.
 
 ```sh
 ocre g migration add_slug_to_posts slug:string^
@@ -411,7 +624,53 @@ ocre g migration add_slug_to_posts slug:string^ --json
 {"command":"generate migration","created":["migrations/0011_add_slug_to_posts.sql"],"next":["ocre migrate","update the model in src/models/ to match the new columns"],"ok":true}
 ```
 
-`ocre g migration remove_slug_from_posts` writes `ALTER TABLE posts DROP COLUMN slug;`, and `ocre g migration backfill_slugs` an empty migration; without fields, the only next step is `ocre migrate`. A migration does not change the model: add or remove the fields in `src/models/<model>.rs` (the row struct, `New...`, `...Changes`, and the SQL of `create` and `update`) yourself.
+`ocre g migration remove_slug_from_posts` writes `DROP INDEX IF EXISTS index_posts_on_slug;` then `ALTER TABLE posts DROP COLUMN slug;`, and `ocre g migration backfill_slugs` an empty migration; without fields, the only next step is `ocre migrate`. A migration does not change the model: add or remove the fields in `src/models/<model>.rs` (the row struct, `New...`, `...Changes`, and the SQL of `create` and `update`) yourself.
+
+Index and rename migrations:
+
+```sh
+ocre g migration add_index_to_books pages released_on
+ocre g migration rename_summary_to_blurb_in_books
+```
+
+```sql
+-- Migration: add_index_to_books
+-- Applied once, in file-name order. Never edit a migration after it has been applied.
+CREATE INDEX index_books_on_pages_and_released_on ON books (pages, released_on);
+```
+
+```sql
+-- Migration: rename_summary_to_blurb_in_books
+-- Applied once, in file-name order. Never edit a migration after it has been applied.
+ALTER TABLE books RENAME COLUMN summary TO blurb;
+```
+
+A table rebuild, after `ocre migrate` and `ocre db schema`:
+
+```sh
+ocre g migration rebuild_posts
+```
+
+```sql
+-- Migration: rebuild_posts
+-- Applied once, in file-name order. Never edit a migration after it has been applied.
+-- Rebuilds `posts` to change what ALTER TABLE cannot (a column's type, NOT NULL,
+-- DEFAULT, CHECK or REFERENCES): edit the CREATE TABLE below, and keep both
+-- column lists of the INSERT in step with it.
+PRAGMA defer_foreign_keys = true;
+CREATE TABLE posts_new (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    published INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+INSERT INTO posts_new (id, title, body, published, created_at, updated_at) SELECT id, title, body, published, created_at, updated_at FROM posts;
+DROP TABLE posts;
+ALTER TABLE posts_new RENAME TO posts;
+PRAGMA defer_foreign_keys = false;
+```
 
 Errors:
 
@@ -422,6 +681,12 @@ Errors:
 | `add_..._to_... needs the columns to add` | ``list them like the model fields, e.g. `ocre g migration add_slug_to_posts slug:string^` `` |
 | ``` `owner_id` must be optional when added to an existing table ``` | ``SQLite adds reference columns as NULL for existing rows: use `name:references?` `` |
 | ``` `<name>` must be optional when added to an existing table ``` (attachment) | ``existing rows have no file: use `name:attachment?` `` |
+| ``` `add_index_to_posts` needs the indexed column names ``` | ``list them in index order, without types, e.g. `ocre g migration add_index_to_posts author_id created_at` `` |
+| ``` `drop_tags` takes no fields ``` | ``the name says it all, e.g. `rename_title_to_headline_in_posts`, `drop_tags`, `rebuild_posts` `` |
+| ``cannot tell what `rename_title` renames`` | ``name it `rename_<column>_to_<new>_in_<table>` or `rename_<table>_to_<new>` `` |
+| `db/schema.sql not found` (`rebuild_...`) | ``run `ocre migrate` then `ocre db schema`: the rebuild copies the table's current definition`` |
+| ``table `posts` is not in db/schema.sql`` | ``run `ocre migrate` then `ocre db schema` to refresh it, and check the table name`` |
+| ``` `comments` references `posts`: rebuilding it would delete or clear their rows ``` | ``D1 enforces foreign keys, so dropping `posts` runs ON DELETE on `comments`; add a new column and backfill it instead`` |
 
 ## ocre g mailer
 
@@ -434,7 +699,7 @@ ocre g mailer <NAME> <ACTIONS>...
 | `NAME` | yes | Mailer name, PascalCase or snake_case; a `Mailer` suffix is dropped (`UserMailer`, `user_mailer` and `User` all give `user`) |
 | `ACTIONS` | yes, at least one | Email names in snake_case (`welcome`, `password_reset`), one function each |
 
-Creates `src/mailers/<name>.rs` with one function per action, `pub fn welcome(to: &str) -> Result<Email>`, building an `ocre::mail::Email` whose subject is the humanized action (`Password reset`). In a full-stack app, each function renders two askama templates, `templates/mailers/<name>/<action>.txt` and `.html`; in an API-only app, the text is built with `format!` and there are no templates. The first mailer creates `src/mailers/mod.rs` and adds `mod mailers;` to `src/lib.rs`.
+Creates `src/mailers/<name>.rs` with one function per action, `pub fn welcome(to: &str) -> Result<Email>`, building an `ocre::mail::Email` whose subject is the humanized action (`Password reset`) and passing it through `defaults` of `src/mailers/mod.rs`. In a full-stack app, each function renders two askama templates, `templates/mailers/<name>/<action>.txt` and `.html`, which extend `templates/mailers/layout.txt` and `layout.html` (created once, unless they exist); in an API-only app, the text is built with `format!` and there are no templates. Each action gets a preview in `PREVIEWS` of `src/mailers/mod.rs`, shown at `/ocre/dev/mailers` in `ocre dev`. The first mailer creates `src/mailers/mod.rs` (with `defaults` and `PREVIEWS`; keep the `// ocre:mailers` and `// ocre:mailer-previews` markers) and adds `mod mailers;` and `.merge(ocre::mail::dev_routes(mailers::PREVIEWS))` to `src/lib.rs` (replacing the `dev_routes(&[])` that `ocre g mailbox` adds).
 
 ```sh
 ocre g mailer User welcome password_reset
@@ -446,19 +711,23 @@ ocre g mailer User welcome password_reset
   create  templates/mailers/user/welcome.html
   create  templates/mailers/user/password_reset.txt
   create  templates/mailers/user/password_reset.html
+  create  templates/mailers/layout.html
+  create  templates/mailers/layout.txt
   create  src/mailers/mod.rs
   update  src/lib.rs
 
 Next:
   send it from a handler: ocre::mail::send(&ctx, mailers::user::welcome(&address)?).await?
-  ocre dev (MAIL_ADAPTER=log in .dev.vars prints each email instead of sending it)
+  ocre dev, then open http://localhost:8787/ocre/dev/mailers to preview it (MAIL_ADAPTER=log in .dev.vars prints each email sent instead of sending it)
 ```
 
 ```json
-{"command":"generate mailer","created":["src/mailers/user.rs","templates/mailers/user/welcome.txt","templates/mailers/user/welcome.html","templates/mailers/user/password_reset.txt","templates/mailers/user/password_reset.html","src/mailers/mod.rs"],"next":["send it from a handler: ocre::mail::send(&ctx, mailers::user::welcome(&address)?).await?","ocre dev (MAIL_ADAPTER=log in .dev.vars prints each email instead of sending it)"],"ok":true,"updated":["src/lib.rs"]}
+{"command":"generate mailer","created":["src/mailers/user.rs","templates/mailers/user/welcome.txt","templates/mailers/user/welcome.html","templates/mailers/user/password_reset.txt","templates/mailers/user/password_reset.html","templates/mailers/layout.html","templates/mailers/layout.txt","src/mailers/mod.rs"],"next":["send it from a handler: ocre::mail::send(&ctx, mailers::user::welcome(&address)?).await?","ocre dev, then open http://localhost:8787/ocre/dev/mailers to preview it (MAIL_ADAPTER=log in .dev.vars prints each email sent instead of sending it)"],"ok":true,"updated":["src/lib.rs"]}
 ```
 
-Errors: ``invalid mailer name `type` `` (hint: ``use a name starting with a letter that is not a Rust keyword, e.g. `User` or `Billing` ``); ``invalid action name `select` `` (hint: ``use snake_case starting with a letter, not a Rust or SQL keyword, e.g. `welcome` or `password_reset` ``); ``action `receipt` is listed twice`` (hint: `list each action once`); `src/mailers/<name>.rs already exists`. Names are checked against the same reserved words as [fields](#fields). See [Email](../guides/email.md).
+A `src/mailers/mod.rs` written by an older Ocre (without `defaults` or `PREVIEWS`) keeps working: the new mailer does not call `defaults`, and no preview is added.
+
+Errors: ``invalid mailer name `type` `` (hint: ``use a name starting with a letter that is not a Rust keyword, e.g. `User` or `Billing` ``); ``invalid action name `select` `` (hint: ``use snake_case starting with a letter, not a Rust or SQL keyword, e.g. `welcome` or `password_reset` ``); ``action `receipt` is listed twice`` (hint: `list each action once`); `src/mailers/<name>.rs already exists`; ``src/lib.rs is missing the `// ocre:routes` marker`` (first mailer with previews). Names are checked against the same reserved words as [fields](#fields). See [Email](../guides/email.md).
 
 ## ocre g mailbox
 
@@ -466,7 +735,7 @@ Errors: ``invalid mailer name `type` `` (hint: ``use a name starting with a lett
 ocre g mailbox
 ```
 
-No arguments. Creates `src/mailbox.rs`, the handler of email that Cloudflare Email Routing sends to the Worker (`pub async fn receive(ctx, email: InboundEmail) -> Result<()>`), and appends the Worker's `email` event to `src/lib.rs`, which calls `ocre::mail::receive(message, env, mailbox::receive)`. A Worker has one email entry point, so an app has one mailbox, which routes by `email.to()` itself.
+No arguments. Creates `src/mailbox.rs`, the handler of email that Cloudflare Email Routing sends to the Worker (`pub async fn receive(ctx, email: InboundEmail) -> Result<()>`), and appends the Worker's `email` event to `src/lib.rs`, which calls `ocre::mail::receive(message, env, mailbox::receive)`. Unless a mailer added them, it also merges the development pages (`.merge(ocre::mail::dev_routes(&[]))`), whose `/ocre/dev/mailbox` form delivers test email in `ocre dev`. A Worker has one email entry point, so an app has one mailbox, which routes by `email.to()` itself.
 
 ```sh
 ocre g mailbox
@@ -478,12 +747,13 @@ ocre g mailbox
 
 Next:
   ocre dev
-  curl 'http://localhost:8787/cdn-cgi/local/email?from=ada@example.com&to=support@example.com' --data-binary @message.eml
+  open http://localhost:8787/ocre/dev/mailbox to deliver a test email
+  or: curl 'http://localhost:8787/cdn-cgi/local/email?from=ada@example.com&to=support@example.com' --data-binary @message.eml
   route addresses to the Worker: Cloudflare dashboard > Email Routing > Routing rules > Send to a Worker
 ```
 
 ```json
-{"command":"generate mailbox","created":["src/mailbox.rs"],"next":["ocre dev","curl 'http://localhost:8787/cdn-cgi/local/email?from=ada@example.com&to=support@example.com' --data-binary @message.eml","route addresses to the Worker: Cloudflare dashboard > Email Routing > Routing rules > Send to a Worker"],"ok":true,"updated":["src/lib.rs"]}
+{"command":"generate mailbox","created":["src/mailbox.rs"],"next":["ocre dev","open http://localhost:8787/ocre/dev/mailbox to deliver a test email","or: curl 'http://localhost:8787/cdn-cgi/local/email?from=ada@example.com&to=support@example.com' --data-binary @message.eml","route addresses to the Worker: Cloudflare dashboard > Email Routing > Routing rules > Send to a Worker"],"ok":true,"updated":["src/lib.rs"]}
 ```
 
 Errors: `src/mailbox.rs already exists`; `src/lib.rs already handles the `email` event` with the hint ``a Worker has one email entry point: call `ocre::mail::receive(message, env, mailbox::receive)` from it``. See [Email](../guides/email.md).
@@ -491,15 +761,16 @@ Errors: `src/mailbox.rs already exists`; `src/lib.rs already handles the `email`
 ## ocre g job
 
 ```text
-ocre g job <NAME> [FIELDS]...
+ocre g job <NAME> [FIELDS]... [--queue <QUEUE>]
 ```
 
 | Argument | Required | Meaning |
 |---|---|---|
 | `NAME` | yes | Job name, PascalCase or snake_case, a verb phrase; a `Job` suffix is dropped (`ImportCsvJob` gives `import_csv` and `ImportCsv`) |
 | `FIELDS` | no | The job's arguments as `name:type`; no `attachment`, no `^` |
+| `--queue <QUEUE>` | no | The queue the job is sent to, lowercase letters, digits and `-` (default `default`): its own Cloudflare queue and consumer, for jobs that must not wait behind others |
 
-Creates `src/jobs/<name>.rs`: a struct holding the arguments (serialized as JSON in the queue message, 128 KB at most) with an `async fn perform(self, ctx: &Ctx) -> Result<()>` to fill in. It adds a variant to the `Job` enum and an arm to the `perform` match in `src/jobs/mod.rs`. The first job creates `src/jobs/mod.rs`, adds `mod jobs;` and the Worker's `queue` event to `src/lib.rs`, and, unless a `JOBS` producer exists, appends to `wrangler.toml` the `JOBS` producer on the queue `<app>-jobs` and its consumer (batches of up to 10 messages, 5 retries, dead-letter queue `<app>-jobs-failed`).
+Creates `src/jobs/<name>.rs`: a struct holding the arguments (serialized as JSON in the queue message, 128 KB at most) with `fn perform_later(self, ctx)`, which sends it to its queue, and an `async fn perform(self, ctx: &Ctx) -> Result<()>` to fill in. It adds a variant to the `Job` enum and an arm to the `perform` match in `src/jobs/mod.rs`. The first job creates `src/jobs/mod.rs`, adds `mod jobs;` and the Worker's `queue` event to `src/lib.rs`, and, unless a `JOBS` producer exists, appends to `wrangler.toml` the `JOBS` producer on the queue `<app>-jobs` and its consumer (batches of up to 10 messages, 5 retries, dead-letter queue `<app>-jobs-failed`). `--queue urgent` also appends, unless a `JOBS_URGENT` producer exists, the producer `JOBS_URGENT` on `<app>-jobs-urgent` and its consumer (`max_batch_timeout = 1`, dead-letter queue `<app>-jobs-urgent-failed`).
 
 ```sh
 ocre g job SendWelcome user_id:integer
@@ -512,16 +783,16 @@ ocre g job SendWelcome user_id:integer
   update  wrangler.toml
 
 Next:
-  enqueue it from a handler: ocre::jobs::enqueue(&ctx, &jobs::Job::SendWelcome(jobs::SendWelcome { user_id })).await?
+  enqueue it from a handler: jobs::SendWelcome { user_id }.perform_later(&ctx).await?
   ocre dev (jobs run locally; look for `[ocre jobs]` lines in the output)
   ocre deploy creates the queue blog-jobs and its dead-letter queue
 ```
 
 ```json
-{"command":"generate job","created":["src/jobs/send_welcome.rs","src/jobs/mod.rs"],"next":["enqueue it from a handler: ocre::jobs::enqueue(&ctx, &jobs::Job::SendWelcome(jobs::SendWelcome { user_id })).await?","ocre dev (jobs run locally; look for `[ocre jobs]` lines in the output)","ocre deploy creates the queue blog-jobs and its dead-letter queue"],"ok":true,"updated":["src/lib.rs","wrangler.toml"]}
+{"command":"generate job","created":["src/jobs/send_welcome.rs","src/jobs/mod.rs"],"next":["enqueue it from a handler: jobs::SendWelcome { user_id }.perform_later(&ctx).await?","ocre dev (jobs run locally; look for `[ocre jobs]` lines in the output)","ocre deploy creates the queue blog-jobs and its dead-letter queue"],"ok":true,"updated":["src/lib.rs","wrangler.toml"]}
 ```
 
-Later jobs only create their file and update `src/jobs/mod.rs`; the third next step is only printed by the first job. Free plan (September 2026): 10,000 Queues operations a day, a job costing 3 (write, read, delete), and 10 ms of CPU per batch ([Queues pricing](https://developers.cloudflare.com/queues/platform/pricing/), [Workers limits](https://developers.cloudflare.com/workers/platform/limits/#cpu-time)).
+Later jobs only create their file and update `src/jobs/mod.rs`; a `deploy creates the queue` step is printed for each queue a run adds to `wrangler.toml`. Free plan (September 2026): 10,000 Queues operations a day, a job costing 3 (write, read, delete), and 10 ms of CPU per batch ([Queues pricing](https://developers.cloudflare.com/queues/platform/pricing/), [Workers limits](https://developers.cloudflare.com/workers/platform/limits/#cpu-time)).
 
 Errors:
 
@@ -531,6 +802,7 @@ Errors:
 | ``job field `f` cannot be an attachment`` | ``files do not fit in a queue message (128 KB): store the file first and pass its record id, e.g. `post_id:integer` `` |
 | ``job field `f` cannot be unique`` | ``` `^` adds a unique index to a table column; jobs have no table: drop the `^` ``` |
 | `src/jobs/<name>.rs already exists` | the generic hint |
+| ``invalid queue name `Urgent` `` | ``use lowercase letters, digits and `-`, e.g. `--queue urgent` `` |
 | ``src/lib.rs already handles the `queue` event`` (first job only) | ``a Worker has one queue entry point: call `ocre::jobs::consume(batch, env, jobs::perform)` from it and create src/jobs/mod.rs by hand`` |
 
 See [Background jobs and schedules](../guides/jobs.md).
@@ -538,18 +810,18 @@ See [Background jobs and schedules](../guides/jobs.md).
 ## ocre g schedule
 
 ```text
-ocre g schedule <NAME> <CRON>
+ocre g schedule <NAME> <WHEN>
 ```
 
 | Argument | Required | Meaning |
 |---|---|---|
 | `NAME` | yes | Task name in snake_case (`HourlyPing` is accepted and becomes `hourly_ping`); not a reserved word |
-| `CRON` | yes | Cron expression, five fields in UTC (minute, hour, day of month, month, day of week), quoted for the shell: `"0 3 * * *"` |
+| `WHEN` | yes | When, in UTC, quoted for the shell: plain English (`"every 15 minutes"`, `"every day at 3am"`, `"every monday at 9:30"`, `"midnight on tuesdays"`, `"every weekday at 18:00"`, `"monthly"`) or a cron expression of five fields (minute, hour, day of month, month, day of week): `"0 3 * * *"` |
 
-Creates `src/schedules/<name>.rs` with `pub async fn run(ctx: &Ctx) -> Result<()>` to fill in, adds the expression to `[triggers] crons` in `wrangler.toml` (creating the table if needed), and adds `"<cron>" => <name>::run(&ctx).await,` to the dispatch `match` of `src/schedules/mod.rs`. The first schedule creates `src/schedules/mod.rs` and adds `mod schedules;` and the Worker's `scheduled` event to `src/lib.rs`. The CLI checks the expression's shape (five fields of letters, digits and `*,-/#`), not its values; Cloudflare validates it at deploy ([syntax](https://developers.cloudflare.com/workers/configuration/cron-triggers/#supported-cron-expressions)).
+Creates `src/schedules/<name>.rs` with `pub async fn run(ctx: &Ctx) -> Result<()>` to fill in (its comment keeps the English phrase), adds the cron expression to `[triggers] crons` in `wrangler.toml` (creating the table if needed), and adds `"<cron>" => <name>::run(&ctx).await,` to the dispatch `match` of `src/schedules/mod.rs`. The first schedule creates `src/schedules/mod.rs` and adds `mod schedules;` and the Worker's `scheduled` event to `src/lib.rs`. English phrases are converted to cron (the full list is in [When: English or cron](../guides/jobs.md#when-english-or-cron)); for a cron expression the CLI checks its shape (five fields of letters, digits and `*,-/#`), not its values; Cloudflare validates it at deploy ([syntax](https://developers.cloudflare.com/workers/configuration/cron-triggers/#supported-cron-expressions)).
 
 ```sh
-ocre g schedule nightly_cleanup "0 3 * * *"
+ocre g schedule nightly_cleanup "every day at 3am"
 ```
 
 ```text
@@ -559,12 +831,12 @@ ocre g schedule nightly_cleanup "0 3 * * *"
   update  src/lib.rs
 
 Next:
-  ocre dev, then: curl 'http://localhost:8787/cdn-cgi/local/scheduled?cron=0+3+*+*+*'
-  ocre deploy (Cron Triggers only fire on the deployed Worker, in UTC)
+  ocre dev, then: ocre schedules run nightly_cleanup
+  ocre deploy (Cron Triggers only fire on the deployed Worker; this one runs at `0 3 * * *`, UTC)
 ```
 
 ```json
-{"command":"generate schedule","created":["src/schedules/nightly_cleanup.rs","src/schedules/mod.rs"],"next":["ocre dev, then: curl 'http://localhost:8787/cdn-cgi/local/scheduled?cron=0+3+*+*+*'","ocre deploy (Cron Triggers only fire on the deployed Worker, in UTC)"],"ok":true,"updated":["wrangler.toml","src/lib.rs"]}
+{"command":"generate schedule","created":["src/schedules/nightly_cleanup.rs","src/schedules/mod.rs"],"next":["ocre dev, then: ocre schedules run nightly_cleanup","ocre deploy (Cron Triggers only fire on the deployed Worker; this one runs at `0 3 * * *`, UTC)"],"ok":true,"updated":["wrangler.toml","src/lib.rs"]}
 ```
 
 Free plan (September 2026): 5 Cron Triggers per account and 10 ms of CPU per run ([Workers limits](https://developers.cloudflare.com/workers/platform/limits/)). When the app's `[triggers] crons` holds more than 5 expressions, the generator adds a next step: `this app now has 6 crons; the free plan allows 5 per account: run several tasks from one cron`.
@@ -574,7 +846,7 @@ Errors:
 | Error | Hint |
 |---|---|
 | ``invalid schedule name `<name>` `` | ``use snake_case starting with a letter, not a Rust keyword, e.g. `nightly_cleanup` `` |
-| ``invalid cron expression `0 3 * *` `` | `quote five fields, in UTC: minute hour day-of-month month day-of-week, e.g. "0 3 * * *" (03:00 daily), "*/15 * * * *" (every 15 minutes) or "0 9 * * MON"` |
+| ``invalid schedule `every 15 seconds` `` | The accepted English phrases and the cron form, and that Cron Triggers run at most once a minute |
 | ``cron `0 3 * * *` is already in [triggers] crons`` | `one task per cron: call the new work from the existing task in src/schedules/, or pick another time (e.g. one minute later)` |
 | ``wrangler.toml defines `triggers` in a form Ocre cannot edit`` | ``write it as a table: `[triggers]` on its own line, then `crons = ["0 3 * * *"]` `` |
 | ``src/lib.rs already handles the `scheduled` event`` (first schedule only) | ``a Worker has one scheduled entry point: call `ocre::jobs::cron(event, env, schedules::run)` from it and create src/schedules/mod.rs by hand`` |
@@ -650,6 +922,133 @@ Errors:
 | ``src/lib.rs is missing the `// ocre:routes` marker`` (first run) | ``put `// ocre:routes` on its own line at the end of the `Router::new()` chain in routes()`` |
 
 See [Translations](../guides/i18n.md).
+
+## ocre g override
+
+```text
+ocre g override [PATHS]...
+```
+
+Copies built-in generator templates into `.ocre/templates/`, where they replace the built-in ones for every later run until you delete them (Loco's `generate override`, Rails' `lib/templates`). A path names one template (`controller/view.html`) or every template of a generator (`controller`). Without paths, it lists the templates; overridden ones are marked `(overridden in .ocre/templates/)`.
+
+```sh
+ocre g override
+```
+
+```text
+  controller/api.rs
+  controller/html.rs
+  controller/view.html
+  resource/api.rs
+  resource/html.rs
+  resource/index.html
+  resource/show.html
+  scaffold/_form.html
+  scaffold/_row.html
+  scaffold/edit.html
+  scaffold/index.html
+  scaffold/new.html
+  scaffold/show.html
+
+Next:
+  ocre g override <path> (e.g. controller/html.rs, or controller for all its files)
+```
+
+With `--json`, the list is `"templates": [{"path": "controller/api.rs", "overridden": false}, ...]`.
+
+```sh
+ocre g override controller
+```
+
+```text
+  create  .ocre/templates/controller/api.rs
+  create  .ocre/templates/controller/html.rs
+  create  .ocre/templates/controller/view.html
+
+Next:
+  edit the files in .ocre/templates/ (<%= value %>, <% for x in xs %>...<% endfor %>); generators use them until deleted
+```
+
+Templates are [minijinja](https://docs.rs/minijinja) with ERB-style delimiters, so the askama and Rust braces of the generated code stay literal: `<%= value %>` prints a value, `<% for x in xs %>...<% endfor %>` and `<% if api %>...<% endif %>` are blocks, `<%# ... %>` is a comment, and a newline right after a block tag is dropped. An unknown variable is an error. The variables each template sees:
+
+| Templates | Variables |
+|---|---|
+| `controller/html.rs`, `controller/api.rs` | `command`, `module` (`pages`), `file` (`pages` or `pages_api`), `human` (`Pages`), `auth`, `actions` (each with `name`, `pascal`, `human`, `path`) |
+| `controller/view.html` | `module`, `action` (`name`, `pascal`, `human`, `path`) |
+| `resource/*` | `command`, `model`, `singular`, `plural`, `human_singular`, `human_plural`, `fields` (each with `label` and `display`, the askama expression showing the value) |
+| `scaffold/*.html` | `model`, `singular`, `plural`, `human_singular`, `human_plural`, `lower`, `realtime`, `multipart`, `fields` (each with `name`, `label`, `attachment`, `optional`, `display`, `show`, `input`) |
+
+Errors: ``no generator template `nope` `` with the list of templates as hint; `.ocre/templates/<path> already exists` (pass `--force` to copy the built-in template again); when an override does not render, ``.ocre/templates/<path> failed to render: ...`` with the hint ``fix .ocre/templates/<path>, or delete it to use the built-in template again``.
+
+## ocre g generator
+
+```text
+ocre g generator <NAME>
+```
+
+Creates an app generator to edit, in `.ocre/generators/<name>/` (Rails' `generate generator`): a `generator.toml` describing it and one example template.
+
+```sh
+ocre g generator service
+```
+
+```text
+  create  .ocre/generators/service/generator.toml
+  create  .ocre/generators/service/src/services/<%= singular %>.rs
+
+Next:
+  edit the templates in .ocre/generators/service/
+  ocre g service Example name:string --pretend
+```
+
+## App generators (`ocre g <name>`)
+
+```text
+ocre g <name> <Name> [ARGS]... [--key=value]... [--flag]...
+```
+
+Any generator name that is not built in runs `.ocre/generators/<name>/`. Every file of that directory except `generator.toml` is a template (same syntax as [overrides](#ocre-g-override)), and so is its path: `src/services/<%= singular %>.rs` becomes `src/services/billing.rs` for `ocre g service Billing`. Templates see:
+
+| Variable | Value for `ocre g service BlogPost amount:integer total:decimal? --api --queue=urgent` |
+|---|---|
+| `model`, `singular`, `plural` | `BlogPost`, `blog_post`, `blog_posts` |
+| `human_singular`, `human_plural` | `Blog post`, `Blog posts` |
+| `args` | the arguments after the name: `["amount:integer", "total:decimal?"]` |
+| `fields` | when every argument is `name:type` (see [Fields](#fields)): each with `name`, `label`, `rust_type` (`i64`, `Option<String>`), `optional`, `unique` |
+| `options` | `--key=value` and `--flag` arguments: `{"api": "true", "queue": "urgent"}` (dashes in keys become `_`) |
+
+`generator.toml` has an optional `description` and `[[insert]]` tables adding a line after a marker line of an existing file (the three values are templates too):
+
+```toml
+description = "Service object in src/services/"
+
+[[insert]]
+file = "src/services/mod.rs"
+after = "// ocre:services"
+line = "pub mod <%= singular %>;"
+```
+
+```sh
+ocre g service Billing amount:integer total:decimal? --pretend
+```
+
+```text
+  create  src/services/billing.rs
+(--pretend: nothing was written)
+```
+
+The `--pretend`, `--force`, `--skip` and `--json` flags work as for built-in generators; the JSON `command` is `generate custom`, and the run is recorded, so `ocre destroy service Billing` undoes it.
+
+Errors:
+
+| Error | Hint |
+|---|---|
+| ``unknown generator `nope` `` | ``run `ocre g --help` for the built-in generators; app generators live in .ocre/generators/<name>/ (create one with `ocre g generator nope`)`` |
+| ``` `ocre g service` needs a name ``` | ``run `ocre g service <Name> [args...]`, e.g. `ocre g service Invoice` `` |
+| `.ocre/generators/service/generator.toml is invalid: ...` | ``keys: `description`, and [[insert]] tables with `file`, `after` and `line` `` |
+| `<file> does not exist` (an `[[insert]]` target) | ``create it with the `<marker>` marker line, or change the [[insert]] of .ocre/generators/<name>/generator.toml`` |
+| ``<file> is missing the `<marker>` marker`` | ``put `<marker>` on its own line where the generated lines go`` |
+| ``.ocre/generators/<name>/<file> failed to render: ...`` | ``fix .ocre/generators/<name>/<file>`` |
 
 ## See also
 

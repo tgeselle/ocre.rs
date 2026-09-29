@@ -133,6 +133,10 @@ fn routes() -> Router<Ctx> {
         .merge(super::other::routes())
         .merge(missing::routes())
         .merge(Router::new().route("/inline", options(inline)))
+        .nest("/v1", api::routes())
+        .nest("/v2", crate::api::routes())
+        .nest(PREFIX, api::routes())
+        .nest("/lonely")
         .route("/unterminated", get(x
 }
 "#,
@@ -151,6 +155,11 @@ fn routes() -> Router<Ctx> {
         r#"pub fn routes() -> Router { Router::new().route("/admin/users", get(list)) }"#,
     )
     .unwrap();
+    fs::write(
+        src.join("api.rs"),
+        r#"pub fn routes() -> Router { Router::new().route("/", get(root)).route("/items", get(items)).nest("/deep", crate::api::routes()) }"#,
+    )
+    .unwrap();
     fs::write(src.join("shop.rs"), r#"pub fn routes() -> Router { Router::new().merge(crate::admin::routes()) }"#)
         .unwrap();
 
@@ -164,6 +173,10 @@ fn routes() -> Router<Ctx> {
             route("OPTIONS", "/inline", "inline"),
             route("GET", "/multi\\\"line", "show"),
             route("PUT", "/multi\\\"line", "put_it"),
+            route("GET", "/v1", "api::root"),
+            route("GET", "/v1/items", "api::items"),
+            route("GET", "/v2", "api::root"),
+            route("GET", "/v2/items", "api::items"),
         ]
     );
 }

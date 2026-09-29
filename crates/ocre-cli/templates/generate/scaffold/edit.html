@@ -1,0 +1,17 @@
+{% extends "layout.html" %}
+
+{% block title %}Edit <%= lower %>{% endblock %}
+
+{% block content %}
+<h1>Edit <%= lower %></h1>
+
+<form action="{{ paths::show(id) }}" method="post"<% if multipart %> enctype="multipart/form-data"<% endif %>>
+{% include "<%= plural %>/_form.html" %}
+<% for field in fields if field.attachment and field.optional %>
+  <label><input type="checkbox" name="remove_<%= field.name %>" value="true"> Remove <%= field.label | lower %></label>
+<% endfor %>
+  <button type="submit">Update <%= lower %></button>
+</form>
+
+<p><a href="{{ paths::show(id) }}">Back</a></p>
+{% endblock %}

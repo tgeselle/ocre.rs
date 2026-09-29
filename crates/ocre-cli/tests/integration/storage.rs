@@ -29,7 +29,7 @@ fn scaffold_with_attachments_writes_multipart_forms_and_file_routes() {
 
     let model = fs::read_to_string(root.join("src/models/photo.rs")).unwrap();
     for expected in [
-        "use ocre::{Ctx, Error, IntoParam, Page, Result, Validator, params, storage::{self, Attachment, Rules, Upload}};",
+        "use ocre::{Ctx, Error, IntoParam, Page, Query, Result, Validator, params, storage::{self, Attachment, Rules, Upload}};",
         "pub const IMAGE: Rules = Rules {\n    max_bytes: 10 * 1024 * 1024,\n    content_types: &[\"image/png\", \"image/jpeg\", \"image/gif\", \"image/webp\", \"application/pdf\", \"text/plain\"],\n};",
         "    pub image_size: i64,\n    pub notes_key: Option<String>,",
         "    #[serde(skip)]\n    pub image: Option<Upload>,",
@@ -70,13 +70,18 @@ fn scaffold_with_attachments_writes_multipart_forms_and_file_routes() {
     let form = fs::read_to_string(root.join("templates/photos/_form.html")).unwrap();
     assert!(form.contains(r#"<label>Image <input type="file" name="image" accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,text/plain"></label>"#), "{form}");
     let edit = fs::read_to_string(root.join("templates/photos/edit.html")).unwrap();
-    assert!(edit.contains(r#"<form action="/photos/{{ id }}" method="post" enctype="multipart/form-data">"#), "{edit}");
+    assert!(
+        edit.contains(r#"<form action="{{ paths::show(id) }}" method="post" enctype="multipart/form-data">"#),
+        "{edit}"
+    );
     assert!(edit.contains(r#"  <label><input type="checkbox" name="remove_notes" value="true"> Remove notes</label>"#));
     let new = fs::read_to_string(root.join("templates/photos/new.html")).unwrap();
     assert!(new.contains(r#"enctype="multipart/form-data""#) && !new.contains("remove_notes"), "{new}");
     let show = fs::read_to_string(root.join("templates/photos/show.html")).unwrap();
-    assert!(show.contains(r#"<dd>{% let file = photo.image() %}<a href="/photos/{{ photo.id }}/image">{{ file.filename }}</a> ({{ file.human_size() }})</dd>"#), "{show}");
-    assert!(show.contains(r#"<dd>{% if let Some(file) = photo.notes() %}<a href="/photos/{{ photo.id }}/notes">"#));
+    assert!(show.contains(r#"<dd>{% let file = photo.image() %}<a href="{{ paths::image(photo.id) }}" hx-boost="false">{{ file.filename }}</a> ({{ file.human_size() }})</dd>"#), "{show}");
+    assert!(show.contains(
+        r#"<dd>{% if let Some(file) = photo.notes() %}<a href="{{ paths::notes(photo.id) }}" hx-boost="false">"#
+    ));
     let index = fs::read_to_string(root.join("templates/photos/index.html")).unwrap();
     assert!(index.contains("<td>{{ photo.image_filename }}</td><td>{% if let Some(file) = photo.notes() %}{{ file.filename }}{% endif %}</td>"), "{index}");
 
@@ -120,7 +125,7 @@ fn api_attachments_are_optional_and_uploaded_with_put() {
     for expected in [
         "//! PUT /api/documents/{id}/file        multipart body with the file as `file` (`curl -X PUT -F file=@file`); replaces it",
         "    http::{HeaderMap, StatusCode},\n    response::Response,",
-        "use ocre::{ApiResult, Created, Ctx, Error, Json, OptionExt, Page, FieldError, storage::{self, Disposition, Multipart}};",
+        "use ocre::{ApiResult, Created, Ctx, Error, Json, OptionExt, Page, PageLinks, FieldError, storage::{self, Disposition, Multipart}};",
         "        .route(\"/api/documents/{id}/file\", get(file_file).put(attach_file).delete(remove_file))",
         "const FILE_LIMIT: usize = document::FILE.max_bytes + 64 * 1024;",
         "    Ok(storage::serve(&ctx, &record.file().or_404()?, &headers, Disposition::Inline).await?)",

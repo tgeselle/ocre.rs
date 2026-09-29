@@ -35,8 +35,8 @@ pub fn run(project: &Project, filter: Option<&str>) -> CliResult {
         CliError::new(format!("cannot read src/lib.rs: {err}"))
             .hint("`ocre routes` reads the router built in src/lib.rs; run it inside an Ocre app")
     })?;
-    let mut scanner = Scanner { src, seen: HashSet::new(), routes: Vec::new() };
-    scanner.scan(&lib, &[]);
+    let mut scanner = Scanner { src, seen: HashSet::new(), stack: Vec::new(), routes: Vec::new() };
+    scanner.scan(&lib, &[], "");
     let mut routes = scanner.routes;
     let rank = |route: &Route| METHODS.iter().position(|m| *m == route.method);
     routes.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| rank(a).cmp(&rank(b))));
@@ -65,38 +65,48 @@ pub fn table(routes: &[Route]) -> String {
 
 struct Scanner {
     src: PathBuf,
-    /// Files already scanned, so merge cycles terminate.
-    seen: HashSet<PathBuf>,
+    /// Files already scanned under a prefix, so a module merged twice is listed once.
+    seen: HashSet<(PathBuf, String)>,
+    /// Files being scanned, so merge and nest cycles terminate.
+    stack: Vec<PathBuf>,
     routes: Vec<Route>,
 }
 
 impl Scanner {
     /// Collects the routes defined in `source`, the file of `module` (empty
-    /// for the crate root).
-    fn scan(&mut self, source: &str, module: &[String]) {
+    /// for the crate root), mounted under `prefix` (`/admin` when a parent
+    /// nests it there, empty otherwise).
+    fn scan(&mut self, source: &str, module: &[String], prefix: &str) {
         let code = strip_comments(source);
         for args in calls(&code, ".route(") {
             let [path, chain, ..] = split_top_level(args, ',')[..] else { continue };
-            let Some(path) = path.trim().strip_prefix('"').and_then(|p| p.strip_suffix('"')) else { continue };
+            let Some(path) = string_literal(path) else { continue };
             for segment in split_top_level(chain, '.') {
                 let Some((method, handler)) = method_call(segment) else { continue };
-                self.routes.push(Route { method, path: path.to_owned(), handler: qualify(module, handler) });
+                let path = join(prefix, path);
+                self.routes.push(Route { method, path, handler: qualify(module, handler) });
             }
         }
         for _ in calls(&code, "ocre::graphql::routes(") {
             for (method, handler) in [("GET", "graphiql"), ("POST", "respond")] {
                 let handler = format!("ocre::graphql::{handler}");
-                self.routes.push(Route { method, path: "/graphql".to_owned(), handler });
+                self.routes.push(Route { method, path: join(prefix, "/graphql"), handler });
             }
         }
         for args in calls(&code, ".merge(") {
             if let Some(target) = merged_module(args, module) {
-                self.follow(target);
+                self.follow(target, prefix.to_owned());
+            }
+        }
+        for args in calls(&code, ".nest(") {
+            let [path, target] = split_top_level(args, ',')[..] else { continue };
+            if let (Some(path), Some(target)) = (string_literal(path), merged_module(target, module)) {
+                self.follow(target, join(prefix, path));
             }
         }
     }
 
-    fn follow(&mut self, module: Vec<String>) {
+    fn follow(&mut self, module: Vec<String>, prefix: String) {
         let base = module.iter().fold(self.src.clone(), |dir, segment| dir.join(segment));
         let candidates = [base.with_extension("rs"), base.join("mod.rs")];
         let Some((file, source)) =
@@ -104,9 +114,26 @@ impl Scanner {
         else {
             return;
         };
-        if self.seen.insert(file) {
-            self.scan(&source, &module);
+        if !self.stack.contains(&file) && self.seen.insert((file.clone(), prefix.clone())) {
+            self.stack.push(file);
+            self.scan(&source, &module, &prefix);
+            self.stack.pop();
         }
+    }
+}
+
+/// `"/posts"` -> `/posts`; `None` for anything but a string literal.
+fn string_literal(text: &str) -> Option<&str> {
+    text.trim().strip_prefix('"')?.strip_suffix('"')
+}
+
+/// `/admin` + `/posts` -> `/admin/posts`; axum's `nest` serves the nested
+/// router's `/` at the prefix itself.
+fn join(prefix: &str, path: &str) -> String {
+    match (prefix, path) {
+        ("", _) => path.to_owned(),
+        (_, "/") => prefix.to_owned(),
+        _ => format!("{prefix}{path}"),
     }
 }
 

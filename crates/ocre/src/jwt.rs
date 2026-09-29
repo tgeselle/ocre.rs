@@ -1,11 +1,14 @@
 //! JSON Web Tokens (HS256) for API clients.
 //!
 //! For API clients that cannot keep a session cookie (mobile apps, scripts):
-//! they send `Authorization: Bearer <token>` instead.
+//! they send `Authorization: Bearer <token>` instead. [`token_from`] also
+//! reads it from a query parameter or a cookie, trying several
+//! [`Location`]s in order (Loco's `auth.jwt.location`).
 //!
 //! The signing key is derived from the `SECRET_KEY_BASE` Worker secret
 //! (HMAC-SHA256 of a fixed label), so apps have one secret to create, upload
-//! and rotate: rotating it signs everyone out of sessions and tokens at once.
+//! and rotate: rotating it signs everyone out of sessions and tokens at once,
+//! unless the old value is kept in `SECRET_KEY_BASE_PREVIOUS` for a while.
 //! Tokens carry only the subject (usually the user id), `iat` and `exp`;
 //! [`decode`] rejects expired tokens, bad signatures and any `alg` other than
 //! [`ALGORITHM`] (including `none`) with [`Error::Unauthorized`] (401). Keep
@@ -19,8 +22,8 @@
 //! [`encode_with`] and [`decode_with`] take a [`Key`] and run anywhere.
 //!
 //! ```rust,no_run
-//! use axum::{extract::State, http::HeaderMap};
-//! use ocre::{Ctx, Error, Result, jwt::{self, Claims}};
+//! use axum::{extract::State, http::{HeaderMap, Uri}};
+//! use ocre::{Ctx, Error, Result, jwt::{self, Claims, Location}};
 //!
 //! // POST /api/auth/token, after checking the password:
 //! async fn token(State(ctx): State<Ctx>) -> Result<String> {
@@ -28,17 +31,19 @@
 //!     jwt::encode(&ctx, &Claims::new(user_id.to_string(), 3600))
 //! }
 //!
-//! // Later, from `Authorization: Bearer <token>`:
-//! async fn me(State(ctx): State<Ctx>, headers: HeaderMap) -> Result<String> {
-//!     let bearer = headers.get("authorization").and_then(|value| value.to_str().ok());
-//!     let token = bearer.and_then(|value| value.strip_prefix("Bearer ")).ok_or(Error::Unauthorized)?;
-//!     let claims = jwt::decode(&ctx, token)?; // 401 when invalid or expired
+//! // Later, from `Authorization: Bearer <token>` or, for browsers, a cookie:
+//! async fn me(State(ctx): State<Ctx>, headers: HeaderMap, uri: Uri) -> Result<String> {
+//!     let locations = [Location::Bearer, Location::Cookie("token")];
+//!     let token = jwt::token_from(&headers, &uri, &locations).ok_or(Error::Unauthorized)?;
+//!     let claims = jwt::decode(&ctx, &token)?; // 401 when invalid or expired
 //!     let user_id: i64 = claims.sub.parse().map_err(|_| Error::Unauthorized)?;
 //!     Ok(user_id.to_string())
 //! }
 //! ```
 
+use axum::http::{HeaderMap, Uri, header};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use cookie::Cookie;
 use hmac::{Hmac, Mac as _};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -61,6 +66,79 @@ pub const ALGORITHM: &str = "HS256";
 const KEY_LABEL: &[u8] = b"ocre/jwt/hs256";
 /// `{"alg":"HS256","typ":"JWT"}`, the header of every token Ocre issues.
 const HEADER: &str = r#"{"alg":"HS256","typ":"JWT"}"#;
+
+/// Where [`token_from`] looks for a token (Loco's `auth.jwt.location`).
+///
+/// # Examples
+///
+/// ```
+/// use ocre::jwt::Location;
+///
+/// // Browsers keep the token in a cookie; API clients send a Bearer header.
+/// let locations = [Location::Bearer, Location::Cookie("token")];
+/// assert_eq!(locations[1], Location::Cookie("token"));
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Location {
+    /// `Authorization: Bearer <token>`, the default for API clients.
+    Bearer,
+    /// A query parameter, e.g. `Query("token")` for `?token=...`. URLs end up
+    /// in logs and `Referer` headers: use it only where a header is
+    /// impossible (an `EventSource`, a WebSocket from a browser, a download
+    /// link), with short-lived tokens.
+    Query(&'static str),
+    /// A cookie, e.g. `Cookie("token")`. Set it `HttpOnly` and `SameSite`:
+    /// cookies are sent automatically, so the CSRF check applies.
+    Cookie(&'static str),
+}
+
+/// The token of the first `locations` entry that has a non-empty one.
+///
+/// Locations are tried in order, so `[Location::Bearer, Location::Cookie("token")]`
+/// accepts API clients and browsers (Loco's multiple JWT locations with
+/// fallback). It only finds the token: verify it with [`decode`]. Works for
+/// API keys ([`crate::token`]) too. No binding call.
+///
+/// # Examples
+///
+/// ```
+/// use axum::http::{HeaderMap, HeaderValue, Uri};
+/// use ocre::jwt::{Location, token_from};
+///
+/// let mut headers = HeaderMap::new();
+/// headers.insert("cookie", HeaderValue::from_static("theme=dark; token=abc"));
+/// let uri: Uri = "/events?token=xyz".parse().unwrap();
+///
+/// assert_eq!(token_from(&headers, &uri, &[Location::Bearer]), None);
+/// assert_eq!(token_from(&headers, &uri, &[Location::Bearer, Location::Cookie("token")]).as_deref(), Some("abc"));
+/// assert_eq!(token_from(&headers, &uri, &[Location::Query("token")]).as_deref(), Some("xyz"));
+/// headers.insert("authorization", HeaderValue::from_static("Bearer 123"));
+/// assert_eq!(token_from(&headers, &uri, &[Location::Bearer, Location::Cookie("token")]).as_deref(), Some("123"));
+/// ```
+pub fn token_from(headers: &HeaderMap, uri: &Uri, locations: &[Location]) -> Option<String> {
+    locations.iter().find_map(|location| {
+        match *location {
+            Location::Bearer => headers
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "))
+                .map(|token| token.trim().to_owned()),
+            Location::Query(name) => serde_urlencoded::from_str::<Vec<(String, String)>>(uri.query().unwrap_or(""))
+                .ok()?
+                .into_iter()
+                .find_map(|(key, value)| (key == name).then_some(value)),
+            Location::Cookie(name) => headers
+                .get_all(header::COOKIE)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .flat_map(Cookie::split_parse_encoded)
+                .filter_map(std::result::Result::ok)
+                .find(|cookie| cookie.name() == name)
+                .map(|cookie| cookie.value().to_owned()),
+        }
+        .filter(|token| !token.is_empty())
+    })
+}
 
 /// The payload of a token: who it is for and when it expires.
 ///

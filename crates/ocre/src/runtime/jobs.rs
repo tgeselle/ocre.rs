@@ -2,16 +2,16 @@ use std::time::Duration;
 
 use serde::{Serialize, de::DeserializeOwned};
 use worker::{
-    Env, MessageBatch, MessageBuilder, MessageExt, QueueContentType, QueueRetryOptionsBuilder, ScheduledEvent,
-    send::SendFuture,
+    BatchMessageBuilder, Env, MessageBatch, MessageBuilder, MessageExt, QueueContentType, QueueRetryOptionsBuilder,
+    ScheduledEvent, send::SendFuture,
 };
 
 use super::Ctx;
 use crate::{
     Result,
     jobs::{
-        CRON_LOG_PREFIX, LOG_PREFIX, Payload, QUEUE_BINDING, decode, decode_job, delay_seconds, encode, job_name,
-        job_payload, missing_queue, retry_delay,
+        CRON_LOG_PREFIX, DEFAULT_QUEUE, LOG_PREFIX, Payload, batches, binding, decode, decode_job, delay_seconds,
+        discards, encode, job_name, job_payload, missing_queue, retry_delay,
     },
     now,
 };
@@ -55,7 +55,167 @@ use crate::{
 /// }
 /// ```
 pub fn enqueue<J: Serialize>(ctx: &Ctx, job: &J) -> impl Future<Output = Result<()>> + Send + use<J> {
-    send(ctx, job_payload(job), Duration::ZERO)
+    queue(ctx, DEFAULT_QUEUE).enqueue(job)
+}
+
+/// Sends every job of `jobs` to the `JOBS` queue in as few calls as possible, like Rails' `perform_all_later`.
+///
+/// One `sendBatch` call carries up to 100 messages and 256 KB, so 250 jobs
+/// take 3 calls instead of 250: use it whenever a handler or a scheduled
+/// task enqueues more than a few jobs (a Worker invocation may only make a
+/// limited number of calls to bindings). The jobs may be different variants
+/// of the app's `Job` enum; they run in any order. Each call is atomic, the
+/// whole list is not: when a later call fails, the earlier jobs are queued.
+/// An empty list sends nothing.
+///
+/// Free-plan cost: the same as [`enqueue`](crate::jobs::enqueue) for each
+/// job (3 Queues operations each); only the number of calls shrinks.
+///
+/// # Errors
+///
+/// Every error of [`enqueue`](crate::jobs::enqueue); when one job cannot be
+/// serialized or is over 128 KB, nothing is sent.
+///
+/// # Examples
+///
+/// ```no_run
+/// use ocre::{Ctx, Result};
+/// use serde::Serialize;
+///
+/// #[derive(Serialize)]
+/// #[serde(rename_all = "snake_case")]
+/// enum Job {
+///     SendDigest { user_id: i64 },
+/// }
+///
+/// async fn digests(ctx: &Ctx, user_ids: &[i64]) -> Result<()> {
+///     let jobs: Vec<Job> = user_ids.iter().map(|&user_id| Job::SendDigest { user_id }).collect();
+///     ocre::jobs::enqueue_all(ctx, &jobs).await
+/// }
+/// ```
+pub fn enqueue_all<J: Serialize>(ctx: &Ctx, jobs: &[J]) -> impl Future<Output = Result<()>> + Send + use<J> {
+    queue(ctx, DEFAULT_QUEUE).enqueue_all(jobs)
+}
+
+/// A named queue, for jobs that must not wait behind others: `ocre::jobs::queue(&ctx, "urgent").enqueue(&job)`.
+///
+/// Cloudflare Queues has no priorities: Ocre gives urgent work its own
+/// queue instead, like Rails' `queue_as`/`set(queue:)` and Loco's named
+/// queues. Each queue has its own consumer settings in wrangler.toml
+/// (`ocre g job <Name> --queue urgent` adds `<app>-jobs-urgent` with
+/// `max_batch_timeout = 1`), so a backlog of slow jobs on `default` never
+/// delays it. Every queue is consumed by the same `queue` event and the
+/// same `perform`. The name `default` is the `JOBS` queue of
+/// [`enqueue`](crate::jobs::enqueue); `urgent` is bound as `JOBS_URGENT`.
+///
+/// Free-plan cost: queues are free to create; each message costs the same
+/// 3 operations whatever its queue.
+///
+/// # Examples
+///
+/// ```no_run
+/// use ocre::{Ctx, Result};
+/// use serde::Serialize;
+///
+/// #[derive(Serialize)]
+/// #[serde(rename_all = "snake_case")]
+/// enum Job {
+///     SendMagicLink { user_id: i64 },
+/// }
+///
+/// async fn sign_in(ctx: &Ctx) -> Result<()> {
+///     ocre::jobs::queue(ctx, "urgent").enqueue(&Job::SendMagicLink { user_id: 1 }).await
+/// }
+/// ```
+pub fn queue(ctx: &Ctx, name: &'static str) -> Queue {
+    Queue { env: ctx.env().clone(), name }
+}
+
+/// A job queue, from [`queue`](crate::jobs::queue): enqueue on it like on the default queue.
+///
+/// # Examples
+///
+/// ```no_run
+/// # async fn f(ctx: &ocre::Ctx) -> ocre::Result<()> {
+/// let urgent = ocre::jobs::queue(ctx, "urgent");
+/// urgent.enqueue(&"reindex").await?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone)]
+pub struct Queue {
+    env: Env,
+    name: &'static str,
+}
+
+impl Queue {
+    /// Sends `job` to this queue, like [`enqueue`](crate::jobs::enqueue) does to `default`.
+    ///
+    /// # Errors
+    ///
+    /// Those of [`enqueue`](crate::jobs::enqueue); a missing binding names
+    /// the fix, `ocre g job <Name> --queue <name>`, and a queue name that is
+    /// not lowercase letters, digits and `-` is an
+    /// [`Error::Internal`](crate::Error::Internal).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn f(ctx: &ocre::Ctx) -> ocre::Result<()> {
+    /// ocre::jobs::queue(ctx, "urgent").enqueue(&serde_json::json!({"send_code": {"user_id": 1}})).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn enqueue<J: Serialize>(&self, job: &J) -> impl Future<Output = Result<()>> + Send + use<J> {
+        send(self.env.clone(), self.name, job_payload(job), Duration::ZERO)
+    }
+
+    /// Sends `job` to this queue, to run after `delay` (24 hours at most), like [`enqueue_in`](crate::jobs::enqueue_in).
+    ///
+    /// # Errors
+    ///
+    /// Those of [`enqueue_in`](crate::jobs::enqueue_in) and [`Queue::enqueue`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn f(ctx: &ocre::Ctx) -> ocre::Result<()> {
+    /// let later = std::time::Duration::from_secs(60);
+    /// ocre::jobs::queue(ctx, "urgent").enqueue_in(&"retry_payment", later).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn enqueue_in<J: Serialize>(
+        &self,
+        job: &J,
+        delay: Duration,
+    ) -> impl Future<Output = Result<()>> + Send + use<J> {
+        send(self.env.clone(), self.name, job_payload(job), delay)
+    }
+
+    /// Sends every job of `jobs` to this queue in batches, like [`enqueue_all`](crate::jobs::enqueue_all).
+    ///
+    /// # Errors
+    ///
+    /// Those of [`enqueue_all`](crate::jobs::enqueue_all) and [`Queue::enqueue`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn f(ctx: &ocre::Ctx) -> ocre::Result<()> {
+    /// ocre::jobs::queue(ctx, "urgent").enqueue_all(&["a", "b"]).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn enqueue_all<J: Serialize>(&self, jobs: &[J]) -> impl Future<Output = Result<()>> + Send + use<J> {
+        let payloads: Vec<Result<Payload>> = jobs.iter().map(job_payload).collect();
+        send_all(self.env.clone(), self.name, payloads)
+    }
+}
+
+fn producer(env: &Env, name: &str) -> Result<worker::Queue> {
+    let binding = binding(name)?;
+    env.queue(&binding).map_err(|err| missing_queue(&binding, &err.to_string()))
 }
 
 /// Sends `job` to the `JOBS` queue like [`enqueue`](crate::jobs::enqueue), to run after `delay`.
@@ -96,21 +256,43 @@ pub fn enqueue_in<J: Serialize>(
     job: &J,
     delay: Duration,
 ) -> impl Future<Output = Result<()>> + Send + use<J> {
-    send(ctx, job_payload(job), delay)
+    queue(ctx, DEFAULT_QUEUE).enqueue_in(job, delay)
 }
-/// Sends a message as JSON text, due after `delay`.
+
+/// Sends a message as JSON text to the queue `name`, due after `delay`.
 pub(crate) fn send(
-    ctx: &Ctx,
+    env: Env,
+    name: &'static str,
     payload: Result<Payload>,
     delay: Duration,
 ) -> impl Future<Output = Result<()>> + Send + use<> {
-    let env = ctx.env().clone();
     SendFuture::new(async move {
         let delay = delay_seconds(delay)?;
         let body = encode(payload?, now() + i64::from(delay))?;
-        let queue = env.queue(QUEUE_BINDING).map_err(|err| missing_queue(&err.to_string()))?;
+        let queue = producer(&env, name)?;
         let message = MessageBuilder::new(body).content_type(QueueContentType::Text).delay_seconds(delay).build();
         queue.send(message).await?;
+        Ok(())
+    })
+}
+
+fn send_all(
+    env: Env,
+    name: &'static str,
+    payloads: Vec<Result<Payload>>,
+) -> impl Future<Output = Result<()>> + Send + use<> {
+    SendFuture::new(async move {
+        if payloads.is_empty() {
+            return Ok(());
+        }
+        let at = now();
+        let bodies = payloads.into_iter().map(|payload| encode(payload?, at)).collect::<Result<Vec<_>>>()?;
+        let queue = producer(&env, name)?;
+        for batch in batches(bodies) {
+            let messages =
+                batch.into_iter().map(|body| MessageBuilder::new(body).content_type(QueueContentType::Text).build());
+            queue.send_batch(BatchMessageBuilder::new().messages(messages).build()).await?;
+        }
         Ok(())
     })
 }
@@ -124,7 +306,13 @@ pub(crate) fn send(
 /// sharing its CPU limit: 10 ms on Free).
 ///
 /// - `Ok` acknowledges the message and logs `[ocre jobs] <job> done`.
-/// - `Err` logs `[ocre jobs] <job> failed, retrying in <n> s: <error>` and
+/// - An error that another try cannot fix, like Rails' `discard_on`
+///   ([`Error::NotFound`](crate::Error::NotFound), `BadRequest`,
+///   `Unauthorized`, `Forbidden`, `Invalid`, `PayloadTooLarge`: a record
+///   deleted since the job was enqueued, bad input) logs
+///   `[ocre jobs] <job> discarded, not retried: <error>` and acknowledges it.
+/// - Any other `Err` (`Internal`, `TooManyRequests`) logs
+///   `[ocre jobs] <job> failed, retrying in <n> s: <error>` and
 ///   retries the message after twice the time since it was due, between 30 s
 ///   and 24 hours (30 s, 1 min, 3 min, 9 min, 27 min), until `max_retries = 5`
 ///   sends it to the dead-letter queue `<app>-jobs-failed`.
@@ -140,7 +328,7 @@ pub(crate) fn send(
 ///
 /// # Errors
 ///
-/// Never returns `Err` itself: job errors are logged and retried.
+/// Never returns `Err` itself: job errors are logged, then discarded or retried.
 ///
 /// # Examples
 ///
@@ -190,7 +378,7 @@ where
             }
         };
         let (name, result) = match envelope.payload {
-            Payload::Mail(email) => ("mail".to_owned(), super::mail::deliver(ctx.env(), email).await),
+            Payload::Mail(email) => ("mail".to_owned(), super::mail::deliver(ctx.env(), *email).await),
             Payload::Job(value) => {
                 let name = job_name(&value).to_owned();
                 match decode_job::<J>(value) {
@@ -206,6 +394,10 @@ where
         match result {
             Ok(()) => {
                 worker::console_log!("{LOG_PREFIX} {name} done");
+                message.ack();
+            }
+            Err(err) if discards(&err) => {
+                worker::console_error!("{LOG_PREFIX} {name} discarded, not retried: {err}");
                 message.ack();
             }
             Err(err) => {

@@ -2,9 +2,16 @@
 //!
 //! Emails are stored trimmed and lowercased, so `Ada@Example.com` and
 //! `ada@example.com` are one account. Passwords are stored as
-//! `ocre::password` digests (PBKDF2); `password_digest` is never serialized.
+//! `ocre::password` digests (PBKDF2); `password_digest` is never serialized,
+//! and is empty for users who only sign in with an emailed link or an OAuth
+//! provider. `confirmed_at` is set once the user opened the confirmation
+//! email (`User::confirmed`).
+//!
+//! This module is Ocre's equivalent of Loco's `Authenticable` trait: the
+//! extractors call `find` (sessions, JWTs) and `api_key::authenticate` (API
+//! keys) directly.
 
-use ocre::{Ctx, Error, Result, Validator, params};
+use ocre::{Ctx, Error, Query, Result, Validator, params};
 use serde::{Deserialize, Serialize};
 
 /// Shortest accepted password.
@@ -19,17 +26,30 @@ pub struct User {
     pub email: String,
     #[serde(skip_serializing)]
     pub password_digest: String,
+    /// When the user confirmed their email address; `None` until then.
+    pub confirmed_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
 
 impl User {
+    /// Whether the user opened the link of the confirmation email.
+    pub fn confirmed(&self) -> bool {
+        self.confirmed_at.is_some()
+    }
+
+    /// Whether the user has a password (OAuth-only users have none).
+    pub fn has_password(&self) -> bool {
+        !self.password_digest.is_empty()
+    }
+
     // ocre:associations
 }
 
 /// Sign-up values, as typed (HTML form or JSON). Missing fields are empty,
-/// so they fail validation with a message instead of a 400.
-#[derive(Debug, Clone, Default, Deserialize)]
+/// so they fail validation with a message instead of a 400. No `Debug`: it
+/// would print the password in logs.
+#[derive(Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct NewUser {
     pub email: String,
@@ -40,12 +60,7 @@ impl NewUser {
     /// Checks that need no database; `create` adds uniqueness.
     pub fn validate(&self) -> Validator {
         let mut v = Validator::new();
-        let email = normalize_email(&self.email);
-        if email.is_empty() {
-            v.required("email", &email);
-        } else {
-            v.email("email", &email).max_length("email", &email, 254);
-        }
+        validate_email(&mut v, &self.email);
         validate_password(&mut v, &self.password);
         v
     }
@@ -56,6 +71,16 @@ pub fn normalize_email(email: &str) -> String {
     email.trim().to_lowercase()
 }
 
+/// Email rules, for sign-up and OAuth sign-ups.
+pub fn validate_email(v: &mut Validator, email: &str) {
+    let email = normalize_email(email);
+    if email.is_empty() {
+        v.required("email", &email);
+    } else {
+        v.email("email", &email).max_length("email", &email, 254);
+    }
+}
+
 /// Password rules, for sign-up and password changes.
 pub fn validate_password(v: &mut Validator, password: &str) {
     v.min_length("password", password, MIN_PASSWORD_LENGTH).max_length("password", password, MAX_PASSWORD_LENGTH);
@@ -63,6 +88,17 @@ pub fn validate_password(v: &mut Validator, password: &str) {
 
 pub async fn find(ctx: &Ctx, id: i64) -> Result<Option<User>> {
     ctx.db()?.first("SELECT * FROM users WHERE id = ?1", params![id]).await
+}
+
+/// Loads many users in few queries (100 ids per query, D1's limit on
+/// parameters): what `belongs_to` preloads of other models call.
+pub async fn find_many(ctx: &Ctx, ids: &[i64]) -> Result<Vec<User>> {
+    let db = ctx.db()?;
+    let mut rows = Vec::with_capacity(ids.len());
+    for chunk in ids.chunks(100) {
+        rows.extend(Query::<User>::table("users").is_in("id", chunk.iter().copied()).all(&db).await?);
+    }
+    Ok(rows)
 }
 
 pub async fn find_by_email(ctx: &Ctx, email: &str) -> Result<Option<User>> {
@@ -86,11 +122,27 @@ pub async fn create(ctx: &Ctx, new: NewUser) -> Result<User> {
         .ok_or_else(|| Error::internal("INSERT ... RETURNING returned no row"))
 }
 
-/// The user with this email and password, or `None`. An unknown email costs
-/// the same PBKDF2 run as a wrong password, so response times do not reveal
-/// which emails have accounts.
+/// Creates a user without a password whose email is already confirmed
+/// (verified by an OAuth provider).
+pub async fn create_confirmed(ctx: &Ctx, email: &str) -> Result<User> {
+    let mut v = Validator::new();
+    validate_email(&mut v, email);
+    v.finish()?;
+    ctx.db()?
+        .first(
+            "INSERT INTO users (email, password_digest, confirmed_at) VALUES (?1, '', datetime('now')) RETURNING *",
+            params![normalize_email(email)],
+        )
+        .await?
+        .ok_or_else(|| Error::internal("INSERT ... RETURNING returned no row"))
+}
+
+/// The user with this email and password, or `None`. An unknown email (or a
+/// user without a password) costs the same PBKDF2 run as a wrong password,
+/// so response times do not reveal which emails have accounts.
 pub async fn authenticate(ctx: &Ctx, email: &str, password: &str) -> Result<Option<User>> {
-    let Some(user) = find_by_email(ctx, email).await? else {
+    let user = find_by_email(ctx, email).await?.filter(User::has_password);
+    let Some(user) = user else {
         ocre::password::hash(password).await?;
         return Ok(None);
     };
@@ -111,4 +163,33 @@ pub async fn update_password(ctx: &Ctx, id: i64, password: &str) -> Result<()> {
         )
         .await?;
     Ok(())
+}
+
+/// Marks the email as confirmed (idempotent).
+pub async fn confirm(ctx: &Ctx, id: i64) -> Result<()> {
+    ctx.db()?
+        .execute(
+            "UPDATE users SET confirmed_at = COALESCE(confirmed_at, datetime('now')), updated_at = datetime('now') \
+             WHERE id = ?1",
+            params![id],
+        )
+        .await?;
+    Ok(())
+}
+
+/// Deletes the account. Its tokens, API keys and sessions go with it
+/// (`ON DELETE CASCADE`; D1 enforces foreign keys).
+pub async fn delete(ctx: &Ctx, id: i64) -> Result<()> {
+    ctx.db()?.execute("DELETE FROM users WHERE id = ?1", params![id]).await?;
+    Ok(())
+}
+
+/// Checks a deletion request: the password for users who have one, the
+/// email address typed again for the others. One PBKDF2 run at most.
+pub async fn deletion_confirmed(user: &User, confirmation: &str) -> Result<bool> {
+    if user.has_password() {
+        ocre::password::verify(confirmation, &user.password_digest).await
+    } else {
+        Ok(normalize_email(confirmation) == user.email)
+    }
 }

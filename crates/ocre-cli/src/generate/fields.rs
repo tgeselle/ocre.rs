@@ -1,6 +1,7 @@
 //! Field language shared by `model`, `scaffold` and `api`:
 //! `name:type`, with `?` for optional (NULL allowed) and `^` for unique,
 //! e.g. `title:string^ summary:text? author:references avatar:attachment? settings:json`.
+//! `author:references:writer_id` names the foreign key column.
 
 use crate::{
     names::{ModelNames, humanize, is_identifier},
@@ -79,7 +80,7 @@ pub(super) const RESERVED: &[&str] = &[
     "values",
 ];
 
-pub(super) const TYPES: &str = "string, text, integer, float, boolean, date, datetime, references, attachment, json";
+pub(super) const TYPES: &str = "string, text, integer (int, small_int, big_int), float (double), decimal, boolean (bool), date, time, datetime (date_time), uuid, references, attachment, json (jsonb), enum:<value>,<value>...";
 
 /// Content types an attachment accepts until the app edits its `Rules`:
 /// common images, PDF and plain text, all safe to display inline.
@@ -102,13 +103,22 @@ pub(super) enum FieldType {
     Float,
     Boolean,
     Date,
+    /// `HH:MM[:SS]`, stored as text.
+    Time,
     DateTime,
+    /// Exact number (money) as text such as `19.99`: a `REAL` would round it.
+    Decimal,
+    /// Hyphenated UUID text.
+    Uuid,
     References,
     /// A file in R2: four columns (`<name>_key`, `_filename`, `_content_type`, `_size`).
     Attachment,
     /// Any JSON value (`serde_json::Value`), stored as its text in a `TEXT`
     /// column checked with `json_valid`.
     Json,
+    /// One of a fixed list of values (`status:enum:draft,published`): a Rust
+    /// enum in the model, stored as its snake_case text with a `CHECK`.
+    Enum,
 }
 
 impl FieldType {
@@ -116,21 +126,29 @@ impl FieldType {
         Some(match name {
             "string" => Self::String,
             "text" => Self::Text,
-            "integer" => Self::Integer,
-            "float" => Self::Float,
-            "boolean" => Self::Boolean,
+            // SQLite integers are 64-bit whatever the declared size.
+            "integer" | "int" | "small_int" | "big_int" => Self::Integer,
+            "float" | "double" => Self::Float,
+            "decimal" => Self::Decimal,
+            "boolean" | "bool" => Self::Boolean,
             "date" => Self::Date,
-            "datetime" => Self::DateTime,
+            "time" => Self::Time,
+            "datetime" | "date_time" => Self::DateTime,
+            "uuid" => Self::Uuid,
             "references" => Self::References,
             "attachment" => Self::Attachment,
-            "json" => Self::Json,
+            "json" | "jsonb" => Self::Json,
+            "enum" => Self::Enum,
             _ => return None,
         })
     }
 
     /// Stored as text in SQLite and in Rust.
     pub(super) fn is_textual(self) -> bool {
-        matches!(self, Self::String | Self::Text | Self::Date | Self::DateTime)
+        matches!(
+            self,
+            Self::String | Self::Text | Self::Date | Self::Time | Self::DateTime | Self::Decimal | Self::Uuid
+        )
     }
 
     /// Parsed from form text as a number.
@@ -148,6 +166,46 @@ pub(super) struct Field {
     pub unique: bool,
     /// Referenced model for `references` fields.
     pub target: Option<ModelNames>,
+    /// Rust enum of `enum` fields: `Status` with values `draft`, `published`.
+    pub enumeration: Option<Enumeration>,
+}
+
+/// The Rust enum generated for `status:enum:draft,published`, stored as TEXT.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct Enumeration {
+    /// `Status` for the field `status`.
+    pub type_name: String,
+    /// The stored values, in declaration order: `draft`, `published`.
+    pub values: Vec<String>,
+}
+
+impl Enumeration {
+    fn parse(name: &str, values: &str) -> Result<Self, CliError> {
+        let values: Vec<String> = values.split(',').map(str::to_owned).collect();
+        let valid = values.iter().all(|value| is_identifier(value))
+            && values.iter().enumerate().all(|(i, v)| !values[..i].contains(v));
+        if !valid {
+            return Err(CliError::new(format!("invalid values `{}` for enum `{name}`", values.join(",")))
+                .hint("list distinct snake_case values after the type, e.g. `status:enum:draft,published`"));
+        }
+        Ok(Self { type_name: pascal_case(name), values })
+    }
+
+    /// `Draft` for `draft`: the Rust variant of a value.
+    pub(super) fn variant(value: &str) -> String {
+        pascal_case(value)
+    }
+}
+
+/// `published_at` -> `PublishedAt`.
+fn pascal_case(snake: &str) -> String {
+    snake
+        .split('_')
+        .map(|word| {
+            let mut chars = word.chars();
+            chars.next().map_or_else(String::new, |first| first.to_ascii_uppercase().to_string() + chars.as_str())
+        })
+        .collect()
 }
 
 impl Field {
@@ -156,8 +214,16 @@ impl Field {
             CliError::new(format!("field `{spec}` has no type"))
                 .hint("write fields as `name:type`, e.g. `title:string`")
         })?;
-        let modifiers = ty.len() - ty.trim_end_matches(['?', '^']).len();
-        let (ty_name, suffix) = ty.split_at(ty.len() - modifiers);
+        // `?` and `^` go after the type or after its argument
+        // (`author:references?:writer_id` or `author:references:writer_id?`).
+        let (ty_part, argument) = match ty.split_once(':') {
+            Some((ty_part, argument)) => (ty_part, Some(argument)),
+            None => (ty, None),
+        };
+        let strip = |part: &str| part.trim_end_matches(['?', '^']).len();
+        let suffix: String = [ty_part, argument.unwrap_or_default()].iter().map(|part| &part[strip(part)..]).collect();
+        let ty_name = &ty_part[..strip(ty_part)];
+        let argument = argument.map(|argument| &argument[..strip(argument)]);
         let (optional, unique) = (suffix.contains('?'), suffix.contains('^'));
         if !is_identifier(name) {
             return Err(CliError::new(format!("invalid field name `{name}`"))
@@ -188,12 +254,33 @@ impl Field {
             return Err(CliError::new(format!("attachment name `{name}` clashes with a scaffold route"))
                 .hint(format!("`/<plural>/{{id}}/{name}` is taken; pick another name, e.g. `{name}_file`")));
         }
-        let (name, target) = if ty == FieldType::References {
-            (format!("{name}_id"), Some(ModelNames::parse(name)?))
-        } else {
-            (name.to_owned(), None)
+        if ty == FieldType::Enum && unique {
+            return Err(CliError::new(format!("enum `{name}` cannot be unique"))
+                .hint("a few values cannot be unique across many rows; drop the `^`"));
+        }
+        let (name, target, enumeration) = match (ty, argument) {
+            (FieldType::References, None) => (format!("{name}_id"), Some(ModelNames::parse(name)?), None),
+            (FieldType::References, Some(column)) => {
+                if !is_identifier(column) || !column.ends_with("_id") || RESERVED.contains(&column) {
+                    return Err(CliError::new(format!("invalid foreign key column `{column}` for `{name}`"))
+                        .hint("name the column in snake_case ending in `_id`, e.g. `author:references:writer_id`"));
+                }
+                (column.to_owned(), Some(ModelNames::parse(name)?), None)
+            }
+            (FieldType::Enum, Some(values)) => (name.to_owned(), None, Some(Enumeration::parse(name, values)?)),
+            (FieldType::Enum, None) => {
+                return Err(CliError::new(format!("enum `{name}` has no values"))
+                    .hint(format!("list them after the type, e.g. `{name}:enum:draft,published`")));
+            }
+            (_, Some(argument)) => {
+                return Err(CliError::new(format!("type `{ty_name}` of `{name}` takes no `:{argument}`")).hint(
+                    "only `references` (the foreign key column, e.g. `author:references:writer_id`) and `enum` \
+                     (its values, e.g. `status:enum:draft,published`) take an argument",
+                ));
+            }
+            (_, None) => (name.to_owned(), None, None),
         };
-        Ok(Self { name, ty, optional, unique, target })
+        Ok(Self { name, ty, optional, unique, target, enumeration })
     }
 
     /// `Published at`; `Author` for `author_id`.
@@ -201,16 +288,37 @@ impl Field {
         humanize(self.name.strip_suffix("_id").filter(|_| self.target.is_some()).unwrap_or(&self.name))
     }
 
+    /// askama expression printing this field of `record` (`{{ post.title }}`);
+    /// optional values print nothing when empty, attachments their file name.
+    pub(super) fn display(&self, record: &str) -> String {
+        let name = &self.name;
+        match (self.is_attachment(), self.optional) {
+            (true, true) => {
+                format!("{{% if let Some(file) = {record}.{name}() %}}{{{{ file.filename }}}}{{% endif %}}")
+            }
+            (true, false) => format!("{{{{ {record}.{name}_filename }}}}"),
+            (false, true) => format!("{{% if let Some(value) = {record}.{name} %}}{{{{ value }}}}{{% endif %}}"),
+            (false, false) => format!("{{{{ {record}.{name} }}}}"),
+        }
+    }
+
     /// Rust type of the value, without `Option`. For attachments, the file
     /// received before it is stored (`ocre::storage::Upload`).
-    pub(super) fn rust_type(&self) -> &'static str {
+    pub(super) fn rust_type(&self) -> &str {
         match self.ty {
-            FieldType::String | FieldType::Text | FieldType::Date | FieldType::DateTime => "String",
+            FieldType::String
+            | FieldType::Text
+            | FieldType::Date
+            | FieldType::Time
+            | FieldType::DateTime
+            | FieldType::Decimal
+            | FieldType::Uuid => "String",
             FieldType::Integer | FieldType::References => "i64",
             FieldType::Float => "f64",
             FieldType::Boolean => "bool",
             FieldType::Attachment => "Upload",
             FieldType::Json => "ocre::serde_json::Value",
+            FieldType::Enum => &self.enumeration.as_ref().expect("enum fields have values").type_name,
         }
     }
 
@@ -258,12 +366,21 @@ impl Field {
             _ => "TEXT",
         };
         let default = if self.ty == FieldType::Boolean { " DEFAULT 0" } else { "" };
+        // Required references are deleted with their parent (Rails' `dependent: :destroy`
+        // done by SQLite); optional ones are set to NULL (`dependent: :nullify`).
         let reference = match &self.target {
+            Some(target) if self.optional => format!(" REFERENCES {}(id) ON DELETE SET NULL", target.plural),
             Some(target) => format!(" REFERENCES {}(id) ON DELETE CASCADE", target.plural),
             None => String::new(),
         };
-        let check =
-            if self.ty == FieldType::Json { format!(" CHECK (json_valid({}))", self.name) } else { String::new() };
+        let check = match (self.ty, &self.enumeration) {
+            (FieldType::Json, _) => format!(" CHECK (json_valid({}))", self.name),
+            (_, Some(enumeration)) => {
+                let values = enumeration.values.iter().map(|v| format!("'{v}'")).collect::<Vec<_>>().join(", ");
+                format!(" CHECK ({} IN ({values}))", self.name)
+            }
+            _ => String::new(),
+        };
         vec![format!("{} {sql_type}{null}{default}{reference}{check}", self.name)]
     }
 
@@ -275,6 +392,9 @@ impl Field {
             FieldType::String | FieldType::Text if !self.optional => vec![format!("v.required(\"{name}\", {value});")],
             FieldType::Date => vec![format!("v.date(\"{name}\", {value});")],
             FieldType::DateTime => vec![format!("v.datetime(\"{name}\", {value});")],
+            FieldType::Time => vec![format!("v.time(\"{name}\", {value});")],
+            FieldType::Decimal => vec![format!("v.decimal(\"{name}\", {value});")],
+            FieldType::Uuid => vec![format!("v.uuid(\"{name}\", {value});")],
             FieldType::Integer => vec![format!("v.safe_integer(\"{name}\", {value});")],
             FieldType::Attachment => vec![format!("v.file(\"{name}\", {value}, &{});", self.rules_const())],
             _ => vec![],

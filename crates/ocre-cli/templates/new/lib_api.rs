@@ -1,5 +1,5 @@
 use axum::{Router, routing::get};
-use ocre::{Ctx, Json};
+use ocre::{ApiError, Ctx, Error, Json};
 use serde::Serialize;
 use worker::{Context, Env, HttpRequest, event};
 
@@ -15,6 +15,7 @@ fn routes() -> Router<Ctx> {
         .route("/", get(status))
         .route("/up", get(up))
         // ocre:routes
+        .fallback(not_found)
 }
 
 #[derive(Serialize)]
@@ -31,4 +32,9 @@ async fn status() -> Json<Status> {
 /// 200 `OK` whenever the Worker runs.
 async fn up() -> &'static str {
     "OK"
+}
+
+/// Paths no route matches: `{"error": {"status": 404, "message": "Not found"}}`.
+async fn not_found() -> ApiError {
+    ApiError(Error::NotFound)
 }

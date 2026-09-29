@@ -151,11 +151,16 @@ fn flags_answer_the_questions_in_a_terminal_too() {
 #[test]
 fn flags_can_decline_login_and_deploy() {
     let sandbox = Sandbox::new();
-    let s = start(&sandbox, &["new", "quiet", "--full-stack", "--starter", "blog", "--no-login", "--git"]);
+    fs::write(sandbox.work.join("pages.ocre"), "g controller Pages about\n").unwrap();
+    let s = start(
+        &sandbox,
+        &["new", "quiet", "--full-stack", "--starter", "blog", "--no-login", "--git", "--template", "pages.ocre"],
+    );
     let (output, code) = finish(s);
     assert_eq!(code, 0, "{output}");
     assert!(output.contains("Happy building!"));
     assert!(sandbox.work.join("quiet/.git").is_dir());
+    assert!(sandbox.work.join("quiet/templates/pages/about.html").is_file(), "the template ran");
 
     // Logged in with an API token (no email), several accounts, account chosen by flag.
     let sandbox = Sandbox::new();

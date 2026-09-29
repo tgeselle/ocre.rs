@@ -16,6 +16,8 @@ pub struct Project {
     pub database_name: String,
     /// `[package.metadata.ocre] mode = "api"` in Cargo.toml: JSON only, no HTML.
     pub api_only: bool,
+    /// Flags of the running `ocre generate` (defaults for other commands).
+    pub generate: crate::generate::GenerateOptions,
 }
 
 impl Project {
@@ -37,7 +39,7 @@ impl Project {
     pub fn at(root: PathBuf) -> Result<Self, CliError> {
         let database_name = read_database_name(&root.join("wrangler.toml"))?;
         let api_only = read_api_mode(&root.join("Cargo.toml"));
-        Ok(Self { root, database_name, api_only })
+        Ok(Self { root, database_name, api_only, generate: Default::default() })
     }
 }
 

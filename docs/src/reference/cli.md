@@ -7,7 +7,7 @@ This page documents every `ocre` command and flag, what each one does step by st
 - The `ocre` CLI, installed with `cargo install --git https://github.com/tgeselle/ocre.rs ocre-cli` (see [Installation](../getting-started/installation.md)).
 - Node.js 20 or newer: every command that touches the database, the dev server or Cloudflare runs `npx --yes wrangler@4` (the CLI pins wrangler's major version).
 - A rustup toolchain with the `wasm32-unknown-unknown` target for `ocre dev` and `ocre deploy`.
-- Except `ocre new`, `ocre login`, `ocre secret` and `ocre help`, commands run inside an Ocre app: the CLI walks up from the current directory to the nearest `wrangler.toml`, and reads the `database_name` of its `[[d1_databases]]` entry with `binding = "DB"`.
+- Except `ocre new`, `ocre login`, `ocre secret`, `ocre version`, `ocre doctor` and `ocre help`, commands run inside an Ocre app: the CLI walks up from the current directory to the nearest `wrangler.toml`, and reads the `database_name` of its `[[d1_databases]]` entry with `binding = "DB"`.
 - Commands with `--remote`, `ocre login` and `ocre deploy` need a Cloudflare account (free) and a login (`ocre login`) or the `CLOUDFLARE_API_TOKEN` environment variable that wrangler reads.
 
 The examples below were run with `ocre 0.1.0` and wrangler 4.143.0 on apps created by `ocre new ... --starter blog`. Commands that need Cloudflare (`login`, `deploy`, `--remote`, `new --login/--deploy`) were run against the fake wrangler of the CLI's integration tests (`crates/ocre-cli/tests/support/fake_npx.sh`), so the lines wrangler prints in those examples are the fake's, while the lines and JSON printed by `ocre` itself are real.
@@ -16,19 +16,34 @@ The examples below were run with `ocre 0.1.0` and wrangler 4.143.0 on apps creat
 
 | Command | What it does |
 |---|---|
-| [`ocre new [NAME]`](#ocre-new) | Creates an app in `./NAME`; in a terminal, asks for anything flags did not answer |
+| [`ocre new [NAME]`](#ocre-new) | Creates an app in `./NAME`; in a terminal, asks for anything flags did not answer; `--template` applies an application template |
 | [`ocre login`](#ocre-login) | Logs in to Cloudflare in the browser, unless already logged in |
-| [`ocre generate` / `ocre g`](#ocre-generate) | Generates code: see [Generators](generators.md) |
+| [`ocre generate` / `ocre g`](#ocre-generate) | Generates code: see [Generators](generators.md); `--pretend`, `--force`, `--skip` |
+| [`ocre destroy` / `ocre d`](#ocre-destroy) | Undoes a recorded generator run |
+| [`ocre template SOURCE`](#ocre-template) | Applies an application template (a file or URL of ocre commands) to the app |
 | [`ocre migrate`](#ocre-migrate) | Applies D1 migrations (local unless `--remote`); `--status` lists pending ones |
-| [`ocre db seed`](#ocre-db-seed) | Runs `db/seeds.sql` (local unless `--remote`) |
+| [`ocre db create`](#ocre-db-create) | Creates the local database, or with `--remote` the D1 database on Cloudflare |
+| [`ocre db prepare`](#ocre-db-prepare) | Local, safe to repeat: applies pending migrations, seeds a new database |
+| [`ocre db seed`](#ocre-db-seed) | Runs `db/seeds.sql` (local unless `--remote`); `--replant` empties the tables first |
 | [`ocre db reset`](#ocre-db-reset) | Local only: deletes the local database, applies every migration, runs the seeds |
+| [`ocre db drop`](#ocre-db-drop) | Local only: deletes the local database |
+| [`ocre db truncate`](#ocre-db-truncate) | Local only: deletes every row, keeps tables and migrations |
+| [`ocre db version`](#ocre-db-version) | Prints the last applied migration |
+| [`ocre db schema`](#ocre-db-schema) | Writes the database's `CREATE` statements to `db/schema.sql` |
 | [`ocre sql QUERY`](#ocre-sql) | Runs SQL on D1 and prints the rows |
 | [`ocre dev`](#ocre-dev) | Applies local migrations, then runs the app with `wrangler dev` |
+| [`ocre test`](#ocre-test) | Runs `cargo test`, the wasm32 check and, with `--e2e`, `tests/e2e.sh` against a local server |
 | [`ocre deploy`](#ocre-deploy) | Creates missing Cloudflare resources, deploys, applies remote migrations |
 | [`ocre secret`](#ocre-secret) | Prints a new random value for `SECRET_KEY_BASE` |
+| [`ocre secrets list` / `push`](#ocre-secrets) | Lists secret names locally and on the Worker; uploads values from a git-ignored file |
 | [`ocre routes [FILTER]`](#ocre-routes) | Lists the app's HTTP routes, read from its source |
+| [`ocre schedules [run TASK]`](#ocre-schedules) | Lists the Cron Triggers and their tasks; `run` fires one on `ocre dev` |
 | [`ocre i18n missing`](#ocre-i18n-missing) | Checks the locale files; fails on missing keys or invalid files |
-| [`ocre help`](#ocre-help), [`ocre --version`](#ocre-version) | Help text and version |
+| [`ocre doctor`](#ocre-doctor) | Checks the tools and the app's setup; fails when a check fails |
+| [`ocre about`](#ocre-about), [`ocre version`](#ocre-version) | Versions and the app's configuration |
+| [`ocre stats [DIRS]`](#ocre-stats) | Lines of code per part of the app |
+| [`ocre notes`](#ocre-notes) | Lists TODO, FIXME and OPTIMIZE comments |
+| [`ocre help`](#ocre-help) | Help text |
 
 ## Global flag: --json
 
@@ -43,9 +58,20 @@ On success the object has `"ok": true`, `command`, and only the keys that apply 
 | Key | Type | Set by | Meaning |
 |---|---|---|---|
 | `ok` | boolean | every command | `true` |
-| `command` | string | every command | `new`, `login`, `migrate`, `db seed`, `db reset`, `sql`, `dev`, `deploy`, `secret`, `routes`, `i18n missing`, or `generate <generator>` (e.g. `generate scaffold`) |
+| `command` | string | every command | The command's name, e.g. `new`, `migrate`, `db seed`, `secrets list`, `schedules run`, `destroy`, `doctor`, or `generate <generator>` (`generate scaffold`; `generate custom` for app generators) |
 | `created` | string[] | `new`, generators | Files created, relative to the app root (to the current directory for `ocre new`, so they start with the app name) |
-| `updated` | string[] | generators | Existing files changed |
+| `updated` | string[] | generators, `destroy`, `template`, `db schema` | Existing files changed |
+| `skipped` | string[] | generators (`--skip`), `destroy` | Existing files kept: by `--skip`, or left changed by `destroy` (Cargo.toml, wrangler.toml, changed lines) |
+| `removed` | string[] | `destroy` | Files deleted, the generation record last |
+| `pretend` | `true` | generators, `destroy` | `--pretend`: nothing was written |
+| `templates` | object[] | `generate override` | `{"path", "overridden"}` per generator template |
+| `about` | object | `version`, `about` | `cli`, `app`, `app_version`, `ocre`, and for `about` also `mode`, `rust_toolchain`, `compatibility_date`, `bindings`, `vars`, `features` |
+| `checks` | object[] | `doctor` | `{"name", "status", "detail", "hint"}`, `status` being `ok`, `warn` or `fail` |
+| `stats` | object | `stats` | `rows` (`name`, `files`, `lines`, `loc`, `functions`), `code_loc`, `test_loc` |
+| `notes` | object[] | `notes` | `{"path", "line", "tag", "text"}` |
+| `version` | string or `null` | `db version` | Last applied migration file, `null` when none is |
+| `secrets` | object[] | `secrets list` | `{"name", "local", "deployed"}` |
+| `schedules` | object[] | `schedules` | `{"cron", "task"}` |
 | `url` | string | `dev`, `deploy`, `new --deploy` | `http://localhost:<port>`, or the `https://....workers.dev` URL found in wrangler's deploy output |
 | `email` | string | `login`, `new --login`, `new --deploy` | Email of the Cloudflare login |
 | `pending` | string[] | `migrate --status` | Migration files not applied yet |
@@ -56,9 +82,9 @@ On success the object has `"ok": true`, `command`, and only the keys that apply 
 | `secret` | string | `secret` | 128 lowercase hex characters |
 | `secret_created` | `true` | `deploy`, `new --deploy` | The deploy uploaded a new `SECRET_KEY_BASE` because the Worker had none |
 | `provisioned` | string[] | `deploy` | Cloudflare resources created because they were missing, e.g. `queue blog-jobs` |
-| `next` | string[] | `new`, `migrate --status`, generators | Commands or actions to run next, in order |
+| `next` | string[] | `new`, `migrate --status`, generators, `destroy`, db tasks, `secrets list` | Commands or actions to run next, in order |
 
-On failure the object is `{"ok": false, "error": "...", "hint": "..."}`. `hint` names the fix; it is `null` for the few errors without one (for example I/O errors).
+On failure the object is `{"ok": false, "error": "...", "hint": "..."}`. `hint` names the fix; it is `null` for the few errors without one (for example I/O errors). `ocre doctor` and `ocre test` report failed checks the same way, with the report's keys (`checks`, `ran`) alongside.
 
 ```json
 {"error":"no wrangler.toml found in this directory or its parents","hint":"run this command inside an Ocre app, or create one with `ocre new <name>`","ok":false}
@@ -122,16 +148,18 @@ Creates a new app in `./NAME`. When stdin and stdout are both terminals and neit
 | `--deploy` / `--no-deploy` | no deploy | Deploy right after creating the app; implies `--login` |
 | `-y`, `--yes` | off | Never prompt, even in a terminal |
 | `--ocre-path <OCRE_PATH>` | git dependency | Use a local checkout of the `ocre` crate (`crates/ocre` of the Ocre repository) instead of `git = "https://github.com/tgeselle/ocre.rs"` |
+| `-m`, `--template <TEMPLATE>` | none | Application template to apply once the app exists: a file or `https://` URL of ocre commands, one per line (see [ocre template](#ocre-template)). Every line is checked before the app is written |
 
 What it does, in flag mode:
 
 1. Checks the name and that `./NAME` does not exist, resolves `--ocre-path`, and checks that `git` runs when `--git` is given. Nothing is written if any check fails.
 2. With `--login` or `--deploy`: runs `wrangler whoami --json`, runs `wrangler login` if not logged in, and picks the account (`--account-id` must be one of the login's accounts; with one account none is needed).
-3. Writes the app: `Cargo.toml`, `wrangler.toml`, `rust-toolchain.toml`, `.gitignore`, `AGENTS.md`, `migrations/.gitkeep`, `public/robots.txt`, `src/lib.rs`, and in full-stack apps `templates/layout.html` and `templates/home.html`. An API-only app's `Cargo.toml` has `ocre = { ..., default-features = false }`, no askama, and `[package.metadata.ocre] mode = "api"`, which generators read.
+3. Writes the app: `Cargo.toml`, `wrangler.toml`, `rust-toolchain.toml`, `.gitignore`, `AGENTS.md`, `migrations/.gitkeep`, `public/robots.txt`, `src/lib.rs`, and in full-stack apps `templates/layout.html`, `templates/home.html` and `templates/error.html`. An API-only app's `Cargo.toml` has `ocre = { ..., default-features = false }`, no askama, and `[package.metadata.ocre] mode = "api"`, which generators read.
 4. Writes `.dev.vars` (git-ignored) with a new random `SECRET_KEY_BASE` and `MAIL_ADAPTER=log`, used by `ocre dev` only.
 5. With `--starter blog`: runs the equivalent of `ocre g scaffold Post title:string body:text published:boolean` (`ocre g api` in an API-only app).
-6. With `--git`: runs `git init --quiet`.
-7. With `--deploy`: runs the same steps as [`ocre deploy`](#ocre-deploy), without the locale check.
+6. With `--template`: runs the template's lines in the new app, like [`ocre template`](#ocre-template); the files they create are added to `created` and the lines to `ran`.
+7. With `--git`: runs `git init --quiet`.
+8. With `--deploy`: runs the same steps as [`ocre deploy`](#ocre-deploy), without the locale check.
 
 The wizard asks, in order: the app name, "What are you building?" (full-stack or API only), "Pick a starter", then checks the Cloudflare login and offers it ("Log in now" or "Later"), asks which account when the login has several, "Initialize a git repository?" (default yes), and "Deploy it now?" (default yes, only when logged in). Wrangler's output is hidden behind a spinner and included in error messages. Each question is skipped when its flag was given. When the user chose not to log in, `ocre login` is added to the next steps. Esc or Ctrl-C cancels with the error `cancelled`.
 
@@ -152,6 +180,7 @@ ocre new blog --starter blog --yes
   create  blog/src/lib.rs
   create  blog/templates/layout.html
   create  blog/templates/home.html
+  create  blog/templates/error.html
   create  blog/.dev.vars
   create  blog/src/models/mod.rs
   create  blog/migrations/0001_create_posts.sql
@@ -207,7 +236,7 @@ Next:
 The same with `--json` prints wrangler's lines on stderr and this on stdout:
 
 ```json
-{"command":"new","created":["three/Cargo.toml","three/wrangler.toml","three/rust-toolchain.toml","three/.gitignore","three/AGENTS.md","three/migrations/.gitkeep","three/public/robots.txt","three/src/lib.rs","three/templates/layout.html","three/templates/home.html","three/.dev.vars"],"email":"ada@example.com","next":["cd three","ocre dev"],"ok":true,"secret_created":true,"url":"https://app.example.workers.dev"}
+{"command":"new","created":["three/Cargo.toml","three/wrangler.toml","three/rust-toolchain.toml","three/.gitignore","three/AGENTS.md","three/migrations/.gitkeep","three/public/robots.txt","three/src/lib.rs","three/templates/layout.html","three/templates/home.html","three/templates/error.html","three/.dev.vars"],"email":"ada@example.com","next":["cd three","ocre dev"],"ok":true,"secret_created":true,"url":"https://app.example.workers.dev"}
 ```
 
 Errors:
@@ -260,11 +289,127 @@ ocre login --json
 ## ocre generate
 
 ```text
-ocre generate <GENERATOR> [ARGS]...
+ocre generate <GENERATOR> [ARGS]... [--pretend] [--force | --skip]
 ocre g <GENERATOR> [ARGS]...
 ```
 
-`g` is an alias. The generators are `model`, `scaffold`, `api`, `auth`, `migration`, `mailer`, `mailbox`, `job`, `schedule`, `cache` and `locale`; each one is documented with its arguments, files, output and errors in [Generators](generators.md).
+`g` is an alias. The built-in generators are `model`, `scaffold`, `api`, `resource`, `controller`, `auth`, `migration`, `mailer`, `mailbox`, `job`, `schedule`, `cache`, `locale`, `override` and `generator`; any other name runs the app's own generator in `.ocre/generators/<name>/`. Each one is documented with its arguments, files, output and errors in [Generators](generators.md).
+
+| Flag | Effect |
+|---|---|
+| `--pretend` | Report the files that would be created or updated; write nothing |
+| `--force` | Overwrite files that already exist |
+| `--skip` | Keep files that already exist and generate the rest (conflicts with `--force`) |
+
+Every run that writes files is recorded in `.ocre/generated/` for [`ocre destroy`](#ocre-destroy) (see [Generation records](generators.md#generation-records-and-ocre-destroy)).
+
+## ocre destroy
+
+```text
+ocre destroy <GENERATOR> [NAME] [--force] [--pretend] [--json]
+ocre d <GENERATOR> [NAME]
+```
+
+Undoes a generator run, like `rails destroy`, from its record in `.ocre/generated/`: deletes the files it created (and the directories left empty), takes the lines it added out of existing files and puts back the lines it replaced, then deletes the record. Changes to `Cargo.toml` and `wrangler.toml` stay (features and bindings later code may use); they are reported as `skipped`. No wrangler, no network.
+
+| Argument or flag | Default | Effect |
+|---|---|---|
+| `GENERATOR` | required | The generator as typed after `ocre g` (`scaffold`, `controller`, or an app generator's name) |
+| `NAME` | latest run | The name given to the generator (`Post`; `BlogPost`, `blog_post` and `blog-post` match each other). Without it, the latest run of that generator |
+| `--force` | off | Delete the generated files even if they changed since; leave in place the added lines that changed |
+| `--pretend` | off | Show what would be removed; change nothing |
+
+```sh
+ocre destroy scaffold Temp
+```
+
+```text
+  update  src/models/mod.rs
+  update  src/lib.rs
+  remove  migrations/0004_create_temps.sql
+  remove  src/models/temp.rs
+  remove  src/temps.rs
+  remove  templates/temps/index.html
+  remove  templates/temps/show.html
+  remove  templates/temps/new.html
+  remove  templates/temps/edit.html
+  remove  templates/temps/_form.html
+  remove  .ocre/generated/0005_scaffold_temp.json
+
+Next:
+  if `ocre migrate` already applied migrations/0004_create_temps.sql, its tables and columns stay: undo them with a new migration (`ocre g migration ...`)
+```
+
+The latest `ocre g controller` run, whose `src/help.rs` was edited since, deleted anyway:
+
+```sh
+ocre destroy controller --force --json
+```
+
+```json
+{"command":"destroy","ok":true,"removed":["src/help.rs","templates/help/faq.html",".ocre/generated/0008_controller_help.json"],"updated":["src/lib.rs"]}
+```
+
+A migration file is deleted, but a migration already applied to a database stays applied: the next step says so. Destroy later runs first when they build on an earlier one (a scaffold whose model a later `references` field extended).
+
+Errors:
+
+| Error | Hint |
+|---|---|
+| ``no recorded `ocre g scaffold Temp` run to destroy`` | `recorded runs: ocre g scaffold Post title:string ..., ...` (the recorded commands), or, without records, ``` `ocre destroy` undoes runs recorded in .ocre/generated/; this app has none, so remove the files by hand ``` |
+| ``cannot destroy `ocre g controller Help faq`: src/help.rs changed since it was generated`` (also ``<file>: the generated `<line>` changed`` and `<file> no longer exists`) | `destroy later generator runs first (newest first), undo your edits, or pass --force to delete the generated files anyway and leave changed lines in place` |
+| `.ocre/generated/<file> is not a valid generation record: ...` | ``restore it from version control, or delete it if you no longer need `ocre destroy` for it`` |
+
+## ocre template
+
+```text
+ocre template <SOURCE> [--json]
+```
+
+Applies an application template to the current app, like `rails app:template` (`ocre new --template` does the same for a new app). `SOURCE` is a file path or an `http(s)://` URL of a text file with one ocre command per line; `#` starts a comment and the leading `ocre` is optional:
+
+```text
+# Blog comments
+g scaffold Comment body:text post:references
+cargo add slug
+migrate
+```
+
+Only commands that change the app locally are allowed: `g`/`generate`, `d`/`destroy`, `migrate`, `db`, `sql`, `i18n`, `routes`, and `cargo add` / `cargo remove`; nothing with `--remote`, no `deploy`, `login` or shell commands. Every line is checked before the first one runs; lines then run in order, each as `ocre <line> --json` in the app (or `cargo ...`), and the first failing line stops the run. A template runs generators and `cargo add` on your machine: apply only templates you trust.
+
+```sh
+ocre template blog.ocre
+```
+
+```text
+  create  migrations/0004_create_comments.sql
+  create  src/models/comment.rs
+  create  src/comments.rs
+  create  templates/comments/index.html
+  create  templates/comments/show.html
+  create  templates/comments/new.html
+  create  templates/comments/edit.html
+  create  templates/comments/_form.html
+  update  Cargo.toml
+  update  src/lib.rs
+  update  src/models/mod.rs
+  update  src/models/post.rs
+  ocre g scaffold Comment body:text post:references
+  cargo add slug
+  ocre migrate
+```
+
+With `--json`: `{"command": "template", "created": [...], "updated": [...], "ran": [...], "ok": true}`.
+
+Errors:
+
+| Error | Hint |
+|---|---|
+| ``blog.ocre line 1: `deploy` is not allowed in a template`` (also `targets production (--remote)`, `has an unclosed quote`) | ``template lines are ocre commands that change the app locally: g/generate, destroy, migrate, db, sql, i18n, routes, or `cargo add`/`cargo remove`, without --remote`` |
+| `could not read the template missing.ocre: ...` | `pass the path of a text file of ocre commands, or an https:// URL` |
+| `could not download the template <url>: ...` | `check the URL (it must serve the template as plain text), or download it and pass its path` |
+| ``template line `ocre g ...` failed: <its error>`` | the line's own hint |
+| ``template line `cargo add ...` failed (<status>)`` | `the cargo output above names the cause` |
 
 ## ocre migrate
 
@@ -350,7 +495,7 @@ Errors: the shared ones. A failing migration is reported as `` `wrangler d1 migr
 ## ocre db seed
 
 ```text
-ocre db seed [--remote] [--json]
+ocre db seed [--remote] [--replant] [--json]
 ```
 
 Runs `db/seeds.sql` with `wrangler d1 execute <database> --file db/seeds.sql --local --yes` (`--remote` for production). `--yes` answers wrangler's "database unavailable during import" question, so remote seeding never waits for input. The file is plain SQL, typically `INSERT` statements; it is not tracked, so running it twice inserts the rows twice.
@@ -358,6 +503,7 @@ Runs `db/seeds.sql` with `wrangler d1 execute <database> --file db/seeds.sql --l
 | Flag | Default | Effect |
 |---|---|---|
 | `--remote` | local | Seed the production database on Cloudflare |
+| `--replant` | off | Local only: first empty every app table like [`ocre db truncate`](#ocre-db-truncate), then load the seeds, so the data matches the file exactly |
 
 ```sql
 -- db/seeds.sql
@@ -394,7 +540,9 @@ ocre db seed --json
 
 With `--remote`, `ran` is `["loaded db/seeds.sql (--remote)"]`, the JSON has `"remote": true` and the human output ends with `Target: remote D1 database on Cloudflare`.
 
-Errors: `db/seeds.sql not found in the app` (hint: ``create db/seeds.sql with INSERT statements, then run `ocre db seed` ``), and the shared ones.
+`ocre db seed --replant --json` reports both steps: `{"command":"db seed","ok":true,"ran":["emptied posts (--local)","loaded db/seeds.sql (--local)"]}`.
+
+Errors: `db/seeds.sql not found in the app` (hint: ``create db/seeds.sql with INSERT statements, then run `ocre db seed` ``), ``` `ocre db seed --replant` only runs on the local database ``` for `--replant --remote` (hint: ``Ocre never deletes production data; use the Cloudflare dashboard or `npx wrangler d1 ...` for that on purpose``), and the shared ones.
 
 ## ocre db reset
 
@@ -424,6 +572,119 @@ ocre db reset --json
 ```
 
 `ran` lists only the steps that happened: no `deleted ...` without a local database, no `loaded ...` without seeds.
+
+## ocre db create
+
+```text
+ocre db create [--remote] [--json]
+```
+
+Creates the app's database. Locally, it runs `SELECT 1` with `wrangler d1 execute <database> --local`, which makes wrangler create its database file under `.wrangler/state/v3/d1`; the next step is `ocre migrate`. With `--remote`, it looks for the D1 database in `wrangler d1 list --json` and runs `wrangler d1 create <database>` when it is missing (the first `ocre deploy` does the same on its own).
+
+```json
+{"command":"db create","next":["ocre migrate"],"ok":true,"ran":["created local database shop"]}
+```
+
+`ran` says `local database shop already exists` when it did, and `D1 database shop already exists` with `--remote`; a remote creation is listed in `provisioned` (`D1 database shop`) with `"remote": true`.
+
+## ocre db prepare
+
+```text
+ocre db prepare [--json]
+```
+
+Local, safe to run any time (Rails' `db:prepare`): applies pending migrations to the local database and, when that database did not exist yet, loads `db/seeds.sql` if present. A good first command after cloning an app.
+
+```json
+{"command":"db prepare","ok":true,"ran":["applied migrations (--local)","loaded db/seeds.sql (--local)"]}
+```
+
+On an existing database, `ran` is only `["applied migrations (--local)"]`.
+
+## ocre db drop
+
+```text
+ocre db drop [--json]
+```
+
+Local only: deletes `.wrangler/state/v3/d1`, the local D1 databases. The next step is `ocre db prepare`.
+
+```text
+  deleted .wrangler/state/v3/d1
+
+Next:
+  ocre db prepare
+```
+
+Without a local database, `ran` is `["no local database to delete"]`. `ocre db drop --remote` is refused: ``` `ocre db drop` only runs on the local database ``` (hint: ``Ocre never deletes production data; use the Cloudflare dashboard or `npx wrangler d1 ...` for that on purpose``).
+
+## ocre db truncate
+
+```text
+ocre db truncate [--json]
+```
+
+Local only: deletes every row of every app table (all tables but SQLite's, D1's and `d1_migrations`) in one batch with deferred foreign keys, and resets the `AUTOINCREMENT` counters. Tables and applied migrations stay.
+
+```json
+{"command":"db truncate","ok":true,"ran":["emptied posts (--local)"]}
+```
+
+With no table, `ran` is `["no tables to empty"]`. `--remote` is refused with ``` `ocre db truncate` only runs on the local database ``` and the same hint as `ocre db drop`.
+
+## ocre db version
+
+```text
+ocre db version [--remote] [--json]
+```
+
+Prints the last migration applied (local database unless `--remote`), read from wrangler's `d1_migrations` table.
+
+```sh
+ocre db version
+```
+
+```text
+0001_create_posts.sql
+```
+
+```json
+{"command":"db version","ok":true,"version":"0001_create_posts.sql"}
+```
+
+Before any migration it prints `no migration applied` (`"version": null`). With `--remote`, the human output ends with `Target: remote D1 database on Cloudflare` and the JSON has `"remote": true`.
+
+## ocre db schema
+
+```text
+ocre db schema [--remote] [--json]
+```
+
+Writes the database's current `CREATE TABLE`, `CREATE INDEX`, view and trigger statements (from `sqlite_master`, without SQLite's and D1's own tables) to `db/schema.sql`, like Rails' `structure.sql`. It is a snapshot to read and the input of [`ocre g migration rebuild_<table>`](generators.md#ocre-g-migration); migrations stay the source of truth. Run it again after `ocre migrate`.
+
+```sh
+ocre db schema
+```
+
+```text
+  create  db/schema.sql
+```
+
+```sql
+-- Schema of the local D1 database, written by `ocre db schema` from sqlite_master.
+-- A snapshot for reading: migrations/ are the source of truth. Run `ocre db schema` again after `ocre migrate`.
+
+CREATE TABLE posts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    published INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+```
+
+Later runs report `update  db/schema.sql` (`"updated": ["db/schema.sql"]`). Errors: the shared wrangler errors, and `` unexpected `wrangler d1 execute --json` output: ... ``.
 
 ## ocre sql
 
@@ -539,6 +800,44 @@ The report is printed after `wrangler dev` exits successfully; with `--json` it 
 
 and every line above goes to stderr. Errors: the shared ones (locale files, wasm target, wrangler). `` `wrangler dev --port 8787` failed `` usually means the build failed: the compiler errors are in the output above it.
 
+## ocre test
+
+```text
+ocre test [--e2e] [--port <PORT>] [--json] [-- <CARGO_TEST_ARGS>...]
+```
+
+Runs the app's checks in one command, like `bin/rails test:all`, and stops at the first failure:
+
+1. `cargo test`, the native unit tests, with the arguments after `--` passed on (`ocre test -- models` runs the tests whose name contains `models`);
+2. `cargo check --target wasm32-unknown-unknown`, the type check of the real build;
+3. with `--e2e`: applies the local migrations, starts one `wrangler dev --port <PORT>` for the whole run (a development build; the first one can take minutes), runs `sh tests/e2e.sh` with `BASE_URL=http://localhost:<PORT>` once the server is ready, then stops the server.
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--e2e` | off | Also run `tests/e2e.sh` against a local server. The script is yours: requests to `$BASE_URL`, exiting non-zero on failure (see [Testing](../guides/testing.md)) |
+| `--port <PORT>` | `8788` | Port of the server started for `--e2e`, next to `ocre dev`'s 8787 |
+
+```sh
+ocre test
+```
+
+```text
+...
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.52s
+  cargo test: ok
+  cargo check --target wasm32-unknown-unknown: ok
+```
+
+```json
+{"command":"test","ok":true,"ran":["cargo test: ok","cargo check --target wasm32-unknown-unknown: ok"]}
+```
+
+With `--json`, cargo's and wrangler's output go to stderr. A failing step ends with, for example, `error: cargo test failed (exit status: 101)` and `hint: the cargo output above names the failure`; the steps that passed are still listed in `ran`. Other errors: `tests/e2e.sh not found` (hint: ``create tests/e2e.sh: a shell script sending requests to $BASE_URL (e.g. `curl -fsS "$BASE_URL/up"`) that exits non-zero on failure``, checked before anything runs), `tests/e2e.sh failed (<status>)` (hint: `its output above shows the failing request`), `wrangler dev stopped or did not get ready` (hint: ``run `ocre dev` to see the build or startup error``), the missing wasm target, and `could not run cargo: ...`.
+
 ## ocre deploy
 
 ```text
@@ -639,6 +938,47 @@ ocre secret --json
 
 See [SECRET_KEY_BASE](configuration.md#secret_key_base).
 
+## ocre secrets
+
+```text
+ocre secrets list [--json]
+ocre secrets push <NAMES>... [--file <FILE>] [--json]
+```
+
+Worker secrets are Ocre's credentials (Rails' `credentials.yml.enc`): Cloudflare stores them encrypted, the Worker reads them with `ctx.env().secret(NAME)`, and nothing secret is committed. Values can be written but never read back.
+
+`ocre secrets list` shows each secret name of `.dev.vars` (used by `ocre dev`) and of the deployed Worker (`wrangler secret list`), side by side. Names set locally but not deployed get a next step; `SECRET_KEY_BASE` and `MAIL_ADAPTER` are left out of it, their `.dev.vars` values being for development only.
+
+```text
+  GITHUB_CLIENT_ID                .dev.vars
+  MAIL_ADAPTER                    .dev.vars
+  SECRET_KEY_BASE                 .dev.vars
+
+Next:
+  ocre secrets push GITHUB_CLIENT_ID --file <production values>
+```
+
+```json
+{"command":"secrets list","next":["ocre secrets push GITHUB_CLIENT_ID --file <production values>"],"ok":true,"secrets":[{"deployed":false,"local":true,"name":"GITHUB_CLIENT_ID"},{"deployed":false,"local":true,"name":"MAIL_ADAPTER"},{"deployed":false,"local":true,"name":"SECRET_KEY_BASE"}]}
+```
+
+`ocre secrets push` uploads the named secrets to the deployed Worker, with their values read from a `NAME=value` file (`--file`, default `.dev.vars`; keep production values in another git-ignored file such as `.prod.vars`). It writes them to a temporary JSON file under `.wrangler/`, runs one `wrangler secret bulk` (a new Worker version, no rebuild), and deletes the file whatever happened. The report's `ran` is `["uploaded GITHUB_CLIENT_ID", ...]`.
+
+```sh
+ocre secrets push GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET --file .prod.vars
+```
+
+Errors:
+
+| Error | Hint |
+|---|---|
+| `name the secrets to upload` | ``e.g. `ocre secrets push GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET`; `ocre secrets list` shows them`` |
+| `SECRET_KEY_BASE in .dev.vars is a development value` (also `MAIL_ADAPTER`) | ``production needs its own: `ocre deploy` creates SECRET_KEY_BASE; for others put the production value in another git-ignored file and pass `--file <it>`, or run `npx wrangler secret put SECRET_KEY_BASE` `` |
+| `NOPE is not set in .prod.vars` | ``add `NOPE=<value>` to .prod.vars, or run `npx wrangler secret put NOPE` `` |
+| `cannot read <file>: ...` | none |
+
+Both commands need a Cloudflare login for the deployed side, and the shared wrangler errors apply.
+
 ## ocre routes
 
 ```text
@@ -675,6 +1015,38 @@ ocre routes comments --json
 ```
 
 The filter is a substring match on all three columns: `ocre routes up` also returns `/signup` and every `::update` handler. With no match, the human output is `No routes.` and the JSON has `"routes": []`. Error: `cannot read src/lib.rs: ...` (hint: ``` `ocre routes` reads the router built in src/lib.rs; run it inside an Ocre app ```).
+
+## ocre schedules
+
+```text
+ocre schedules [--json]
+ocre schedules run <TASK> [--port <PORT>] [--json]
+```
+
+`ocre schedules` lists the expressions of `[triggers] crons` in `wrangler.toml` with the task that handles each, read from the `"<cron>" => <task>::run(...)` arms of `src/schedules/mod.rs` (see [`ocre g schedule`](generators.md#ocre-g-schedule)), without building the app. A cron no task handles fails when it fires; it is listed as `(no task: fails when it fires)`, with a next step.
+
+```text
+CRON (UTC)   TASK
+0 3 * * *    src/schedules/nightly_cleanup.rs
+0 9 * * MON  src/schedules/weekly_digest.rs
+```
+
+```json
+{"command":"schedules","ok":true,"schedules":[{"cron":"0 3 * * *","task":"nightly_cleanup"},{"cron":"0 9 * * MON","task":"weekly_digest"}]}
+```
+
+`ocre schedules run <TASK>` fires the task's cron on the running `ocre dev`, through wrangler's local `/cdn-cgi/local/scheduled` endpoint, and returns once it answered; the task's `[ocre cron] <cron> done` (or `failed`) line is in the `ocre dev` output. Cron Triggers never fire in `ocre dev` by themselves.
+
+| Argument | Default | Effect |
+|---|---|---|
+| `TASK` | required | The task, as in `src/schedules/<task>.rs` |
+| `--port` | `8787` | The port `ocre dev` listens on |
+
+```json
+{"command":"schedules run","ok":true,"ran":["fired nightly_cleanup (0 3 * * *); its `[ocre cron]` line is in the `ocre dev` output"]}
+```
+
+Errors: ``no scheduled task `<task>` `` (hint: the tasks of the app, or how to create one); ``cannot reach `ocre dev` on port 8787: ...`` (hint: start `ocre dev` first, or pass `--port`); `the scheduled task answered HTTP 500` (hint: read the `[ocre cron]` line in the `ocre dev` output).
 
 ## ocre i18n missing
 
@@ -719,6 +1091,122 @@ An invalid file is reported with its line, e.g. ``locales/fr.yml:6: quote values
 
 `ocre dev` and `ocre deploy` run the loading part of this check (missing files, invalid files) but not the missing-keys part: at runtime, a missing key falls back to the default locale in release builds (see [Translations](../guides/i18n.md)).
 
+## ocre doctor
+
+```text
+ocre doctor [--json]
+```
+
+Checks the tools and, inside an app, its setup, like `cargo loco doctor`. Each check is `ok`, `warn` or `fail`; any `fail` makes the command exit with code 1, so it can gate CI. Warnings (not logged in, pending migrations) do not. Outside an app, only the tool checks run.
+
+| Check | Fails or warns when |
+|---|---|
+| `rust` | Fails: rustc has no `wasm32-unknown-unknown` target |
+| `node` | Fails: `npx` does not run (install Node.js 20 or newer) |
+| `cloudflare login` | Warns: not logged in (`wrangler whoami`); fails when wrangler errors |
+| `cache binding`, `storage binding`, `jobs queue`, `cron triggers`, `realtime binding` | Only when the code uses them (`ocre::cache::`, `ocre::storage::`, the `queue` and `scheduled` events, realtime channels). Fails: `wrangler.toml` lacks the `CACHE` KV namespace, the `STORAGE` R2 bucket, the queue producers and consumers, `[triggers] crons`, or the `OcreChannel` Durable Object |
+| `migrations` | Warns: local migrations are pending (`wrangler d1 migrations list --local`) |
+| `local secrets` | Fails: `.dev.vars` has no `SECRET_KEY_BASE` |
+| `production secrets` | When logged in. Warns: the deployed Worker lacks `SECRET_KEY_BASE` (or `RESEND_API_KEY` with `MAIL_ADAPTER = "resend"`); ok when the Worker is not deployed yet |
+
+```text
+  ok    rust                wasm32-unknown-unknown target installed
+  ok    node                npx 10.9.8
+  ok    cloudflare login    logged in as ada@example.com
+  ok    storage binding     configured in wrangler.toml
+  warn  migrations          pending locally: 0001_create_posts.sql
+                            run `ocre migrate`
+  ok    local secrets       SECRET_KEY_BASE set in .dev.vars
+  ok    production secrets  not deployed yet
+```
+
+With `--json`, `checks` holds one `{"name", "status", "detail", "hint"}` object per line. A failed check ends the output with `error: 1 check(s) failed: local secrets` and `hint: fix each failed check as its hint says, then run `ocre doctor` again` (`"ok": false`, `error` and `hint` with `--json`).
+
+## ocre about
+
+```text
+ocre about [--json]
+```
+
+Versions and the app's configuration, read from `Cargo.toml`, `wrangler.toml` and `rust-toolchain.toml` without building anything (Rails' `about`, Loco's `doctor --config`). Variable values are never printed, only their names.
+
+```text
+Ocre CLI            0.1.0
+App                 ci-app
+App version         0.1.0
+Ocre crate          git https://github.com/tgeselle/ocre.rs
+Rust toolchain      stable
+Compatibility date  2026-09-01
+Mode                full-stack (HTML and JSON)
+Bindings            D1 DB (ci-app), KV CACHE, R2 STORAGE (ci-app-storage), Queue JOBS (ci-app-jobs), Queue consumer (ci-app-jobs), Durable Object CHANNELS (OcreChannel), cron 0 3 * * *, Assets (public)
+Variables           MAIL_FROM
+Ocre features       realtime, graphql
+```
+
+With `--json`, the same values are in `about`: `cli`, `app`, `app_version`, `ocre`, `mode`, `rust_toolchain`, `compatibility_date`, `bindings`, `vars` and `features`.
+
+## ocre version
+
+```text
+ocre version [--json]
+ocre --version
+```
+
+`ocre version` prints the CLI's version and, inside an app, the app's name and version and its `ocre` dependency (version, git source or path):
+
+```text
+Ocre CLI            0.1.0
+App                 ci-app
+App version         0.1.0
+Ocre crate          git https://github.com/tgeselle/ocre.rs
+```
+
+```json
+{"about":{"app":"ci-app","app_version":"0.1.0","cli":"0.1.0","ocre":"git https://github.com/tgeselle/ocre.rs"},"command":"version","ok":true}
+```
+
+`ocre --version` (or `-V`) prints only `ocre 0.1.0`.
+
+## ocre stats
+
+```text
+ocre stats [DIRS]... [--json]
+```
+
+Lines of code per part of the app, like `rails stats`: files, lines, LOC (lines neither blank nor only a comment) and Rust functions for `src/models`, `src/jobs`, `src/mailers`, `src/schedules`, the rest of `src/`, `templates/`, `migrations/` and `tests/`, then the Rust code-to-test ratio. Each extra directory (relative to the app root) gets its own row.
+
+```text
+Name                    Files   Lines     LOC Functions
+Models                     19    3282    2358       273
+Jobs                        4     144      64         7
+Mailers                     3      85      44         3
+Schedules                   3      53      21         3
+Controllers and app        27    2921    2233       211
+Templates                  50     787     641         0
+Migrations                 26     217     186         0
+Tests                       0       0       0         0
+
+Code LOC: 4720    Test LOC: 0    Code to test ratio: 1:0.0
+```
+
+With `--json`: `"stats": {"rows": [{"name", "files", "lines", "loc", "functions"}, ...], "code_loc", "test_loc"}`. Error: `lib is not a directory of the app` (hint: ``pass directories relative to the app root, e.g. `ocre stats lib` ``).
+
+## ocre notes
+
+```text
+ocre notes [--annotations TAG,TAG...] [--json]
+```
+
+Lists the `TODO`, `FIXME` and `OPTIMIZE` comments of `src/`, `templates/`, `migrations/`, `tests/`, `db/` and `locales/`, like `rails notes`. A tag counts inside a comment (`//`, `/*`, `{#`, `<!--`, `--` or `#`) as a whole word; `--annotations` replaces the tags.
+
+```text
+src/pages.rs:42: [TODO] tidy this
+```
+
+```json
+{"command":"notes","notes":[{"line":42,"path":"src/pages.rs","tag":"TODO","text":"tidy this"}],"ok":true}
+```
+
 ## ocre help
 
 ```text
@@ -727,17 +1215,6 @@ ocre <COMMAND> --help
 ```
 
 Prints the help of `ocre` or of a command (`ocre help db seed`, `ocre g model --help`). `-h` prints a shorter summary where the long help has examples. The help of `ocre g model` lists the field types.
-
-## ocre --version
-
-```text
-ocre --version
-ocre -V
-```
-
-```text
-ocre 0.1.0
-```
 
 ## See also
 

@@ -30,15 +30,19 @@ Next:
   open http://localhost:8787/products
 ```
 
-That is 355 lines: the SQL migration (7), the model (111), the controller with its form parsing and routes (159) and five askama templates. The model file holds the struct, the create and update inputs (`NewProduct`, `ProductChanges`), their `validate()`, and every query. For example, `create` in the blog starter's `src/models/post.rs`:
+That is 438 lines: the SQL migration (7), the model (160), the controller with its routes, path helpers and form parsing (188) and five askama templates (83). The model file holds the struct, the create and update inputs (`NewProduct`, `ProductChanges`), their `validate()`, every query, and empty callbacks (`before_create`, `after_update`...). For example, `create` in the blog starter's `src/models/post.rs`:
 
 ```rust
-pub async fn create(ctx: &Ctx, new: NewPost) -> Result<Post> {
+pub async fn create(ctx: &Ctx, mut new: NewPost) -> Result<Post> {
+    before_create(ctx, &mut new).await?;
     let db = ctx.db()?;
     new.validate().finish()?;
-    db.first("INSERT INTO posts (title, body, published) VALUES (?1, ?2, ?3) RETURNING *", params![new.title, new.body, new.published])
+    let record: Post = db
+        .first("INSERT INTO posts (title, body, published) VALUES (?1, ?2, ?3) RETURNING *", params![new.title, new.body, new.published])
         .await?
-        .ok_or_else(|| Error::internal("INSERT ... RETURNING returned no row"))
+        .ok_or_else(|| Error::internal("INSERT ... RETURNING returned no row"))?;
+    after_create(ctx, &record).await?;
+    Ok(record)
 }
 ```
 
@@ -48,7 +52,7 @@ Nothing is generated at compile time or at run time: what you read is what runs.
 
 - **The code that runs is in the repository.** An agent (or a person) that opens `src/models/post.rs` sees every SQL statement, validation rule and association of posts, in one file, without expanding a macro or reading framework internals. Agents write better changes when they can read the existing code for the same thing.
 - **Everything is greppable.** `grep -rn "FROM posts" src` finds every query on a table; `ocre routes` lists every route with its handler, read from the source.
-- **Every query is visible.** On the free plan, D1 counts rows read and written per day and a request has 10 ms of CPU. A query hidden behind an ORM call or a lazy association is where N+1 queries come from; generated code shows the one query per call (and `find_many`, which loads 100 ids per query, for lists).
+- **Every query is visible.** On the free plan, D1 counts rows read and written per day and a request has 10 ms of CPU. A query hidden behind an ORM call or a lazy association is where N+1 queries come from; generated code shows the one query per call, and lists load their associations with `find_many` and `preload_<parents>` (100 ids per query).
 - **Local changes stay local.** A rule for one model is an edit in that model's file, not a framework option. Adding a query is adding a function next to the generated ones:
 
   ```rust,check
@@ -69,7 +73,7 @@ Nothing is generated at compile time or at run time: what you read is what runs.
   }
   ```
 
-- **Small binaries.** There is no query builder or ORM in the WebAssembly module, which keeps it small and quick to start.
+- **Small binaries.** There is no ORM in the WebAssembly module: no schema read at run time, no lazy loading, no identity map. `ocre::Query` (what `post::query().eq("published", true).order_desc("id")` builds) only assembles one SQL string and its parameters, and `to_statement()` shows exactly what it will send.
 
 Ocre still uses derives where the result is standard and stable: serde (`Deserialize`, `Serialize`) for rows and forms, askama's `Template` for views. The framework's own macros are `params!` (a list of SQL parameters) and `locales!` (translations compiled into the binary). What Ocre does not do is put application behavior (queries, validations, routes, callbacks) behind them.
 
@@ -95,7 +99,7 @@ Files that several generators extend (`src/lib.rs`, `src/models/mod.rs`, `src/jo
 | `// ocre:modules` | `src/lib.rs` | `mod <name>;` for each new module |
 | `// ocre:routes` | `src/lib.rs`, in `routes()` | `.merge(<module>::routes())` |
 | `// ocre:models` | `src/models/mod.rs` | `pub mod <model>;` |
-| `// ocre:associations` | `src/models/<model>.rs`, in `impl <Model>` | has-many functions such as `post.comments(&ctx, page)`, from a `references` field in another model |
+| `// ocre:associations` | `src/models/<model>.rs`, in `impl <Model>` | has-many, has-one and has-many-through functions such as `post.comments(&ctx, page)`, from a `references` field in another model |
 | `// ocre:jobs`, `// ocre:job-variants`, `// ocre:job-dispatch` | `src/jobs/mod.rs` | the job's module, its `Job` variant and its `perform` arm |
 | `// ocre:schedules`, `// ocre:schedule-dispatch` | `src/schedules/mod.rs` | the task's module and its cron arm |
 | `// ocre:mailers` | `src/mailers/mod.rs` | `pub mod <mailer>;` |
@@ -137,8 +141,8 @@ The line is the same one Rails 8 draws for authentication: `ocre g auth` writes 
 
 | | Rails | Loco | Ocre |
 |---|---|---|---|
-| Model | A class inheriting `ApplicationRecord`: columns come from the database schema at run time; queries are built by Active Record | SeaORM entities generated from the database schema into `src/models/_entities/` (regenerated by `cargo loco db entities`), plus a model file for your code | One Rust file: struct, inputs, validations and SQL queries, never regenerated |
-| Queries | Built at run time by Active Record | Built by SeaORM | Written out as SQL in the model |
+| Model | A class inheriting `ApplicationRecord`: columns come from the database schema at run time; queries are built by Active Record | SeaORM entities generated from the database schema into `src/models/_entities/` (regenerated by `cargo loco db entities`), plus a model file for your code | One Rust file: struct, inputs, validations, callbacks and queries, never regenerated |
+| Queries | Built at run time by Active Record | Built by SeaORM | `ocre::Query` chains in the model (one table, bound values), or SQL written out |
 | After a schema change | Nothing to update in the model | Regenerate the entities | Edit the model |
 
 All three generate controllers, views and migrations; the difference is the model. Rails also has `rails destroy` to remove what a generator wrote; Ocre has no equivalent.

@@ -1,8 +1,15 @@
 use async_graphql::{ObjectType, Schema, SubscriptionType};
-use axum::{Router, body::Bytes, extract::State, routing::get};
+use axum::{Router, body::Bytes, extract::State, http::header, routing::get};
 
 use super::Ctx;
 use crate::graphql::{graphiql, respond};
+
+/// GraphiQL loads React and its editor from unpkg.com and starts with an
+/// inline script: its page gets this policy instead of the app's
+/// `ocre::security::ContentSecurityPolicy` (a handler's header wins).
+const GRAPHIQL_CSP: &str = "default-src 'self'; script-src 'self' https://unpkg.com 'unsafe-inline'; \
+                            style-src 'self' https://unpkg.com 'unsafe-inline'; img-src 'self' data: https:; \
+                            font-src 'self' data: https://unpkg.com; connect-src 'self'";
 
 /// Returns a router serving GraphiQL on `GET /graphql` and queries on `POST /graphql`.
 ///
@@ -44,7 +51,7 @@ where
 {
     Router::new().route(
         "/graphql",
-        get(|| async { graphiql() })
+        get(|| async { ([(header::CONTENT_SECURITY_POLICY, GRAPHIQL_CSP)], graphiql()) })
             .post(move |State(ctx): State<Ctx>, body: Bytes| async move { respond(schema(), &body, ctx).await }),
     )
 }

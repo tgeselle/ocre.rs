@@ -1,15 +1,19 @@
 //! Just enough MIME (RFC 5322, 2045-2047) to read incoming mail: headers,
 //! nested multiparts, the first text/plain and text/html parts,
-//! quoted-printable and base64 bodies, encoded-word headers. Attachments are
-//! skipped; the raw bytes stay available for anything else.
+//! quoted-printable and base64 bodies, encoded-word headers, and every
+//! other part as an attachment.
 
-/// A parsed message: decoded headers and the text bodies.
+use super::Attachment;
+
+/// A parsed message: decoded headers, the text bodies and the attachments.
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct Message {
     /// `(name, value)` in order, unfolded, encoded words decoded.
     pub headers: Vec<(String, String)>,
     pub text: Option<String>,
     pub html: Option<String>,
+    /// Parts that are not the first text or HTML body, decoded.
+    pub attachments: Vec<Attachment>,
 }
 
 /// Multiparts nested deeper than this are ignored (malicious input).
@@ -43,23 +47,30 @@ impl Message {
             }
             return;
         }
-        let attachment = header(headers, "content-disposition")
-            .is_some_and(|value| value.trim_start().to_ascii_lowercase().starts_with("attachment"));
-        let slot = match mime.as_str() {
-            "text/plain" => &mut self.text,
-            "text/html" => &mut self.html,
-            _ => return,
-        };
-        if attachment || slot.is_some() {
-            return;
-        }
+        let disposition = header(headers, "content-disposition").unwrap_or("");
+        let attachment = disposition.trim_start().to_ascii_lowercase().starts_with("attachment");
         let encoding = header(headers, "content-transfer-encoding").unwrap_or("7bit").trim().to_ascii_lowercase();
-        let bytes = match encoding.as_str() {
+        let decode = |body: &[u8]| match encoding.as_str() {
             "base64" => base64(body),
             "quoted-printable" => quoted_printable(body),
             _ => body.to_vec(),
         };
-        *slot = Some(decode_charset(&bytes, param(&params, "charset").unwrap_or("us-ascii")));
+        let slot = match mime.as_str() {
+            "text/plain" if !attachment && self.text.is_none() => &mut self.text,
+            "text/html" if !attachment && self.html.is_none() => &mut self.html,
+            _ => {
+                let (_, disposition_params) = content_type(disposition);
+                let filename = param(&disposition_params, "filename")
+                    .or_else(|| param(&params, "name"))
+                    .map_or_else(|| "attachment".to_owned(), decode_words);
+                let content_id = header(headers, "content-id")
+                    .map(|id| id.trim().trim_start_matches('<').trim_end_matches('>').to_owned())
+                    .filter(|id| !id.is_empty());
+                self.attachments.push(Attachment { filename, content_type: mime, content: decode(body), content_id });
+                return;
+            }
+        };
+        *slot = Some(decode_charset(&decode(body), param(&params, "charset").unwrap_or("us-ascii")));
     }
 }
 

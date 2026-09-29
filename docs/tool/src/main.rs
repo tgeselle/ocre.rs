@@ -42,6 +42,9 @@ const FIXTURE: &[&[&str]] = &[
     &["g", "schedule", "nightly_cleanup", "0 3 * * *"],
     &["g", "cache"],
     &["g", "locale", "en", "fr"],
+    &["g", "model", "Tag", "label:string^"],
+    &["g", "model", "Tagging", "post:references", "tag:references"],
+    &["g", "model", "Task", "title:string", "status:enum:open,done", "author:references?"],
 ];
 
 const USAGE: &str = "usage: cargo docs-site <build|serve|deploy|check> (from the repository root)

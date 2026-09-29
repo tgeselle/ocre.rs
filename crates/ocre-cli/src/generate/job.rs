@@ -27,9 +27,13 @@ const REGISTRY: &str = r#"//! Background jobs, run by Cloudflare Queues. `ocre g
 //!
 //! Enqueue one from a handler; it runs moments later in the `queue` event of
 //! src/lib.rs, which hands each message to `perform`:
-//! `ocre::jobs::enqueue(&ctx, &Job::SendWelcome(SendWelcome { user_id })).await?`
-//! (`ocre::jobs::enqueue_in(&ctx, &job, Duration::from_secs(600))` delays it,
-//! 24 hours at most).
+//! `SendWelcome { user_id }.perform_later(&ctx).await?`, or
+//! `ocre::jobs::enqueue_in(&ctx, &Job::SendWelcome(..), Duration::from_secs(600))` to delay it
+//! (24 hours at most), `ocre::jobs::enqueue_all(&ctx, &jobs)` for many at once.
+//! Run one now, in the request, with `job.perform(&ctx).await?`.
+
+// A job is often generated before a handler enqueues it.
+#![allow(dead_code)]
 
 use ocre::{Ctx, Result};
 use serde::{Deserialize, Serialize};
@@ -47,7 +51,9 @@ pub enum Job {
 }
 
 /// Runs one job; called by `ocre::jobs::consume` for each queue message.
-/// `Ok` acknowledges it; `Err` retries it later.
+/// `Ok` acknowledges it; `Err(Error::NotFound)` and other 4xx errors drop
+/// it (logged); other errors retry it later. Code here runs around every
+/// job, like Rails' `around_perform`.
 pub async fn perform(ctx: Ctx, job: Job) -> Result<()> {
     match job {
         // ocre:job-dispatch
@@ -63,10 +69,11 @@ async fn queue(batch: worker::MessageBatch<String>, env: worker::Env, _ctx: work
 }
 "#;
 
-pub fn job(project: &Project, name: &str, specs: &[String]) -> CliResult {
+pub fn job(project: &Project, name: &str, specs: &[String], queue: Option<&str>) -> CliResult {
     let module = module_name(name)?;
     let pascal = pascal(&module);
     let fields = parse_fields(specs)?;
+    let queue = queue_name(queue.unwrap_or(DEFAULT_QUEUE))?;
     if let Some(field) = fields.iter().find(|field| field.is_attachment()) {
         return Err(CliError::new(format!("job field `{}` cannot be an attachment", field.name)).hint(
             "files do not fit in a queue message (128 KB): store the file first and pass its record id, e.g. \
@@ -77,8 +84,11 @@ pub fn job(project: &Project, name: &str, specs: &[String]) -> CliResult {
         return Err(CliError::new(format!("job field `{}` cannot be unique", field.name))
             .hint("`^` adds a unique index to a table column; jobs have no table: drop the `^`"));
     }
-    let command =
-        std::iter::once(format!("ocre g job {name}")).chain(specs.iter().cloned()).collect::<Vec<_>>().join(" ");
+    let command = std::iter::once(format!("ocre g job {name}"))
+        .chain(specs.iter().cloned())
+        .chain((queue != DEFAULT_QUEUE).then(|| format!("--queue {queue}")))
+        .collect::<Vec<_>>()
+        .join(" ");
     let mut struct_fields = String::new();
     for field in &fields {
         writeln!(struct_fields, "    pub {}: {},", field.name, field.column_type()).expect("writing to a String");
@@ -88,21 +98,48 @@ pub fn job(project: &Project, name: &str, specs: &[String]) -> CliResult {
         if names.is_empty() { format!("{pascal} {{}}") } else { format!("{pascal} {{ {} }}", names.join(", ")) };
 
     let mut edits = Edits::new(project);
-    edits.create(&format!("src/jobs/{module}.rs"), job_rs(&module, &pascal, &struct_fields, &literal, &command))?;
-    let queue = match edits.read("src/jobs/mod.rs")? {
-        Some(_) => None,
-        None => Some(wire(&mut edits)?),
-    };
+    edits.create(
+        &format!("src/jobs/{module}.rs"),
+        job_rs(&module, &pascal, &struct_fields, &literal, &command, &queue),
+    )?;
+    let mut created = Vec::new();
+    if edits.read("src/jobs/mod.rs")?.is_none() {
+        created.push(wire(&mut edits)?);
+    }
+    if queue != DEFAULT_QUEUE {
+        created.extend(wire_queue(&mut edits, &queue)?);
+    }
     register(&mut edits, &module, &pascal)?;
     let mut report = edits.apply("generate job")?;
     report.next = vec![
-        format!("enqueue it from a handler: ocre::jobs::enqueue(&ctx, &jobs::Job::{pascal}(jobs::{literal})).await?"),
+        format!("enqueue it from a handler: jobs::{literal}.perform_later(&ctx).await?"),
         "ocre dev (jobs run locally; look for `[ocre jobs]` lines in the output)".to_owned(),
     ];
-    if let Some(queue) = queue {
+    for queue in created {
         report.next.push(format!("ocre deploy creates the queue {queue} and its dead-letter queue"));
     }
     Ok(report)
+}
+
+/// The queue `ocre::jobs::enqueue` uses.
+const DEFAULT_QUEUE: &str = "default";
+
+/// A queue name as `ocre::jobs::queue` accepts it: lowercase letters, digits and `-`.
+fn queue_name(queue: &str) -> Result<String, CliError> {
+    let valid = !queue.is_empty()
+        && queue.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && !queue.starts_with('-')
+        && !queue.ends_with('-');
+    if !valid {
+        return Err(CliError::new(format!("invalid queue name `{queue}`"))
+            .hint("use lowercase letters, digits and `-`, e.g. `--queue urgent`"));
+    }
+    Ok(queue.to_owned())
+}
+
+/// `urgent` -> `JOBS_URGENT`.
+fn queue_binding(queue: &str) -> String {
+    format!("JOBS_{}", queue.to_ascii_uppercase().replace('-', "_"))
 }
 
 /// `SendWelcomeJob`, `send_welcome` or `SendWelcome` -> `send_welcome`.
@@ -119,14 +156,18 @@ fn module_name(name: &str) -> Result<String, CliError> {
     Ok(module)
 }
 
-fn job_rs(module: &str, pascal: &str, fields: &str, literal: &str, command: &str) -> String {
+fn job_rs(module: &str, pascal: &str, fields: &str, literal: &str, command: &str, queue: &str) -> String {
     let body = if fields.is_empty() { " {}\n".to_owned() } else { format!(" {{\n{fields}}}\n") };
+    let (sender, on) = if queue == DEFAULT_QUEUE {
+        ("ocre::jobs::enqueue(ctx, &super::Job::".to_owned(), "the `default` queue".to_owned())
+    } else {
+        (format!("ocre::jobs::queue(ctx, \"{queue}\").enqueue(&super::Job::"), format!("the `{queue}` queue"))
+    };
     format!(
         r#"//! {} job. Generated by `{command}`.
 //!
 //! Enqueue it from a handler; it runs moments later, outside the request:
-//! `ocre::jobs::enqueue(&ctx, &Job::{pascal}({literal})).await?`
-//! (with `use crate::jobs::{{Job, {pascal}}};`).
+//! `{literal}.perform_later(&ctx).await?` (with `use crate::jobs::{pascal};`).
 
 use ocre::{{Ctx, Result}};
 use serde::{{Deserialize, Serialize}};
@@ -136,11 +177,18 @@ use serde::{{Deserialize, Serialize}};
 #[derive(Debug, Serialize, Deserialize)]
 pub struct {pascal}{body}
 impl {pascal} {{
+    /// Sends the job to {on}; it runs moments later through `perform`.
+    pub fn perform_later(self, ctx: &Ctx) -> impl Future<Output = Result<()>> + Send + use<> {{
+        {sender}{pascal}(self))
+    }}
+
     /// Does the work, e.g. `ctx.db()?` queries or
     /// `ocre::mail::send(ctx, crate::mailers::user::welcome(&email)?).await?`.
-    /// `Err` retries the job later (30 s, 1 min, 3 min, 9 min, 27 min), then
-    /// moves it to the dead-letter queue. A job may run more than once: make
-    /// it safe to repeat. Free plan: 10 ms of CPU per batch of messages.
+    /// `Err(Error::NotFound)` (a record deleted since) and other 4xx errors
+    /// drop the job; any other `Err` retries it later (30 s, 1 min, 3 min,
+    /// 9 min, 27 min), then moves it to the dead-letter queue. A job may run
+    /// more than once: make it safe to repeat. Free plan: 10 ms of CPU per
+    /// batch of messages.
     pub async fn perform(self, _ctx: &Ctx) -> Result<()> {{
         Ok(())
     }}
@@ -188,6 +236,42 @@ fn wire(edits: &mut Edits) -> Result<String, CliError> {
     let queue = format!("{app}-jobs");
     edits.update("wrangler.toml", text + &queues_toml(app));
     Ok(queue)
+}
+
+/// A named queue: its producer `JOBS_<NAME>` and consumer, unless wrangler.toml
+/// already binds it. Returns the queue created, if any.
+fn wire_queue(edits: &mut Edits, queue: &str) -> Result<Option<String>, CliError> {
+    let binding = queue_binding(queue);
+    let text = edits.read("wrangler.toml")?.unwrap_or_default();
+    if text.contains(&format!("binding = \"{binding}\"")) {
+        return Ok(None);
+    }
+    let config: toml::Table = text.parse().expect("Project::find parsed wrangler.toml");
+    let app = config.get("name").and_then(|name| name.as_str()).ok_or_else(|| {
+        CliError::new("wrangler.toml has no `name`").hint("add `name = \"<app-name>\"` at the top of wrangler.toml")
+    })?;
+    let name = format!("{app}-jobs-{queue}");
+    edits.update(
+        "wrangler.toml",
+        text + &format!(
+            r#"
+# The `{queue}` job queue (`ocre::jobs::queue(&ctx, "{queue}")`): its own
+# consumer, so its jobs never wait behind the `default` queue. Same Queues
+# costs per message; batches wait at most 1 s.
+[[queues.producers]]
+binding = "{binding}"
+queue = "{name}"
+
+[[queues.consumers]]
+queue = "{name}"
+max_batch_size = 10
+max_batch_timeout = 1
+max_retries = 5
+dead_letter_queue = "{name}-failed"
+"#
+        ),
+    );
+    Ok(Some(name))
 }
 
 fn queues_toml(app: &str) -> String {

@@ -10,6 +10,37 @@ pub struct Report {
     pub created: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub updated: Vec<String>,
+    /// Existing files a generator kept (`--skip`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<String>,
+    /// Files `ocre destroy` deleted.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub removed: Vec<String>,
+    /// `--pretend`: the files listed were not written.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub pretend: bool,
+    /// `ocre g override`: the generator templates.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub templates: Option<Vec<crate::generate::TemplateInfo>>,
+    /// `ocre version` / `ocre about`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub about: Option<crate::about::About>,
+    /// `ocre doctor`: one entry per check.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<crate::doctor::Check>,
+    /// `ocre stats`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stats: Option<crate::stats::Stats>,
+    /// `ocre notes`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<Vec<crate::notes::Note>>,
+    /// `ocre db version`: the last applied migration (`null` for none).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<Option<String>>,
+    /// The command ran but failed (a doctor check, a test step): reported
+    /// with `ok: false`, `error` and `hint`, exit code 1.
+    #[serde(skip)]
+    pub failure: Option<CliError>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     /// Cloudflare login email, for commands that check the session.
@@ -27,9 +58,15 @@ pub struct Report {
     /// `ocre routes`: the app's routes, sorted by path then method.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub routes: Option<Vec<crate::routes::Route>>,
+    /// `ocre schedules`: the Cron Triggers and their tasks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedules: Option<Vec<crate::schedules::Schedule>>,
     /// The command targeted the production database on Cloudflare.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub remote: bool,
+    /// `ocre secrets list`: secret names, local and deployed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secrets: Option<Vec<crate::secrets::SecretStatus>>,
     /// `ocre secret`: a new random value for SECRET_KEY_BASE.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secret: Option<String>,
@@ -88,40 +125,93 @@ impl From<std::io::Error> for CliError {
 
 pub fn finish(result: Result<Report, CliError>, json: bool) -> ExitCode {
     match result {
-        Ok(report) => {
+        Ok(mut report) => {
+            let failure = report.failure.take();
             if json {
                 let mut value = serde_json::to_value(&report).expect("report serializes");
-                value["ok"] = true.into();
+                value["ok"] = failure.is_none().into();
+                if let Some(err) = &failure {
+                    value["error"] = err.message.clone().into();
+                    value["hint"] = err.hint.clone().into();
+                }
                 println!("{value}");
-            } else if !report.rendered {
-                print_human(&report);
+            } else {
+                if !report.rendered {
+                    print_human(&report);
+                }
+                if let Some(err) = &failure {
+                    print_error(err);
+                }
             }
-            ExitCode::SUCCESS
+            if failure.is_some() { ExitCode::FAILURE } else { ExitCode::SUCCESS }
         }
         Err(err) => {
             if json {
                 let value = serde_json::json!({ "ok": false, "error": err.message, "hint": err.hint });
                 println!("{value}");
             } else {
-                eprintln!("error: {}", err.message);
-                if let Some(hint) = &err.hint {
-                    eprintln!("hint: {hint}");
-                }
+                print_error(&err);
             }
             ExitCode::FAILURE
         }
     }
 }
 
+fn print_error(err: &CliError) {
+    eprintln!("error: {}", err.message);
+    if let Some(hint) = &err.hint {
+        eprintln!("hint: {hint}");
+    }
+}
+
 fn print_human(report: &Report) {
+    if let Some(about) = &report.about {
+        for (name, value) in about.lines() {
+            println!("{name:<20}{value}");
+        }
+    }
+    for check in &report.checks {
+        let status = match check.status {
+            crate::doctor::Status::Ok => "ok  ",
+            crate::doctor::Status::Warn => "warn",
+            crate::doctor::Status::Fail => "FAIL",
+        };
+        println!("  {status}  {:<20}{}", check.name, check.detail);
+        if let Some(hint) = check.hint.as_ref().filter(|_| check.status != crate::doctor::Status::Ok) {
+            println!("        {:<20}{hint}", "");
+        }
+    }
+    if let Some(stats) = &report.stats {
+        print!("{}", crate::stats::table(stats));
+    }
+    for note in report.notes.iter().flatten() {
+        println!("{}:{}: [{}] {}", note.path, note.line, note.tag, note.text);
+    }
     if let Some(secret) = &report.secret {
         println!("{secret}");
+    }
+    for secret in report.secrets.iter().flatten() {
+        let local = if secret.local { ".dev.vars" } else { "" };
+        let deployed = if secret.deployed { "deployed" } else { "" };
+        println!("  {:<32}{local:<12}{deployed}", secret.name);
+    }
+    if let Some(version) = &report.version {
+        println!("{}", version.as_deref().unwrap_or("no migration applied"));
     }
     for path in &report.created {
         println!("  create  {path}");
     }
     for path in &report.updated {
         println!("  update  {path}");
+    }
+    for path in &report.removed {
+        println!("  remove  {path}");
+    }
+    for path in &report.skipped {
+        println!("  skip    {path}");
+    }
+    if report.pretend {
+        println!("(--pretend: nothing was written)");
     }
     if let Some(email) = &report.email {
         println!("Logged in to Cloudflare as {email}");
@@ -131,6 +221,12 @@ fn print_human(report: &Report) {
     }
     if let Some(routes) = &report.routes {
         print!("{}", crate::routes::table(routes));
+    }
+    if let Some(schedules) = &report.schedules {
+        print!("{}", crate::schedules::table(schedules));
+    }
+    for template in report.templates.iter().flatten() {
+        println!("  {}{}", template.path, if template.overridden { "  (overridden in .ocre/templates/)" } else { "" });
     }
     if report.remote {
         println!("Target: remote D1 database on Cloudflare");

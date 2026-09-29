@@ -47,12 +47,15 @@ fn a_job_round_trips_through_the_message_text() {
 #[test]
 fn an_email_travels_as_mail() {
     let email = crate::mail::Email::new("ada@example.com", "Hi", "Hello").html("<p>Hello</p>");
-    let text = encode(Payload::Mail(email.clone()), 5).unwrap();
+    let text = encode(Payload::Mail(Box::new(email.clone())), 5).unwrap();
     assert_eq!(
         text,
-        r#"{"at":5,"mail":{"to":"ada@example.com","subject":"Hi","text":"Hello","html":"<p>Hello</p>","reply_to":null}}"#
+        r#"{"at":5,"mail":{"to":["ada@example.com"],"subject":"Hi","text":"Hello","html":"<p>Hello</p>","reply_to":null}}"#
     );
-    assert_eq!(decode(Some(text)).unwrap(), Envelope { at: 5, payload: Payload::Mail(email) });
+    assert_eq!(decode(Some(text)).unwrap(), Envelope { at: 5, payload: Payload::Mail(Box::new(email.clone())) });
+    // Messages queued when `to` was one address still decode.
+    let old = r#"{"at":5,"mail":{"to":"ada@example.com","subject":"Hi","text":"Hello","html":"<p>Hello</p>","reply_to":null}}"#;
+    assert_eq!(decode(Some(old.to_owned())).unwrap(), Envelope { at: 5, payload: Payload::Mail(Box::new(email)) });
 }
 
 #[test]
@@ -79,10 +82,50 @@ fn enqueue_errors_name_the_fix() {
     let message = internal(encode(big, 0).unwrap_err());
     assert!(message.contains("messages hold 128 KB at most. Fix: store large data in D1 or R2"), "{message}");
 
-    let message = internal(missing_queue("Binding `JOBS` is undefined."));
+    let message = internal(missing_queue("JOBS", "Binding `JOBS` is undefined."));
     assert!(
         message.starts_with("the queue binding `JOBS` is missing (Binding `JOBS` is undefined.). Fix: run `ocre g job")
     );
+    let message = internal(missing_queue("JOBS_LOW_PRIORITY", "undefined"));
+    assert!(message.contains("Fix: run `ocre g job <Name> --queue low-priority`; it adds"), "{message}");
+}
+
+#[test]
+fn queue_names_map_to_bindings() {
+    assert_eq!(binding(DEFAULT_QUEUE).unwrap(), "JOBS");
+    assert_eq!(binding("urgent").unwrap(), "JOBS_URGENT");
+    assert_eq!(binding("low-priority2").unwrap(), "JOBS_LOW_PRIORITY2");
+    for bad in ["", "Urgent", "-a", "a-", "a_b", "a b"] {
+        let message = internal(binding(bad).unwrap_err());
+        assert!(message.starts_with(&format!("invalid queue name {bad:?}. Fix:")), "{message}");
+    }
+}
+
+#[test]
+fn bulk_enqueue_splits_at_100_messages_and_256_kb() {
+    assert!(batches(vec![]).is_empty());
+    let small: Vec<String> = (0..250).map(|i| i.to_string()).collect();
+    let split = batches(small.clone());
+    assert_eq!(split.iter().map(Vec::len).collect::<Vec<_>>(), [100, 100, 50]);
+    assert_eq!(split.concat(), small, "order kept");
+    let big: Vec<String> = (0..5).map(|_| "x".repeat(100_000)).collect();
+    assert_eq!(batches(big).iter().map(Vec::len).collect::<Vec<_>>(), [2, 2, 1]);
+}
+
+#[test]
+fn only_errors_a_retry_cannot_fix_are_discarded() {
+    for err in [
+        Error::NotFound,
+        Error::bad_request("x"),
+        Error::Unauthorized,
+        Error::Forbidden,
+        Error::Invalid(vec![]),
+        Error::PayloadTooLarge("x".into()),
+    ] {
+        assert!(discards(&err), "{err:?}");
+    }
+    assert!(!discards(&Error::internal("D1 is down")));
+    assert!(!discards(&Error::TooManyRequests));
 }
 
 #[test]

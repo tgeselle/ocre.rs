@@ -98,8 +98,11 @@ def summary(docs):
     text = " ".join(line.strip() for line in paragraph.split("\n"))
     text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
     text = re.sub(r"\[(`[^`]+`)\](?!\()", r"\1", text)
-    match = re.search(r"(?<!e\.g)(?<!i\.e)\.(\s|$)", text)
-    return text[: match.start() + 1] if match else text
+    # The first period that ends a sentence outside a code span (`SELECT 1 ... LIMIT 1`).
+    for match in re.finditer(r"(?<!e\.g)(?<!i\.e)\.(\s|$)", text):
+        if text.count("`", 0, match.start()) % 2 == 0:
+            return text[: match.start() + 1]
+    return text
 
 
 def kind_of(item):

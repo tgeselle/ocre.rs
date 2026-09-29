@@ -17,6 +17,12 @@ const GRAPHQL_DEP: &str = r#"async-graphql = { version = "7.2.1", default-featur
 pub fn api(project: &Project, name: &str, specs: &[String], graphql: bool) -> CliResult {
     let names = ModelNames::parse(name)?;
     let fields = parse_fields(specs)?;
+    if let Some(field) = fields.iter().find(|f| graphql && f.enumeration.is_some()) {
+        return Err(CliError::new(format!("enum `{}` is not supported with --graphql yet", field.name)).hint(format!(
+            "use `{}:string` checked with `v.inclusion(...)` in the model, or generate the JSON API without --graphql",
+            field.name
+        )));
+    }
     if let Some(file) = fields.iter().find(|f| f.is_attachment() && !f.optional) {
         return Err(CliError::new(format!("attachment `{}` must be optional in a JSON API", file.name)).hint(format!(
             "JSON cannot carry a file, so create cannot require one: use `{0}:attachment?`, then upload with `curl -X PUT -F {0}=@file http://localhost:8787/api/<plural>/1/{0}`",
@@ -214,7 +220,7 @@ use axum::{{
     {http_import},{response_import}
     routing::get,
 }};
-use ocre::{{ApiResult, Created, Ctx, Error, Json, OptionExt, Page{ocre_import}}};
+use ocre::{{ApiResult, Created, Ctx, Error, Json, OptionExt, Page, PageLinks{ocre_import}}};
 
 use crate::models::{singular}::{{self, New{model}, {model}, {model}Changes}};
 
@@ -224,8 +230,10 @@ pub fn routes() -> Router<Ctx> {{
         .route("/api/{plural}/{{id}}", get(show).patch(update).delete(delete)){file_routes}
 }}
 
-async fn index(State(ctx): State<Ctx>, page: Page) -> ApiResult<Json<Vec<{model}>>> {{
-    Ok(Json({singular}::all(&ctx, page).await?))
+/// One page (`?limit=&offset=`), with a `Link` header to the next and previous pages.
+async fn index(State(ctx): State<Ctx>, page: Page) -> ApiResult<(PageLinks, Json<Vec<{model}>>)> {{
+    let {plural} = {singular}::all(&ctx, page).await?;
+    Ok((page.links("/api/{plural}", {plural}.len()), Json({plural})))
 }}
 
 async fn show(State(ctx): State<Ctx>, Path(id): Path<i64>) -> ApiResult<Json<{model}>> {{

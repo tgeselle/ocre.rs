@@ -42,6 +42,8 @@ pub struct Ctx {
 
 impl Ctx {
     pub(crate) fn new(env: Env) -> Self {
+        // Once per Worker instance: the keys of encrypted model columns.
+        crate::encryption::ensure_installed(&|name| env.secret(name).ok().map(|secret| secret.to_string()));
         Self { env: SendWrapper::new(env) }
     }
 
@@ -92,9 +94,43 @@ impl Ctx {
     /// # let _ = handler;
     /// ```
     pub fn db(&self) -> Result<Db> {
-        self.env.d1(DB_BINDING).map(Db::new).map_err(|err| {
+        self.db_named(DB_BINDING)
+    }
+
+    /// Another D1 database of the app, by its binding name (Rails' multiple databases).
+    ///
+    /// Each database is a `[[d1_databases]]` entry in wrangler.toml with its
+    /// own `binding`, `database_name` and `migrations_dir` (see the Models
+    /// guide, "Several databases"). Queries cannot join across databases:
+    /// load ids from one, then `find_many` in the other.
+    ///
+    /// # Free plan
+    ///
+    /// Up to 10 databases per account, 5 GB of storage and the daily row
+    /// quotas shared by all of them.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Internal`] (500, logged) when the Worker has no D1 binding
+    /// named `binding`; the message names the wrangler.toml entry to add.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use axum::extract::State;
+    /// use ocre::{Ctx, Result, params};
+    ///
+    /// async fn track(State(ctx): State<Ctx>) -> Result<()> {
+    ///     let analytics = ctx.db_named("ANALYTICS")?;
+    ///     analytics.execute("INSERT INTO page_views (path) VALUES (?1)", params!["/"]).await?;
+    ///     Ok(())
+    /// }
+    /// # let _ = track;
+    /// ```
+    pub fn db_named(&self, binding: &str) -> Result<Db> {
+        self.env.d1(binding).map(Db::new).map_err(|err| {
             Error::internal(format!(
-                "D1 binding `{DB_BINDING}` is missing ({err}). Fix: add a [[d1_databases]] entry with binding = \"{DB_BINDING}\" to wrangler.toml"
+                "D1 binding `{binding}` is missing ({err}). Fix: add a [[d1_databases]] entry with binding = \"{binding}\" to wrangler.toml"
             ))
         })
     }

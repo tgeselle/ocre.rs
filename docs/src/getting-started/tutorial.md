@@ -28,6 +28,7 @@ cd blog
   create  blog/src/lib.rs
   create  blog/templates/layout.html
   create  blog/templates/home.html
+  create  blog/templates/error.html
   create  blog/.dev.vars
 
 Next:
@@ -43,8 +44,16 @@ The app is a Rust crate compiled to WebAssembly and run as one Cloudflare Worker
 ```rust
 // src/lib.rs
 use askama::Template;
-use axum::{Router, response::Html, routing::get};
-use ocre::{Ctx, Result, render};
+use axum::{
+    Router,
+    middleware::map_response,
+    response::{Html, Response},
+    routing::get,
+};
+use ocre::{
+    Ctx, Error, ErrorPage, Result, render,
+    security::{ContentSecurityPolicy, DATA, HTTPS, NONE, PermissionsPolicy, SELF, UNSAFE_INLINE},
+};
 use worker::{Context, Env, HttpRequest, event};
 
 // ocre:modules
@@ -59,6 +68,34 @@ fn routes() -> Router<Ctx> {
         .route("/", get(home))
         .route("/up", get(up))
         // ocre:routes
+        .fallback(not_found)
+        .layer(map_response(error_page))
+        .layer(content_security_policy())
+        .layer(permissions_policy())
+}
+
+/// The Content-Security-Policy of every response (Rails' content_security_policy
+/// initializer): scripts only from this app and unpkg.com (htmx), no inline
+/// scripts or `onclick=` handlers, which blocks most XSS. For an inline script,
+/// add `NONCE` to `script_src`, take `nonce: ocre::security::CspNonce` in the
+/// handler and write `<script nonce="{{ nonce }}">`. A route can send its own
+/// policy: a handler's header (or a nested router's `.layer(...)`) wins.
+fn content_security_policy() -> ContentSecurityPolicy {
+    ContentSecurityPolicy::new()
+        .default_src(&[SELF])
+        .script_src(&[SELF, "https://unpkg.com"])
+        // The layout's <style> and htmx's indicator styles are inline.
+        .style_src(&[SELF, UNSAFE_INLINE])
+        .img_src(&[SELF, DATA, HTTPS])
+        .font_src(&[SELF, DATA])
+        .object_src(&[NONE])
+        .base_uri(&[SELF])
+        .frame_ancestors(&[SELF])
+}
+
+/// Browser features the app does not use are turned off (Rails' permissions_policy).
+fn permissions_policy() -> PermissionsPolicy {
+    PermissionsPolicy::new().deny(&["camera", "microphone", "geolocation", "payment", "usb"])
 }
 
 #[derive(Template)]
@@ -74,7 +111,27 @@ async fn home() -> Result<Html<String>> {
 async fn up() -> &'static str {
     "OK"
 }
+
+/// Paths no route matches: the 404 error page.
+async fn not_found() -> Error {
+    Error::NotFound
+}
+
+#[derive(Template)]
+#[template(path = "error.html")]
+struct ErrorView<'a> {
+    error: &'a ErrorPage,
+}
+
+/// Renders error responses (404, 422, 500...) with templates/error.html,
+/// like Rails' public/404.html. JSON errors and pages that set their own
+/// status are left alone.
+async fn error_page(response: Response) -> Response {
+    ocre::error_page(response, |error| render(&ErrorView { error }))
+}
 ```
+
+Generators add modules under `// ocre:modules` and routes under `// ocre:routes`. A path no route matches, and any error a handler returns, gets `templates/error.html` with the right status (see [Error pages](../guides/controllers.md#error-pages)). The two policy layers set the `Content-Security-Policy` and `Permissions-Policy` headers of every response (see [Sessions, flash and security](../guides/security.md)). `templates/layout.html` loads htmx and sets `hx-boost="true"` on `<body>`, so links and forms swap the page body instead of reloading it; every page still works without JavaScript (see [htmx](../guides/htmx.md)).
 
 `AGENTS.md` summarizes the app's conventions and commands; read it if you work on the app with an AI agent.
 
@@ -107,9 +164,9 @@ Next:
 | File | Role |
 |---|---|
 | `migrations/0001_create_posts.sql` | The `posts` table |
-| `src/models/post.rs` | The model: `Post` (a row), `NewPost` and `PostChanges` (create and update inputs), `validate()`, and the queries `all`, `count`, `find`, `find_many`, `create`, `update`, `delete` |
-| `src/posts.rs` | The controller: form parsing, the seven handlers and `routes()` |
-| `templates/posts/*.html` | askama templates for the list, the post, the new and edit forms |
+| `src/models/post.rs` | The model: `Post` (a row), `NewPost` and `PostChanges` (create and update inputs), `validate()`, the query builder `query()`, and the queries `all`, `count`, `find`, `find_many`, `create`, `update`, `delete` |
+| `src/posts.rs` | The controller: `routes()`, the `paths` module (the URL of each page), form parsing and the seven handlers |
+| `templates/posts/*.html` | askama templates for the list (with Previous / Next links), the post, the new and edit forms |
 | `src/lib.rs` | Updated: `mod posts;`, `mod models;` and `.merge(posts::routes())` |
 
 The migration is plain SQLite:
@@ -197,6 +254,8 @@ curl -i http://localhost:8787/posts
 HTTP/1.1 200 OK
 Transfer-Encoding: chunked
 Content-Type: text/html; charset=utf-8
+content-security-policy: default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'self'
+permissions-policy: camera=(), microphone=(), geolocation=(), payment=(), usb=()
 referrer-policy: strict-origin-when-cross-origin
 x-content-type-options: nosniff
 x-frame-options: SAMEORIGIN
@@ -211,7 +270,7 @@ x-xss-protection: 0
 ...
 ```
 
-Every response carries the security headers above; `ocre::serve` adds them (see [Sessions, flash and security](../guides/security.md)). Create a post with the form at `/posts/new`, or post the same form with `curl`:
+Every response carries the security headers above: `content-security-policy` and `permissions-policy` come from the two layers in `src/lib.rs`, the others from `ocre::serve` (see [Sessions, flash and security](../guides/security.md)). Create a post with the form at `/posts/new`, or post the same form with `curl`:
 
 ```sh
 curl -i http://localhost:8787/posts -d 'title=Hello+Ocre&body=My+first+post&published=true'
@@ -222,6 +281,8 @@ HTTP/1.1 303 See Other
 Content-Length: 0
 Location: /posts/1
 Set-Cookie: _ocre_session=3VsAxzOOtqZzbpER5LvexSh2pyxdC9nX0nilcTIdCiMmYCt05DfyP63FkRHY6DNnJlIlxvRl%2Fbf+7KFvBKXwgO53qGacK4zXv5XjsSFA0C5MZw%3D%3D; HttpOnly; SameSite=Lax; Path=/
+content-security-policy: default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'self'
+permissions-policy: camera=(), microphone=(), geolocation=(), payment=(), usb=()
 referrer-policy: strict-origin-when-cross-origin
 x-content-type-options: nosniff
 x-frame-options: SAMEORIGIN
@@ -338,7 +399,7 @@ The scaffold also generated a standalone CRUD at `/comments`, where the post is 
 
 ## Show comments on the post page
 
-Three changes in `src/posts.rs`: the `show` handler loads the post's comments with `post.comments(&ctx, page)`, `ShowView` carries them plus a comment form and its errors, and a new route `POST /posts/{id}/comments` creates a comment for the post in the URL. Replace the whole file:
+Four changes in `src/posts.rs`: the `show` handler loads the post's comments with `post.comments(&ctx, page)`, `ShowView` carries them plus a comment form and its errors, a new route `POST /posts/{id}/comments` creates a comment for the post in the URL, and `paths::comments(id)` gives the form its URL. Replace the whole file:
 
 ```rust,check
 // src/posts.rs
@@ -367,6 +428,38 @@ pub fn routes() -> Router<Ctx> {
         .route("/posts/{id}/edit", get(edit))
         .route("/posts/{id}/delete", post(delete))
         .route("/posts/{id}/comments", post(create_comment))
+}
+
+/// Paths of the posts pages (Rails' `posts_path`, `post_path(record)`...).
+/// Handlers redirect to them and templates link with them:
+/// `<a href="{{ paths::show(post.id) }}">`; other modules call
+/// `crate::posts::paths::show(id)`.
+pub mod paths {
+    use std::fmt::Display;
+
+    pub fn index() -> &'static str {
+        "/posts"
+    }
+
+    pub fn new() -> &'static str {
+        "/posts/new"
+    }
+
+    pub fn show(id: impl Display) -> String {
+        format!("/posts/{id}")
+    }
+
+    pub fn edit(id: impl Display) -> String {
+        format!("/posts/{id}/edit")
+    }
+
+    pub fn delete(id: impl Display) -> String {
+        format!("/posts/{id}/delete")
+    }
+
+    pub fn comments(id: impl Display) -> String {
+        format!("/posts/{id}/comments")
+    }
 }
 
 /// What the new and edit forms submit, as typed: numbers stay text until
@@ -427,6 +520,7 @@ pub struct CommentForm {
 #[template(path = "posts/index.html")]
 struct IndexView {
     flash: Flash,
+    page: Page,
     posts: Vec<Post>,
 }
 
@@ -456,7 +550,7 @@ struct EditView {
 }
 
 async fn index(State(ctx): State<Ctx>, flash: Flash, page: Page) -> Result<Html<String>> {
-    render(&IndexView { flash, posts: post::all(&ctx, page).await? })
+    render(&IndexView { flash, page, posts: post::all(&ctx, page).await? })
 }
 
 async fn show(State(ctx): State<Ctx>, flash: Flash, page: Page, Path(id): Path<i64>) -> Result<Html<String>> {
@@ -477,7 +571,7 @@ async fn create(State(ctx): State<Ctx>, session: Session, Form(form): Form<PostF
     match created {
         Ok(record) => {
             session.flash("notice", "Post was successfully created.")?;
-            Ok(Redirect::to(&format!("/posts/{}", record.id)).into_response())
+            Ok(Redirect::to(&paths::show(record.id)).into_response())
         }
         Err(Error::Invalid(errors)) => {
             Ok((StatusCode::UNPROCESSABLE_ENTITY, render(&NewView { form, errors })?).into_response())
@@ -505,7 +599,7 @@ async fn update(
         Ok(record) => {
             let record = record.or_404()?;
             session.flash("notice", "Post was successfully updated.")?;
-            Ok(Redirect::to(&format!("/posts/{}", record.id)).into_response())
+            Ok(Redirect::to(&paths::show(record.id)).into_response())
         }
         Err(Error::Invalid(errors)) => {
             Ok((StatusCode::UNPROCESSABLE_ENTITY, render(&EditView { id, form, errors })?).into_response())
@@ -519,7 +613,7 @@ async fn delete(State(ctx): State<Ctx>, session: Session, Path(id): Path<i64>) -
         return Err(Error::NotFound);
     }
     session.flash("notice", "Post was successfully destroyed.")?;
-    Ok(Redirect::to("/posts"))
+    Ok(Redirect::to(paths::index()))
 }
 
 /// Adds a comment to the post, then shows the post again. Invalid input
@@ -536,7 +630,7 @@ async fn create_comment(
     match comment::create(&ctx, new).await {
         Ok(_) => {
             session.flash("notice", "Comment was successfully created.")?;
-            Ok(Redirect::to(&format!("/posts/{id}")).into_response())
+            Ok(Redirect::to(&paths::show(id)).into_response())
         }
         Err(Error::Invalid(errors)) => {
             let comments = post.comments(&ctx, page).await?;
@@ -570,9 +664,9 @@ Then list the comments and add the form at the end of `templates/posts/show.html
   <dt>Updated at</dt><dd>{{ post.updated_at }}</dd>
 </dl>
 
-<p><a href="/posts/{{ post.id }}/edit">Edit</a> · <a href="/posts">Back</a></p>
+<p><a href="{{ paths::edit(post.id) }}">Edit</a> · <a href="{{ paths::index() }}">Back</a></p>
 
-<form action="/posts/{{ post.id }}/delete" method="post" onsubmit="return confirm('Delete this post?')">
+<form action="{{ paths::delete(post.id) }}" method="post" hx-boost="true" hx-confirm="Delete this post?">
   <button type="submit">Delete post</button>
 </form>
 
@@ -584,7 +678,7 @@ Then list the comments and add the form at the end of `templates/posts/show.html
 {% endfor %}
 
 <h3>Add a comment</h3>
-<form action="/posts/{{ post.id }}/comments" method="post">
+<form action="{{ paths::comments(post.id) }}" method="post">
 {% if !errors.is_empty() %}
   <ul class="errors">
     {% for error in errors %}<li>{{ error.full_message() }}</li>{% endfor %}
@@ -597,7 +691,7 @@ Then list the comments and add the form at the end of `templates/posts/show.html
 {% endblock %}
 ```
 
-askama templates are compiled into the Worker, so a template that uses a field `ShowView` lacks is a compile error, not a runtime surprise. `{{ ... }}` escapes HTML, so comment text cannot inject markup.
+askama templates are compiled into the Worker, so a template that uses a field `ShowView` lacks is a compile error, not a runtime surprise. `{{ ... }}` escapes HTML, so comment text cannot inject markup. `paths::...` resolves to the `paths` module of `src/posts.rs`, next to the view structs. `hx-confirm` asks for confirmation before htmx sends the delete form; the app's Content-Security-Policy forbids inline JavaScript such as `onsubmit="..."`, and without JavaScript the form simply posts.
 
 Start `ocre dev` again. While it runs, it rebuilds when a file in `src/` changes; restart it after changing only a template. Add a comment:
 
@@ -720,7 +814,7 @@ The second request prints nothing: the message was consumed by the first page. T
 
 ## Add authentication
 
-Stop `ocre dev`, then generate users, sign-up, login (password or emailed magic link), logout, password reset, and a JSON API with JWTs and API keys, all as code in the app:
+Stop `ocre dev`, then generate users, sign-up with email confirmation, login (password or emailed magic link), logout, password reset, account deletion, and a JSON API with JWTs and API keys, all as code in the app:
 
 ```sh
 ocre g auth
@@ -745,8 +839,10 @@ ocre g auth
   create  templates/auth/magic_link_show.html
   create  templates/auth/password_new.html
   create  templates/auth/password_edit.html
+  create  templates/auth/confirmation_show.html
   update  src/models/mod.rs
   update  src/lib.rs
+  update  wrangler.toml
 
 Next:
   ocre migrate
@@ -786,12 +882,13 @@ Start `ocre dev` again so the new modules are built. The HTML pages:
 
 | Page | Purpose |
 |---|---|
-| `GET/POST /signup` | Create an account (email, password of 8 to 128 characters), then sign in |
-| `GET /account` | An example protected page |
+| `GET/POST /signup` | Create an account (email, password of 8 to 128 characters), email a confirmation link, then sign in |
+| `GET /account`, `POST /account/delete` | An example protected page, and account deletion (after typing the password again) |
 | `GET/POST /login`, `POST /logout` | Password login and logout |
 | `GET/POST /magic_link` | Email a sign-in link |
 | `GET/POST /magic_link/{token}` | The emailed link: a page with a button that signs in |
 | `GET /passwords/new`, `POST /passwords`, `GET/POST /passwords/{token}` | Password reset by emailed link |
+| `GET/POST /confirmations/{token}`, `POST /confirmations` | The emailed confirmation link (a page with a button), and a new link |
 
 ### Sign up, log out, log in
 
@@ -804,16 +901,17 @@ HTTP/1.1 303 See Other
 Location: /
 ```
 
-The account exists and the session holds its user id. Passwords are hashed with PBKDF2-HMAC-SHA256 (100,000 iterations) through WebCrypto, about 5 ms of CPU per hash. The home page does not show flash messages, so the "Welcome! Your account is ready." notice waits for the next page that does, here `/account`:
+The account exists and the session holds its user id. Passwords are hashed with PBKDF2-HMAC-SHA256 (100,000 iterations) through WebCrypto, about 5 ms of CPU per hash. Sign-up also emails a confirmation link (printed in the `ocre dev` terminal, see [below](#magic-links-and-password-resets-in-development)); until it is opened, the account page says so. The home page does not show flash messages, so the welcome notice waits for the next page that does, here `/account`:
 
 ```sh
-curl -s -c cookies.txt -b cookies.txt http://localhost:8787/account | grep -E 'class="notice"|<dd>'
+curl -s -c cookies.txt -b cookies.txt http://localhost:8787/account | grep -E 'class="notice"|class="alert"|<dd>'
 ```
 
 ```text
-<p class="notice">Welcome! Your account is ready.</p>
+<p class="notice">Welcome! Your account is ready. Check your email to confirm your address.</p>
   <dt>Email</dt><dd>ada@example.com</dd>
-  <dt>Member since</dt><dd>2026-09-29 04:38:39</dd>
+  <dt>Member since</dt><dd>2026-09-29 22:05:29</dd>
+  <p class="alert">Your email address is not confirmed yet.</p>
 ```
 
 Log out, then try the protected page again:
@@ -832,7 +930,7 @@ Location: /login
 <p class="alert">Please log in to continue.</p>
 ```
 
-A wrong password re-renders the login form with status 422 and `Invalid email or password.`. The right one signs in and returns to the page that asked for the login:
+A wrong password re-renders the login form with status 422 and `Invalid email or password.`. Login, sign-up and the email forms allow 10 attempts a minute per IP address (the `[[ratelimits]]` binding `ocre g auth` added to `wrangler.toml`, free on Workers); the 11th answers 429. The right password signs in and returns to the page that asked for the login:
 
 ```sh
 curl -si -c cookies.txt -b cookies.txt http://localhost:8787/login -d 'email=ada@example.com&password=correct-horse' | grep -i '^http\|^location'
@@ -845,7 +943,7 @@ Location: /account
 
 ### Magic links and password resets in development
 
-The magic-link and password-reset forms send email with `ocre::mail::send`. `ocre new` wrote `MAIL_ADAPTER=log` to `.dev.vars`, so in `ocre dev` no email leaves your machine: each one is printed in the `ocre dev` terminal instead. Ask for a sign-in link:
+The sign-up confirmation, magic-link and password-reset forms send email with `ocre::mail::send`. `ocre new` wrote `MAIL_ADAPTER=log` to `.dev.vars`, so in `ocre dev` no email leaves your machine: each one is printed in the `ocre dev` terminal instead (the sign-up above already printed a "Confirm your email address" email). Ask for a sign-in link:
 
 ```sh
 curl -si http://localhost:8787/magic_link -d 'email=ada@example.com' | grep -i '^http\|^location'
@@ -876,7 +974,7 @@ If you did not ask for it, ignore this email.
 [wrangler:info] POST /magic_link 303 See Other (18ms)
 ```
 
-Opening the link shows a page with a "Sign in" button; the button POSTs to the same URL, which signs in and redirects to `/`. Mail scanners that follow links therefore cannot use the token. A token works once, for 15 minutes: posting it again redirects to `/magic_link` with "That sign-in link is invalid or has expired.". `/passwords/new` works the same way and prints a "Reset your password" email. For an unknown address both forms answer exactly as for a known one, so they do not reveal which emails have accounts.
+Opening the link shows a page with a "Sign in" button; the button POSTs to the same URL, which signs in (and marks the email as confirmed) and redirects to `/`. Mail scanners that follow links therefore cannot use the token. A token works once, for 15 minutes: posting it again redirects to `/magic_link` with "That sign-in link is invalid or has expired.". `/passwords/new` works the same way and prints a "Reset your password" email, and the confirmation link from sign-up (valid 24 hours) also shows a page with a button. For an unknown address the magic-link and password forms answer exactly as for a known one, so they do not reveal which emails have accounts.
 
 ## Protect the post pages
 
@@ -910,6 +1008,38 @@ pub fn routes() -> Router<Ctx> {
         .route("/posts/{id}/edit", get(edit))
         .route("/posts/{id}/delete", post(delete))
         .route("/posts/{id}/comments", post(create_comment))
+}
+
+/// Paths of the posts pages (Rails' `posts_path`, `post_path(record)`...).
+/// Handlers redirect to them and templates link with them:
+/// `<a href="{{ paths::show(post.id) }}">`; other modules call
+/// `crate::posts::paths::show(id)`.
+pub mod paths {
+    use std::fmt::Display;
+
+    pub fn index() -> &'static str {
+        "/posts"
+    }
+
+    pub fn new() -> &'static str {
+        "/posts/new"
+    }
+
+    pub fn show(id: impl Display) -> String {
+        format!("/posts/{id}")
+    }
+
+    pub fn edit(id: impl Display) -> String {
+        format!("/posts/{id}/edit")
+    }
+
+    pub fn delete(id: impl Display) -> String {
+        format!("/posts/{id}/delete")
+    }
+
+    pub fn comments(id: impl Display) -> String {
+        format!("/posts/{id}/comments")
+    }
 }
 
 /// What the new and edit forms submit, as typed: numbers stay text until
@@ -970,6 +1100,7 @@ pub struct CommentForm {
 #[template(path = "posts/index.html")]
 struct IndexView {
     flash: Flash,
+    page: Page,
     posts: Vec<Post>,
 }
 
@@ -999,7 +1130,7 @@ struct EditView {
 }
 
 async fn index(State(ctx): State<Ctx>, flash: Flash, page: Page) -> Result<Html<String>> {
-    render(&IndexView { flash, posts: post::all(&ctx, page).await? })
+    render(&IndexView { flash, page, posts: post::all(&ctx, page).await? })
 }
 
 async fn show(State(ctx): State<Ctx>, flash: Flash, page: Page, Path(id): Path<i64>) -> Result<Html<String>> {
@@ -1025,7 +1156,7 @@ async fn create(
     match created {
         Ok(record) => {
             session.flash("notice", "Post was successfully created.")?;
-            Ok(Redirect::to(&format!("/posts/{}", record.id)).into_response())
+            Ok(Redirect::to(&paths::show(record.id)).into_response())
         }
         Err(Error::Invalid(errors)) => {
             Ok((StatusCode::UNPROCESSABLE_ENTITY, render(&NewView { form, errors })?).into_response())
@@ -1054,7 +1185,7 @@ async fn update(
         Ok(record) => {
             let record = record.or_404()?;
             session.flash("notice", "Post was successfully updated.")?;
-            Ok(Redirect::to(&format!("/posts/{}", record.id)).into_response())
+            Ok(Redirect::to(&paths::show(record.id)).into_response())
         }
         Err(Error::Invalid(errors)) => {
             Ok((StatusCode::UNPROCESSABLE_ENTITY, render(&EditView { id, form, errors })?).into_response())
@@ -1068,7 +1199,7 @@ async fn delete(_: CurrentUser, State(ctx): State<Ctx>, session: Session, Path(i
         return Err(Error::NotFound);
     }
     session.flash("notice", "Post was successfully destroyed.")?;
-    Ok(Redirect::to("/posts"))
+    Ok(Redirect::to(paths::index()))
 }
 
 /// Adds a comment to the post, then shows the post again. Invalid input
@@ -1085,7 +1216,7 @@ async fn create_comment(
     match comment::create(&ctx, new).await {
         Ok(_) => {
             session.flash("notice", "Comment was successfully created.")?;
-            Ok(Redirect::to(&format!("/posts/{id}")).into_response())
+            Ok(Redirect::to(&paths::show(id)).into_response())
         }
         Err(Error::Invalid(errors)) => {
             let comments = post.comments(&ctx, page).await?;
@@ -1097,7 +1228,7 @@ async fn create_comment(
 }
 ```
 
-`_: CurrentUser` only requires the login; write `CurrentUser(user): CurrentUser` to use the `User` (for example to store `user.id` on the post, after a migration that adds the column). `OptionalUser(user): OptionalUser` gives an `Option<User>` for pages that change with the login but stay public. Extractors that read the request body (`Form`) must come last; `CurrentUser` reads only the cookie.
+`_: CurrentUser` only requires the login; write `CurrentUser(user): CurrentUser` to use the `User` (for example to store `user.id` on the post, after a migration that adds the column). `ConfirmedUser(user): ConfirmedUser` also requires a confirmed email, and `OptionalUser(user): OptionalUser` gives an `Option<User>` for pages that change with the login but stay public. Extractors that read the request body (`Form`) must come last; `CurrentUser` reads only the cookie.
 
 ```sh
 rm cookies.txt
@@ -1128,44 +1259,49 @@ ocre routes
 ```
 
 ```text
-METHOD  PATH                   HANDLER
-GET     /                      home
-GET     /account               registrations::show
-GET     /api/auth/keys         auth_api::list_keys
-POST    /api/auth/keys         auth_api::create_key
-DELETE  /api/auth/keys/{id}    auth_api::revoke_key
-GET     /api/auth/me           auth_api::me
-POST    /api/auth/signup       auth_api::signup
-POST    /api/auth/token        auth_api::token
-GET     /comments              comments::index
-POST    /comments              comments::create
-GET     /comments/new          comments::new
-GET     /comments/{id}         comments::show
-POST    /comments/{id}         comments::update
-POST    /comments/{id}/delete  comments::delete
-GET     /comments/{id}/edit    comments::edit
-GET     /login                 sessions::new
-POST    /login                 sessions::create
-POST    /logout                sessions::destroy
-GET     /magic_link            sessions::new_magic_link
-POST    /magic_link            sessions::create_magic_link
-GET     /magic_link/{token}    sessions::show_magic_link
-POST    /magic_link/{token}    sessions::use_magic_link
-POST    /passwords             passwords::create
-GET     /passwords/new         passwords::new
-GET     /passwords/{token}     passwords::edit
-POST    /passwords/{token}     passwords::update
-GET     /posts                 posts::index
-POST    /posts                 posts::create
-GET     /posts/new             posts::new
-GET     /posts/{id}            posts::show
-POST    /posts/{id}            posts::update
-POST    /posts/{id}/comments   posts::create_comment
-POST    /posts/{id}/delete     posts::delete
-GET     /posts/{id}/edit       posts::edit
-GET     /signup                registrations::new
-POST    /signup                registrations::create
-GET     /up                    up
+METHOD  PATH                    HANDLER
+GET     /                       home
+GET     /account                registrations::show
+POST    /account/delete         registrations::destroy
+GET     /api/auth/keys          auth_api::list_keys
+POST    /api/auth/keys          auth_api::create_key
+DELETE  /api/auth/keys/{id}     auth_api::revoke_key
+GET     /api/auth/me            auth_api::me
+DELETE  /api/auth/me            auth_api::delete_me
+POST    /api/auth/signup        auth_api::signup
+POST    /api/auth/token         auth_api::token
+GET     /comments               comments::index
+POST    /comments               comments::create
+GET     /comments/new           comments::new
+GET     /comments/{id}          comments::show
+POST    /comments/{id}          comments::update
+POST    /comments/{id}/delete   comments::delete
+GET     /comments/{id}/edit     comments::edit
+POST    /confirmations          confirmations::create
+GET     /confirmations/{token}  confirmations::show
+POST    /confirmations/{token}  confirmations::update
+GET     /login                  sessions::new
+POST    /login                  sessions::create
+POST    /logout                 sessions::destroy
+GET     /magic_link             sessions::new_magic_link
+POST    /magic_link             sessions::create_magic_link
+GET     /magic_link/{token}     sessions::show_magic_link
+POST    /magic_link/{token}     sessions::use_magic_link
+POST    /passwords              passwords::create
+GET     /passwords/new          passwords::new
+GET     /passwords/{token}      passwords::edit
+POST    /passwords/{token}      passwords::update
+GET     /posts                  posts::index
+POST    /posts                  posts::create
+GET     /posts/new              posts::new
+GET     /posts/{id}             posts::show
+POST    /posts/{id}             posts::update
+POST    /posts/{id}/comments    posts::create_comment
+POST    /posts/{id}/delete      posts::delete
+GET     /posts/{id}/edit        posts::edit
+GET     /signup                 registrations::new
+POST    /signup                 registrations::create
+GET     /up                     up
 ```
 
 A filter keeps the routes whose method, path or handler contains it (`ocre routes posts`); `--json` returns them as a `routes` array.
@@ -1215,13 +1351,13 @@ https://blog.<your-subdomain>.workers.dev
 
 The first line appears only on the deploy that created the secret. With `--json`, the result is `{"command": "deploy", "ok": true, "secret_created": true, "url": "https://blog.<your-subdomain>.workers.dev"}`. Run `ocre deploy` again after each change: later deploys migrate the database first, so the new code never runs against an old schema.
 
-Free-plan limits that matter for this blog (September 2026, [Workers limits](https://developers.cloudflare.com/workers/platform/limits/)): 100,000 Worker requests a day and 10 ms of CPU per request. Page views cost well under 10 ms; a login or sign-up uses about half of it for the password hash. The login, sign-up and email routes have no rate limiting: before going public, add [Cloudflare rate limiting rules](https://developers.cloudflare.com/waf/rate-limiting-rules/) for `/login`, `/signup`, `/magic_link`, `/passwords` and `/api/auth/*`. [Free-plan limits](../reference/limits.md) lists the rest, including D1.
+Free-plan limits that matter for this blog (September 2026, [Workers limits](https://developers.cloudflare.com/workers/platform/limits/)): 100,000 Worker requests a day and 10 ms of CPU per request. Page views cost well under 10 ms; a login or sign-up uses about half of it for the password hash. The login, sign-up, token and email routes are rate limited by the `AUTH_RATE_LIMITER` binding (10 attempts a minute per IP address and Cloudflare location), which needs no storage and is free. [Free-plan limits](../reference/limits.md) lists the rest, including D1.
 
 ## Next steps
 
 - [Models and migrations](../guides/models.md): queries, associations, changing columns with `ocre g migration`.
 - [Validations](../guides/validations.md): every `Validator` rule and how errors reach forms and JSON.
-- [Controllers, routing, views and htmx](../guides/controllers.md): handlers, templates, partial updates with htmx.
+- [Controllers and routing](../guides/controllers.md), [Views, helpers and forms](../guides/views.md) and [htmx](../guides/htmx.md): handlers, templates, partial updates with htmx.
 - [Authentication](../guides/authentication.md): `CurrentUser`, ownership checks, JWTs and API keys.
 - [Email](../guides/email.md): mailers, Resend, Cloudflare Email Service, receiving email.
 - [Background jobs and schedules](../guides/jobs.md): send email from a queue, run nightly tasks.

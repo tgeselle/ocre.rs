@@ -37,7 +37,10 @@ fn new_creates_an_app_without_touching_cloudflare_by_default() {
     let gitignore = fs::read_to_string(root.join(".gitignore")).unwrap();
     assert!(gitignore.contains("\n.dev.vars\n.dev.vars.*\n"), "{gitignore}");
     let agents = fs::read_to_string(root.join("AGENTS.md")).unwrap();
-    assert!(agents.starts_with("# shop\n") && agents.contains("`https://ocre-docs.raitomm.workers.dev/llms.txt`"), "{agents}");
+    assert!(
+        agents.starts_with("# shop\n") && agents.contains("`https://ocre-docs.raitomm.workers.dev/llms.txt`"),
+        "{agents}"
+    );
     assert!(!agents.contains("__"), "no template placeholder left: {agents}");
     assert!(sandbox.calls().is_empty(), "no wrangler call without --login/--deploy");
 }
@@ -588,7 +591,8 @@ fn api_with_graphql_wires_the_schema_and_dependency() {
     assert!(ok, "{report}");
     assert_eq!(
         report["updated"],
-        serde_json::json!(["src/models/mod.rs", "src/lib.rs", "Cargo.toml", "src/graphql.rs"])
+        serde_json::json!(["src/models/mod.rs", "src/lib.rs", "src/graphql.rs"]),
+        "Cargo.toml already has the dependency: unchanged, not reported"
     );
     let schema = fs::read_to_string(root.join("src/graphql.rs")).unwrap();
     assert!(schema.contains("crate::orders_api::OrderQuery,\n    crate::products_api::ProductQuery,"));

@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}__APP_NAME__{% endblock %}</title>
   <script src="https://unpkg.com/htmx.org@2.0.4" crossorigin="anonymous"></script>
+  {# Error pages and 422 forms are swapped in like any page (htmx ignores 4xx/5xx bodies by default). #}
+  <meta name="htmx-config" content='{"responseHandling": [{"code": "204", "swap": false}, {"code": "...", "swap": true}]}'>
   <style>
     body { font-family: system-ui, sans-serif; max-width: 48rem; margin: 2rem auto; padding: 0 1rem; color: #2b2118; }
     a { color: #b5651d; }
@@ -17,9 +19,11 @@
     th, td { text-align: left; padding: .5rem; border-bottom: 1px solid #e8d8c4; }
     .notice { color: #2e6b2e; }
     .alert, .errors { color: #a3261b; }
+    .pagination { display: flex; gap: 1rem; margin-top: 1rem; }
   </style>
 </head>
-<body>
+{# hx-boost: links and forms load the next page with htmx and swap the body, without a full reload (Rails' Turbo Drive). Without JavaScript they work as usual. #}
+<body hx-boost="true">
   <header><a href="/">__APP_NAME__</a></header>
   <main>{% block content %}{% endblock %}</main>
 </body>

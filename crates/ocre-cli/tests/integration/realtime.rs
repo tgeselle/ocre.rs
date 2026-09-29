@@ -48,7 +48,7 @@ fn realtime_scaffold_sets_up_the_channel_once() {
     let index = fs::read_to_string(root.join("templates/posts/index.html")).unwrap();
     assert!(index.contains("<div hx-ext=\"ws\" ws-connect=\"/realtime/posts\">\n<table>"), "{index}");
     assert!(index.contains("<tbody id=\"posts\">\n    {% for post in posts %}\n    {% include \"posts/_row.html\" %}"));
-    assert!(index.contains("</table>\n</div>\n{% endblock %}"), "{index}");
+    assert!(index.contains("</table>\n</div>\n\n<nav class=\"pagination\">"), "{index}");
     let row = fs::read_to_string(root.join("templates/posts/_row.html")).unwrap();
     assert!(row.starts_with("<tr id=\"post_{{ post.id }}\"><td>{{ post.title }}</td>"), "{row}");
 

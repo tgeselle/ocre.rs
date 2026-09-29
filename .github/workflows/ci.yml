@@ -70,7 +70,7 @@ jobs:
       - run: ocre new ci-app --starter blog --ocre-path "$PWD/crates/ocre" --yes --json
       - working-directory: ci-app
         run: |
-          ocre g auth --json
+          ocre g auth --db-sessions --oauth github --json
           ocre g model Memo title:string user:references --json
           ocre g model Author name:string^ bio:text?
           ocre g scaffold Book title:string^ summary:text? pages:integer rating:float? published:boolean released_on:date? settings:json author:references --json
@@ -82,9 +82,56 @@ jobs:
           ocre g job SendDigest user_id:integer note:text? payload:json? --json
           ocre g job Cleanup --json
           ocre g schedule nightly_cleanup "0 3 * * *" --json
+          ocre g job SendCode user_id:integer --queue urgent --json
+          ocre g schedule weekly_digest "every monday at 9am" --json
+          ocre g mailer Billing receipt --json
           ocre g scaffold Note title:string body:text? --realtime --json
           ocre g scaffold Photo title:string image:attachment notes:attachment? --json
           ocre g api Document name:string file:attachment? --graphql --json
           ocre g cache --json
           ocre g locale en fr --json
+          # Every field type and alias; enums in forms and JSON.
+          ocre g scaffold Task title:string status:enum:todo,doing,done priority:small_int views:big_int? due_at:time? cost:decimal? token:uuid?^ weight:double? done:bool starts_at:date_time? meta:jsonb? author:references:writer_id? --json
+          ocre g api Ticket state:enum:open,closed price:decimal code:uuid opens_at:time? --json
+          ocre g migration add_state_to_books state:enum:draft,live --json
+          # Migration SQL inferred from the name.
+          ocre g migration add_index_to_books pages released_on --json
+          ocre g migration add_unique_index_to_books isbn --json
+          ocre g migration remove_index_from_books pages released_on --json
+          ocre g migration rename_summary_to_blurb_in_books --json
+          # Controllers and resources.
+          ocre g controller Pages about contact --json
+          ocre g controller Dashboard --auth --json
+          ocre g controller Metrics summary --api --json
+          ocre g resource Tag name:string^ color:enum:red,green,blue --json
+          ocre g resource Badge label:string --api --json
+          # --pretend writes nothing; --skip keeps and --force rewrites existing files.
+          ocre g scaffold Draft title:string --pretend --json
+          test ! -e src/drafts.rs && test ! -e src/models/draft.rs
+          ocre g controller Pages about contact --skip --json
+          ocre g controller Pages about contact --force --json
+          # destroy undoes a recorded run; the build below proves src/lib.rs is intact.
+          ocre g scaffold Temp name:string --json
+          ocre destroy scaffold Temp --json
+          test ! -e src/temps.rs && test ! -e src/models/temp.rs
+          # Template overrides and app generators.
+          ocre g override --json
+          ocre g override controller/view.html --json
+          ocre g controller Help faq --json
+          ocre g generator service --json
+          ocre g service Billing amount:integer --json
+          test -f src/services/billing.rs
+          # Application template.
+          printf 'g model Label name:string\ng migration add_index_to_labels name\n' > ci.ocre
+          ocre template ci.ocre --json
+          # Read-only commands (doctor warns about the login and pending migrations, which is fine).
+          ocre version --json
+          ocre about --json
+          ocre stats --json
+          ocre notes --json
+          ocre routes --json
+          ocre schedules --json
+          ocre doctor --json
+          # cargo test, then the wasm32 check.
+          ocre test --json
           cargo check --target wasm32-unknown-unknown

@@ -5,23 +5,25 @@
 //! | `POST /api/auth/signup` | `{"email", "password"}` | 201, the user |
 //! | `POST /api/auth/token` | `{"email", "password"}` | `{"token", "token_type": "Bearer", "expires_in"}` (JWT, 1 hour) |
 //! | `GET /api/auth/me` | | the user of the Bearer token |
+//! | `DELETE /api/auth/me` | `{"password"}` | 204: the account and its data are deleted |
 //! | `GET /api/auth/keys` | | the user's API keys (never the secrets) |
 //! | `POST /api/auth/keys` | `{"name"}` | 201, `{"key", "api_key"}`: `key` is shown once |
 //! | `DELETE /api/auth/keys/{id}` | | 204 |
 //!
 //! Protect a JSON route by taking `BearerUser(user): BearerUser`: it accepts
 //! `Authorization: Bearer <JWT or API key>` and answers 401 JSON otherwise.
-//! No rate limiting: see the README before exposing sign-up and token routes.
+//! Sign-up and token requests are rate limited per IP address (`throttle`):
+//! 429 JSON after 10 a minute.
 
 use axum::{
     Router,
     extract::{FromRequestParts, Path, State},
-    http::{StatusCode, header, request::Parts},
+    http::{HeaderMap, StatusCode, request::Parts},
     routing::{delete, get, post},
 };
 use ocre::{
     ApiError, ApiResult, Created, Ctx, Error, Json,
-    jwt::{self, Claims},
+    jwt::{self, Claims, Location},
 };
 use serde::{Deserialize, Serialize};
 
@@ -32,37 +34,46 @@ use crate::models::{
 
 /// Lifetime of the JWTs `POST /api/auth/token` issues.
 pub const TOKEN_TTL_SECONDS: i64 = 3600;
+/// Where `BearerUser` looks for a JWT or an API key, in order. Add
+/// `Location::Cookie("token")` or `Location::Query("token")` to accept
+/// those too.
+pub const TOKEN_LOCATIONS: &[Location] = &[Location::Bearer];
+/// The Workers Rate Limiting binding in wrangler.toml (`[[ratelimits]]`).
+pub const RATE_LIMITER: &str = "AUTH_RATE_LIMITER";
 
 pub fn routes() -> Router<Ctx> {
     Router::new()
         .route("/api/auth/signup", post(signup))
         .route("/api/auth/token", post(token))
-        .route("/api/auth/me", get(me))
+        .route("/api/auth/me", get(me).delete(delete_me))
         .route("/api/auth/keys", get(list_keys).post(create_key))
         .route("/api/auth/keys/{id}", delete(revoke_key))
 }
 
-/// The user authenticated by `Authorization: Bearer <token>`, where the token
-/// is a JWT from `POST /api/auth/token` or an API key. Anything else: 401.
+/// Counts one `action` attempt from the request's IP address against
+/// `AUTH_RATE_LIMITER` (10 a minute per Cloudflare location, set in
+/// wrangler.toml): 429 when over. Used by every route that checks a
+/// password or sends an email. Free plan: no D1 or KV operation.
+pub async fn throttle(ctx: &Ctx, headers: &HeaderMap, action: &str) -> ocre::Result<()> {
+    let ip = ocre::remote_ip(headers).map_or_else(|| "unknown".to_owned(), |ip| ip.to_string());
+    ocre::security::rate_limit(ctx, RATE_LIMITER, &format!("{action}:{ip}")).await
+}
+
+/// The user authenticated by a token from `TOKEN_LOCATIONS` (by default
+/// `Authorization: Bearer <token>`), where the token is a JWT from
+/// `POST /api/auth/token` or an API key. Anything else: 401.
 pub struct BearerUser(pub User);
 
 impl FromRequestParts<Ctx> for BearerUser {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, ctx: &Ctx) -> Result<Self, ApiError> {
-        let token = parts
-            .headers
-            .get(header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "))
-            .map(str::trim)
-            .filter(|token| !token.is_empty())
-            .ok_or(Error::Unauthorized)?;
+        let token = jwt::token_from(&parts.headers, &parts.uri, TOKEN_LOCATIONS).ok_or(Error::Unauthorized)?;
         // JWTs have three dot-separated parts; API keys are base64url, without dots.
         let user_id = if token.contains('.') {
-            jwt::decode(ctx, token)?.sub.parse::<i64>().map_err(|_| Error::Unauthorized)?
+            jwt::decode(ctx, &token)?.sub.parse::<i64>().map_err(|_| Error::Unauthorized)?
         } else {
-            api_key::authenticate(ctx, token).await?.ok_or(Error::Unauthorized)?
+            api_key::authenticate(ctx, &token).await?.ok_or(Error::Unauthorized)?
         };
         // A deleted user's tokens stop working.
         let user = user::find(ctx, user_id).await?.ok_or(Error::Unauthorized)?;
@@ -70,10 +81,18 @@ impl FromRequestParts<Ctx> for BearerUser {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+/// Email and password. No `Debug`: it would print the password in logs.
+#[derive(Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Credentials {
     pub email: String,
+    pub password: String,
+}
+
+/// The password again, to delete the account.
+#[derive(Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct PasswordConfirmation {
     pub password: String,
 }
 
@@ -91,11 +110,17 @@ struct CreatedKey {
     api_key: ApiKey,
 }
 
-async fn signup(State(ctx): State<Ctx>, Json(new): Json<NewUser>) -> ApiResult<Created<User>> {
+async fn signup(State(ctx): State<Ctx>, headers: HeaderMap, Json(new): Json<NewUser>) -> ApiResult<Created<User>> {
+    throttle(&ctx, &headers, "signup").await?;
     Ok(Created(user::create(&ctx, new).await?))
 }
 
-async fn token(State(ctx): State<Ctx>, Json(credentials): Json<Credentials>) -> ApiResult<Json<TokenResponse>> {
+async fn token(
+    State(ctx): State<Ctx>,
+    headers: HeaderMap,
+    Json(credentials): Json<Credentials>,
+) -> ApiResult<Json<TokenResponse>> {
+    throttle(&ctx, &headers, "token").await?;
     let user =
         user::authenticate(&ctx, &credentials.email, &credentials.password).await?.ok_or(Error::Unauthorized)?;
     let token = jwt::encode(&ctx, &Claims::new(user.id.to_string(), TOKEN_TTL_SECONDS))?;
@@ -104,6 +129,23 @@ async fn token(State(ctx): State<Ctx>, Json(credentials): Json<Credentials>) -> 
 
 async fn me(BearerUser(user): BearerUser) -> Json<User> {
     Json(user)
+}
+
+/// Deletes the account after checking the password (or the email for users
+/// without one); its API keys go with it. Outstanding JWTs stop working
+/// because the user no longer exists.
+async fn delete_me(
+    State(ctx): State<Ctx>,
+    BearerUser(user): BearerUser,
+    headers: HeaderMap,
+    Json(confirmation): Json<PasswordConfirmation>,
+) -> ApiResult<StatusCode> {
+    throttle(&ctx, &headers, "account_delete").await?;
+    if !user::deletion_confirmed(&user, &confirmation.password).await? {
+        return Err(Error::Forbidden.into());
+    }
+    user::delete(&ctx, user.id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn list_keys(State(ctx): State<Ctx>, BearerUser(user): BearerUser) -> ApiResult<Json<Vec<ApiKey>>> {
