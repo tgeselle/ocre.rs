@@ -22,17 +22,17 @@ use crate::{Error, Result};
 /// Extractor failures render as HTML pages in full-stack apps and as JSON in
 /// API-only apps.
 #[cfg(feature = "html")]
-type Rejection = Error;
+pub(crate) type Rejection = Error;
 #[cfg(not(feature = "html"))]
-type Rejection = crate::ApiError;
+pub(crate) type Rejection = crate::ApiError;
 
 #[cfg(feature = "html")]
-fn reject(err: Error) -> Rejection {
+pub(crate) fn reject(err: Error) -> Rejection {
     err
 }
 
 #[cfg(not(feature = "html"))]
-fn reject(err: Error) -> Rejection {
+pub(crate) fn reject(err: Error) -> Rejection {
     crate::ApiError::from(err)
 }
 

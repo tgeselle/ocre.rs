@@ -44,8 +44,11 @@ fn infer(name: &str, fields: &[Field]) -> Result<String, CliError> {
     }
     if let Some((column, table)) = name.strip_prefix("remove_").and_then(|rest| rest.rsplit_once("_from_")) {
         let mut sql = String::new();
-        let columns: Vec<&str> =
-            if fields.is_empty() { vec![column] } else { fields.iter().map(|f| f.name.as_str()).collect() };
+        let columns: Vec<String> = if fields.is_empty() {
+            vec![column.to_owned()]
+        } else {
+            fields.iter().flat_map(|f| f.columns()).map(|(name, _)| name).collect()
+        };
         for column in columns {
             writeln!(sql, "ALTER TABLE {table} DROP COLUMN {column};").expect("writing to a String");
         }
@@ -70,13 +73,19 @@ fn add_columns(table: &str, fields: &[Field]) -> Result<String, CliError> {
             return Err(CliError::new(format!("`{}` must be optional when added to an existing table", field.name))
                 .hint("SQLite adds reference columns as NULL for existing rows: use `name:references?`"));
         }
+        if field.is_attachment() && !field.optional {
+            return Err(CliError::new(format!("`{}` must be optional when added to an existing table", field.name))
+                .hint("existing rows have no file: use `name:attachment?`"));
+        }
         // Existing rows need a value for NOT NULL columns.
         let default = match field.ty {
             _ if field.optional || field.ty == FieldType::Boolean => "",
             _ if field.ty.is_textual() => " DEFAULT ''",
             _ => " DEFAULT 0",
         };
-        writeln!(sql, "ALTER TABLE {table} ADD COLUMN {}{default};", field.sql_column()).expect("writing to a String");
+        for column in field.sql_columns() {
+            writeln!(sql, "ALTER TABLE {table} ADD COLUMN {column}{default};").expect("writing to a String");
+        }
     }
     for field in fields {
         sql.push_str(&index_sql(table, field));

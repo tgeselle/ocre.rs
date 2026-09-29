@@ -35,19 +35,24 @@ free-plan limits an agent needs.
 | `ocre new [name]` | App skeleton. In a terminal, asks for anything flags did not answer |
 | `ocre login` | Cloudflare login in the browser, unless already logged in |
 | `ocre g model <Model> field:type...` | Migration and `src/models/<model>.rs`: struct, validations, queries, associations |
-| `ocre g scaffold <Model> field:type...` | Model (unless it exists) plus HTML CRUD: handlers, routes, templates; registers modules in `src/lib.rs`. In an API-only app: same as `ocre g api` |
+| `ocre g scaffold <Model> field:type... [--realtime]` | Model (unless it exists) plus HTML CRUD: handlers, routes, templates; registers modules in `src/lib.rs`. `--realtime`: the index page updates live in every open browser (see [Realtime](#realtime)). In an API-only app: same as `ocre g api` |
 | `ocre g api <Model> field:type... [--graphql]` | Model (unless it exists) plus JSON REST resource under `/api/<plural>`; `--graphql` also exposes it on `/graphql` |
 | `ocre g auth` | Authentication generated into the app: users, sign-up/login/logout pages, password reset and magic links by email, JWTs and API keys (see [Authentication](#authentication)). Runs once |
 | `ocre g migration <name> [field:type...]` | Numbered migration; `create_<table>`, `add_<x>_to_<table>` and `remove_<x>_from_<table>` get their SQL from the name and fields |
 | `ocre g mailer <Name> action...` | `src/mailers/<name>.rs`, one function per action returning an `ocre::mail::Email`, with `templates/mailers/<name>/<action>.{txt,html}` (text built with `format!` in API-only apps) |
 | `ocre g mailbox` | `src/mailbox.rs` for incoming email, wired to the Worker's `email` event in `src/lib.rs` |
+| `ocre g job <Name> [field:type...]` | `src/jobs/<name>.rs` (arguments + `perform`), added to the `Job` enum and `perform` match in `src/jobs/mod.rs`; the first job wires the `JOBS` queue and the `queue` event (see [Background jobs](#background-jobs-and-scheduled-tasks)) |
+| `ocre g schedule <name> "<cron>"` | `src/schedules/<name>.rs`, run by a Cron Trigger added to `[triggers] crons`, dispatched by cron in `src/schedules/mod.rs`; the first one wires the `scheduled` event |
+| `ocre g cache` | Adds the `CACHE` Workers KV binding to `wrangler.toml` for `ocre::cache::fetch` (see [Caching](#caching)) |
+| `ocre g locale <code>...` | `locales/<code>.yml` per code, declared in `ocre::locales!(...)` in `src/lib.rs`; the first run makes its first code the default locale and adds the `I18n` layer to `routes()` (see [Translations](#translations)) |
 | `ocre migrate [--remote]` | Apply D1 migrations |
 | `ocre migrate --status [--remote]` | Show wrangler's pending-migrations table; `--json` lists them in `pending` |
 | `ocre db seed [--remote]` | Run `db/seeds.sql` |
 | `ocre db reset` | Local only: delete `.wrangler/state/v3/d1`, apply migrations, run `db/seeds.sql` if present |
 | `ocre sql "<query>" [--remote]` | Run SQL and print the rows as a table; `--json` returns wrangler's results in `rows` |
-| `ocre dev [--port N]` | Local migrations, then `wrangler dev` |
-| `ocre deploy` | Existing database: migrate, then deploy. New database: deploy (creates it), then migrate. Uploads a new `SECRET_KEY_BASE` only when the Worker has none (an existing one is never rotated) |
+| `ocre dev [--port N]` | Checks locale files, applies local migrations, then `wrangler dev` |
+| `ocre deploy` | Existing database: migrate, then deploy. New database: deploy (creates it), then migrate. Uploads a new `SECRET_KEY_BASE` only when the Worker has none (an existing one is never rotated). Creates the queues `wrangler.toml` names when missing, the KV namespaces without an `id` (then writes the id into `wrangler.toml`), and the R2 buckets of `[[r2_buckets]]` when missing. Refuses locale files the Worker could not load |
+| `ocre i18n missing` | Keys of the default locale missing from other locales (with the plural forms each language needs), undeclared or invalid locale files; fails when there is any |
 | `ocre routes [filter]` | The app's routes (method, path, handler), read from `src/lib.rs` and the modules it merges; `--json` returns `routes` |
 | `ocre secret` | New random `SECRET_KEY_BASE` value (128 hex characters), like `rails secret` |
 
@@ -66,7 +71,7 @@ free-plan limits an agent needs.
 
 Field types: `string`, `text`, `integer`, `float`, `boolean`, `date`,
 `datetime`, `references` (`author:references` adds `author_id` with a foreign
-key, `ON DELETE CASCADE`). Suffixes: `?` optional (NULL allowed), `^` unique.
+key, `ON DELETE CASCADE`), `attachment` (a file in R2, see [Files](#files)). Suffixes: `?` optional (NULL allowed), `^` unique.
 Scaffold routes: `GET /posts`, `GET /posts/new`, `POST /posts`,
 `GET /posts/{id}`, `GET /posts/{id}/edit`, `POST /posts/{id}` (update),
 `POST /posts/{id}/delete`.
@@ -134,9 +139,9 @@ failure. Generators never overwrite files.
 - **Flash**: `session.flash("notice", "...")` before a redirect; the next page
   takes `flash: ocre::Flash`. Scaffolds show "Post was successfully created."
 - **CSRF protection** without tokens: unsafe requests (POST, PUT, PATCH,
-  DELETE) that a browser sends from another site (`Sec-Fetch-Site`, or
-  `Origin` against `Host` for older browsers) get 403, the check Go 1.25 ships
-  as `http.CrossOriginProtection`. Cookies are `SameSite=Lax`.
+  DELETE) and WebSocket handshakes that a browser sends from another site
+  (`Sec-Fetch-Site`, or `Origin` against `Host` for older browsers) get 403,
+  the check Go 1.25 ships as `http.CrossOriginProtection`. Cookies are `SameSite=Lax`.
 - **CORS** for the origins in the `ALLOWED_ORIGINS` Worker variable
   (comma-separated), which are also trusted by the CSRF check.
 - **Security headers**: `X-Content-Type-Options: nosniff`,
@@ -199,6 +204,143 @@ Email Routing > Routing rules sends an address to the Worker. Locally, while
 curl 'http://localhost:8787/cdn-cgi/local/email?from=ada@example.com&to=support@example.com' \
   --data-binary $'From: ada@example.com\r\nTo: support@example.com\r\nSubject: Hi\r\nMessage-ID: <1@example.com>\r\n\r\nHello'
 ```
+
+## Files
+
+Uploads are stored in [R2](https://developers.cloudflare.com/r2/) and
+described by four columns of the record that owns them, like Active Storage
+without its extra tables. `ocre g scaffold Photo title:string image:attachment
+notes:attachment?` generates:
+
+| Piece | What it does |
+|---|---|
+| `image_key`, `image_filename`, `image_content_type`, `image_size` | Columns (NULL-able for `?`); `photo.image()` returns an `ocre::storage::Attachment` (`photo.notes()` an `Option`) |
+| `pub const IMAGE: Rules` in the model | Largest file (10 MB) and allowed content types (PNG, JPEG, GIF, WebP, PDF, plain text); `validate()` checks each upload with `v.file(..)`, before anything is stored |
+| `create` / `update` / `delete` | Store new files under `photos/image/<random>`, then write the row; files are deleted again if the write fails, replaced or removed files after it succeeds, and a deleted record's files with it |
+| HTML forms | `enctype="multipart/form-data"`, a file input per attachment, "Remove notes" on the edit page for optional files; the form's request limit is the sum of its files' limits plus 1 MB (larger: 413) |
+| `GET /photos/{id}/image` | Streams the file: `Content-Type`, `Content-Length`, `Content-Disposition` with the original name, `ETag` and 304, `Range` (206/416), `Cache-Control: private, no-cache` |
+| `wrangler.toml` | `[[r2_buckets]] binding = "STORAGE"`, `bucket_name = "<app>-storage"`, added by the first generator that needs it |
+
+`ocre g api Document name:string file:attachment?` adds `GET`, `PUT`
+(multipart, `curl -X PUT -F file=@spec.pdf`) and `DELETE` on
+`/api/documents/{id}/file`; JSON cannot carry a file, so attachments of a JSON
+API must be optional. GraphQL exposes the four columns; files go through REST.
+
+The framework API, `ocre::storage`: the `Multipart<LIMIT>` extractor
+(`form.form::<T>()` for text fields, `form.file("image")` for an `Upload`),
+`Validator::file`, `store` / `store_bytes` / `store_body` (a request body
+streamed in with its `Content-Length`), `read`, `delete`,
+`delete_attachments` and `serve(&ctx, &attachment, &headers, Disposition::Inline)`.
+
+Choices, for the free plan:
+
+- **Costs** ([R2 pricing](https://developers.cloudflare.com/r2/pricing/),
+  September 2026, free every month): 10 GB-month stored, 1M class A
+  operations (each upload is one), 10M class B (each download or 304 is one),
+  deletes free, no egress fees. R2 has to be enabled once in the dashboard
+  (Storage & databases > R2), which asks for a payment method even for the
+  free tier; `ocre deploy` says so when the account lacks it (API code 10042).
+- **CPU**: downloads never pass through WebAssembly. `storage::serve` hands
+  R2's stream to `ocre::serve`, which answers with it directly (that is why
+  the Worker's `fetch` returns `worker::web_sys::Response`); axum bodies are
+  otherwise copied chunk by chunk into and out of WebAssembly and lose
+  `Content-Length`. Uploads are read into memory and split with a
+  substring search: 1.2 ms per 10 MB in WebAssembly (memchr, measured in V8),
+  plus a copy to R2 (0.15 ms per 10 MB).
+- **Memory and size**: a Worker has 128 MB, and Cloudflare refuses request
+  bodies over 100 MB on the Free plan, so keep limits in the tens of MB; the
+  whole request is in memory while it is stored. A Worker can instead stream
+  a raw body of known length into R2 with `store_body`.
+- **Safety**: keys are random (128 bits), never derived from file names.
+  File names lose directories and control characters. Only types that cannot
+  run scripts (raster images, PDF, plain text, audio, video) are shown
+  inline; HTML, SVG, XML and JavaScript are sent as downloads of type
+  `application/octet-stream`. The content type comes from the browser: the
+  allowlist limits it, nothing sniffs file contents. Serving routes are as
+  protected as the handler you put around them.
+- **Local development**: `ocre dev` keeps objects in `.wrangler/state` (wrangler's R2 simulation).
+
+Not included: presigned URLs and direct browser-to-R2 uploads (they need R2
+S3 API credentials and SigV4 signing), public buckets and custom domains
+(served by Cloudflare without the Worker; set up in the dashboard), image
+resizing, and cleanup of files whose rows are removed by `ON DELETE CASCADE`.
+
+## Background jobs and scheduled tasks
+
+Jobs run on [Cloudflare Queues](https://developers.cloudflare.com/queues/),
+which the [Workers Free plan includes since February 2026](https://developers.cloudflare.com/changelog/post/2026-02-04-queues-free-plan/).
+The app's Worker is both the producer and the consumer of one queue,
+`<app>-jobs`, bound as `JOBS`.
+
+`ocre g job SendWelcome user_id:integer` writes `src/jobs/send_welcome.rs`
+(a serde struct with the arguments and `async fn perform(self, ctx: &Ctx)`)
+and adds it to `src/jobs/mod.rs`: a `Job` enum and a `perform` function that
+matches on it, so dispatch is plain code, not a registry. The first job also
+adds the queue to `wrangler.toml` and this entry point to `src/lib.rs`:
+
+```rust
+#[worker::event(queue)]
+async fn queue(batch: worker::MessageBatch<String>, env: worker::Env, _ctx: worker::Context) -> worker::Result<()> {
+    ocre::jobs::consume(batch, env, jobs::perform).await
+}
+```
+
+Enqueue from a handler; the request returns as soon as Cloudflare stored the
+message:
+
+```rust
+use crate::jobs::{Job, SendWelcome};
+
+ocre::jobs::enqueue(&ctx, &Job::SendWelcome(SendWelcome { user_id: user.id })).await?;
+ocre::jobs::enqueue_in(&ctx, &job, Duration::from_secs(3600)).await?; // 24 hours at most
+```
+
+A message is JSON text, `{"at": <due unix time>, "job": {"send_welcome": {"user_id": 1}}}`.
+`consume` runs the messages of a batch one after the other: `Ok` acknowledges
+the message (`[ocre jobs] send_welcome done` in the log); `Err` logs the error
+and retries the message after twice the time since it was due, 30 s at least
+(30 s, 1 min, 3 min, 9 min, 27 min). Queues' own `retry()` counter stops
+after `max_retries = 5`, then moves the message to the dead-letter queue
+`<app>-jobs-failed`, kept 24 hours for inspection in the dashboard. A message
+that does not decode (not an Ocre message, or a job renamed or changed while
+messages were queued) is logged as `[ocre jobs] dropped message ...` and
+acknowledged, never retried. Jobs can run twice (at-least-once delivery):
+write them to be safe to repeat.
+
+`ocre::mail::deliver_later(&ctx, email).await?` is Rails' `deliver_later`:
+it checks the email and the mail configuration like `send` (a bad address is
+still a 400), enqueues it, and the consumer sends it with `send`, retrying
+provider failures. It needs the queue that the first `ocre g job` wires.
+
+`ocre g schedule nightly_cleanup "0 3 * * *"` writes
+`src/schedules/nightly_cleanup.rs` (`async fn run(ctx: &Ctx)`), adds the
+expression to `[triggers] crons` in `wrangler.toml` and a match arm to
+`src/schedules/mod.rs`; the first schedule adds the `scheduled` entry point,
+which calls `ocre::jobs::cron(event, env, schedules::run)`. Cron times are UTC
+([syntax](https://developers.cloudflare.com/workers/configuration/cron-triggers/#supported-cron-expressions));
+a failed run is logged (`[ocre cron] ... failed`) and not retried. Locally,
+`wrangler dev` runs the queue in-process, and a cron fires on request:
+
+```sh
+curl 'http://localhost:8787/cdn-cgi/local/scheduled?cron=0+3+*+*+*'
+```
+
+`ocre deploy` runs `wrangler queues info` for every queue named in
+`wrangler.toml` and `wrangler queues create` for the missing ones, before
+deploying (a consumer of a missing queue fails the deploy); `--json` lists them
+in `provisioned`.
+
+Free-plan budget (September 2026):
+
+| Limit | Value | What Ocre does |
+|---|---|---|
+| [Queues operations](https://developers.cloudflare.com/queues/platform/pricing/) | 10,000 a day; a message costs 3 (write, read, delete), each retry 1 more read, a dead-lettered message 1 more write | One message per job; about 3,300 jobs a day |
+| [Retention](https://developers.cloudflare.com/queues/platform/limits/) | 24 hours on Free (not configurable) | Retries stop long before: the last one comes after about 40 minutes |
+| [Message size](https://developers.cloudflare.com/queues/platform/limits/) | 128 KB | `enqueue` refuses larger jobs with an error naming the fix (pass ids) |
+| [Delay](https://developers.cloudflare.com/queues/configuration/batching-retries/#delay-messages) | 24 hours, on send and on retry | `enqueue_in` refuses longer delays |
+| [Batches](https://developers.cloudflare.com/queues/configuration/batching-retries/) | up to 100 messages, 60 s wait | `max_batch_size = 10`, `max_batch_timeout = 5`: one consumer run (one Worker request) per 10 jobs |
+| [CPU](https://developers.cloudflare.com/workers/platform/limits/#cpu-time) | 10 ms per invocation on Free, for requests, cron runs and (like any Worker invocation) consumer batches | Jobs should be I/O (D1, mail, `fetch`); lower `max_batch_size` for CPU-heavy jobs |
+| [Cron Triggers](https://developers.cloudflare.com/workers/platform/limits/) | 5 per account on Free | `ocre g schedule` warns past 5 in the app; run several tasks from one cron |
 
 ## Authentication
 
@@ -284,6 +426,201 @@ them before going public), email confirmation, "sign out everywhere" (sessions
 last until logout or until `SECRET_KEY_BASE` changes) and roles
 (`Error::Forbidden` is there for app checks).
 
+## Realtime
+
+Live pages like Rails' Action Cable and Turbo Streams, on the free plan:
+`ocre g scaffold Post title:string --realtime` makes `/posts` show the posts
+other visitors create, edit and delete, without custom JavaScript.
+
+```
+browser ──WebSocket──> GET /realtime/posts ──> src/realtime.rs connect (who may listen)
+                                                   └─> OcreChannel "posts" (Durable Object, holds the sockets)
+POST /posts ──> create ──> ocre::realtime::broadcast(&ctx, "posts", html) ──> every socket
+```
+
+- **Server**: `ocre::realtime::broadcast(&ctx, channel, message)` sends a
+  message (HTML or JSON text) to every browser on `channel`, from any handler
+  or job. The helpers `prepend(target_id, html)`, `append`, `update` (inner
+  HTML) and `remove(id)` build htmx out-of-band swaps; an element with an `id`
+  on its own replaces the page element with that id. Several can go in one
+  message.
+- **Client**: htmx's [WebSocket extension](https://htmx.org/extensions/ws/)
+  connects (`<div hx-ext="ws" ws-connect="/realtime/posts">`), reconnects
+  with backoff, and swaps each message in by id
+  ([`hx-swap-oob`](https://htmx.org/attributes/hx-swap-oob/)).
+- **Authorization**: `src/realtime.rs` in the app routes `GET
+  /realtime/{channel}` to `connect`, which lists the channels anyone may open
+  (unknown ones are 404) before `WebSocketUpgrade::connect`. Add checks there
+  (`CurrentUser` works: browsers send the session cookie with the handshake),
+  or use a channel per record or user (`post:12`). Handshakes from other
+  sites are refused (403), like forms.
+- **What `--realtime` generates**: `templates/<plural>/_row.html` (one row
+  with `id="post_12"`, shared by the index and broadcasts), the index wrapped
+  in `ws-connect`, a broadcast after create (`prepend`), update (the row) and
+  delete (`remove`) in the controller, and on first use Ocre's `realtime`
+  feature in `Cargo.toml`, `src/realtime.rs` and this in `wrangler.toml`:
+
+```toml
+[[durable_objects.bindings]]
+name = "CHANNELS"
+class_name = "OcreChannel"
+
+[[migrations]]
+tag = "ocre-realtime-v1"
+new_sqlite_classes = ["OcreChannel"]
+```
+
+`ocre deploy` needs no extra step: `wrangler deploy` creates the Durable
+Object namespace from the migration. `ocre dev` runs it locally (workerd
+supports Durable Objects and WebSocket Hibernation).
+
+How it runs, and why it fits the free plan (limits of September 2026):
+one Durable Object per channel name (class `OcreChannel`, shipped by Ocre)
+accepts the sockets with the [WebSocket Hibernation
+API](https://developers.cloudflare.com/durable-objects/best-practices/websockets/),
+so between broadcasts it is evicted from memory while browsers stay
+connected. It stores nothing.
+
+| Resource | Free plan | Realtime use |
+|---|---|---|
+| [Durable Object requests](https://developers.cloudflare.com/durable-objects/platform/pricing/) | 100,000 a day | 1 per connection (and reconnection), 1 per broadcast; incoming messages count 1/20 (subscribers send none); messages to browsers are free |
+| Duration | 13,000 GB-s a day (128 MB objects: about 28 hours awake) | only while handling a connection or broadcast, a few milliseconds; hibernated sockets cost nothing |
+| Worker requests | 100,000 a day | 1 per connection; broadcasts are subrequests of the request that sends them |
+| [Durable Object limits](https://developers.cloudflare.com/durable-objects/platform/limits/) | SQLite-backed classes only; 32,768 WebSockets per object | `new_sqlite_classes`; one object per channel |
+
+Broadcasts wait for the channel object (one subrequest, little CPU). The
+generated controller treats them as best effort: a failure is logged
+(`[ocre realtime] broadcast to posts failed: ...`) and the request still
+succeeds. Clients only listen; what they send is ignored. API-only apps can
+use the same pieces by hand: turn on the `realtime` feature, add the
+`wrangler.toml` entries above and a `connect` route, and broadcast JSON.
+
+## Caching
+
+Two tools, both opt-in, chosen for the free plan:
+
+| | KV values (`ocre::cache::fetch`) | HTTP (`CacheControl`, `ETag`, `Conditional`) |
+|---|---|---|
+| Saves | Slow or costly work: D1 aggregates, third-party APIs | Rendering and bandwidth: `304 Not Modified` |
+| Where | Workers KV, global, eventually consistent (up to 60 s) | The browser (and Cloudflare with Workers Cache, below) |
+| Free plan (September 2026) | 100,000 reads and **1,000 writes** a day, 1 GB ([limits](https://developers.cloudflare.com/kv/platform/limits/)) | free |
+
+```rust
+use std::time::Duration;
+
+// One KV read per call; a miss runs the closure and costs one KV write.
+let stats: Stats = ocre::cache::fetch(&ctx, "stats:v1", Duration::from_secs(3600), || async {
+    Stats::compute(&ctx).await
+})
+.await?;
+ocre::cache::delete(&ctx, "stats:v1").await?; // after a change; also a write
+```
+
+`ocre g cache` adds `[[kv_namespaces]] binding = "CACHE"` to
+`wrangler.toml`; `ocre dev` uses a local namespace and `ocre deploy` creates
+`<app>-cache` (or links an existing one with that title) and writes its `id`
+into `wrangler.toml`. The binding is not in `ocre new` apps because KV writes
+are the scarcest free resource: a key refreshed every `ttl` seconds costs up to
+`86,400 / ttl` writes a day (a one-hour TTL is 24 writes per key, so about 40
+hot keys fit), and KV accepts TTLs of 60 seconds or more. Values are JSON; put a
+version in the key (`stats:v1`) and change it when the type changes (an
+undecodable value is logged and recomputed). `fetch` never fails because of
+KV: past a daily limit it logs `[ocre cache] ... failed` and computes the
+value. `read`, `write` and `delete` are the explicit forms.
+
+For pages, `Conditional` answers `304` without rendering when the browser
+already has the current version, like Rails' `fresh_when`:
+
+```rust
+async fn show(State(ctx): State<Ctx>, Path(id): Path<i64>, i18n: I18n, conditional: Conditional) -> Result<Response> {
+    let post = post::find(&ctx, id).await?.or_404()?;
+    let etag = ETag::of(&(&post, i18n.locale()))?;   // everything the page shows
+    conditional.fresh_when(etag, CacheControl::no_cache(), || render(&ShowView { post, i18n }))
+}
+```
+
+The database query still runs; the template does not. Pages that show a
+flash message or the signed-in user must put them in the `ETag` too.
+
+**Serving pages without running the Worker.** Two Cloudflare caches can do
+this, and Ocre wraps neither:
+
+- The [Cache API](https://developers.cloudflare.com/workers/runtime-apis/cache/)
+  (`caches.default`) only works on custom domains: on `*.workers.dev`, where
+  Ocre apps deploy by default, `put` does nothing. It is also local to one data
+  center and the Worker still runs for every request.
+- [Workers Cache](https://developers.cloudflare.com/workers/cache/)
+  (`[cache] enabled = true` in `wrangler.toml`, Wrangler 4.69+) works on
+  `workers.dev` too and serves `CacheControl::public(..)` responses from
+  Cloudflare's tiered cache: hits use no CPU. But on the free plan every hit
+  still counts toward the 100,000 requests a day, and turning it on also counts
+  static asset requests (`public/`), which are otherwise free
+  ([pricing](https://developers.cloudflare.com/workers/cache/#pricing)). Its
+  cache key ignores cookies and `Accept-Language`, so only mark responses
+  `public` when they are the same for every visitor (locale in the path,
+  nothing from the session); responses with `Set-Cookie` are never stored.
+
+## Translations
+
+Rails-style translations, compiled into the Worker:
+
+```yaml
+# locales/fr.yml (a YAML subset: nested keys and strings)
+fr:
+  posts:
+    created: "Article créé."
+    greeting: "Bonjour %{name} !"
+    count:
+      one: "%{count} article"     # CLDR categories: zero, one, two, few, many, other
+      other: "%{count} articles"
+```
+
+```rust
+// src/lib.rs, written by `ocre g locale en fr`: the first code is the default.
+static LOCALES: ocre::i18n::Locales = ocre::locales!("en", "fr");
+// and at the end of routes(): .layer(ocre::i18n::layer(&LOCALES))
+
+async fn index(i18n: I18n, session: Session) -> Result<Html<String>> {
+    session.flash("notice", i18n.t("posts.created").to_string())?;
+    render(&IndexView { i18n, count: 3 })
+}
+```
+
+```html
+<html lang="{{ i18n.locale() }}">
+<p>{{ i18n.t("posts.greeting").arg("name", user.name) }}</p>
+<p>{{ i18n.t("posts.count").count(count) }}</p>
+```
+
+- **Cost**: `include_str!` puts the files in the binary; the first
+  translation in a Worker instance parses them once, with a small parser
+  written for this subset (the `toml` crate alone, parsing into a table,
+  compiled to 205 KB of release WebAssembly; the app binary is about 420 KB).
+  Lookups are a `BTreeMap` search; `t(..)` is written straight into the
+  askama output without an intermediate `String`.
+- **Locale per request**: the `I18n` extractor takes a `{locale}` path
+  segment (nest routes with `.nest("/{locale}", pages())`; an unknown code is
+  a 404), else the `locale` cookie (`i18n.cookie()` gives the `Set-Cookie`
+  value), else `Accept-Language` (quality order; `fr-CH` matches `fr`), else
+  the default locale. Outside requests (mailers, jobs):
+  `LOCALES.locale(&user.locale)`.
+- **Plurals**: `.count(n)` picks the CLDR form for the locale (English,
+  German, Spanish, Italian, Dutch...: one/other; French, Portuguese, Hindi:
+  0 and 1 are `one`; Russian, Ukrainian, Polish: one/few/many; Czech, Slovak:
+  one/few; Arabic; Hebrew; Japanese, Chinese, Korean: other only) and sets
+  `%{count}`; a `zero` key wins for 0.
+- **Missing keys**: release builds (`ocre deploy`) fall back to the default
+  locale; debug builds (`ocre dev`) show `translation missing: fr.posts.created`
+  so gaps are visible. `ocre i18n missing` lists every key absent from each
+  locale and fails if there is any; `ocre dev` and `ocre deploy` refuse files
+  the Worker could not parse (with the line and the fix).
+- **Escaping**: askama escapes translations and interpolated values; never
+  mark them `|safe`.
+- Generated scaffolds, auth pages and mailers still contain English strings.
+  To translate one, move each string to `locales/en.yml`, add `i18n: I18n` to
+  the handler and its template struct, and replace the text with
+  `{{ i18n.t("posts.index.title") }}` (flash: `i18n.t(..).to_string()`).
+
 ## Rules the framework enforces
 
 - Handlers are plain [axum](https://docs.rs/axum) handlers. Every Ocre type is
@@ -296,7 +633,7 @@ last until logout or until `SECRET_KEY_BASE` changes) and roles
 ## Layout
 
 ```
-crates/ocre/                 framework crate (features: html [default], graphql)
+crates/ocre/                 framework crate (features: html [default], graphql, realtime)
   src/                       code; src/runtime/ calls the Workers JavaScript runtime
   tests/                     unit tests, mirroring src/: tests/session.rs tests src/session.rs
 crates/ocre-cli/             `ocre` command-line tool
@@ -319,7 +656,9 @@ can reach private items while living apart from the code. Both crates set
 
 | Item | Use |
 |---|---|
-| `ocre::serve(routes(), req, env)` | Worker entry point (`#[worker::event(fetch)]`) |
+| `ocre::serve(routes(), req, env)` | Worker entry point (`#[worker::event(fetch)]`, returns `worker::Result<worker::web_sys::Response>`) |
+| `Multipart(form): Multipart<LIMIT>` | `multipart/form-data` body up to `LIMIT` bytes; `form.form::<T>()`, `form.file(name)` |
+| `ocre::storage::{store, serve, delete_attachments}` | Files in R2 (binding `STORAGE`), see [Files](#files) |
 | `State(ctx): State<Ctx>` | Per-request context |
 | `ctx.db()?` | D1 database bound as `DB` |
 | `db.all::<T>(sql, params![..])` | All rows as `Vec<T>` |
@@ -344,6 +683,19 @@ can reach private items while living apart from the code. Both crates set
 | `Error::Unauthorized` / `Error::Forbidden` | 401 / 403 |
 | `ocre::mail::send(&ctx, email)` | Send an `Email` (`Email::new(to, subject, text).html(..).reply_to(..)`) with the `MAIL_ADAPTER` adapter |
 | `ocre::mail::receive(message, env, handler)` | Worker `email` entry point; `handler(ctx, InboundEmail)` |
+| `ocre::mail::deliver_later(&ctx, email)` | Check now, send from the jobs queue (retried on failure) |
+| `ocre::jobs::enqueue(&ctx, &job)` / `enqueue_in(&ctx, &job, delay)` | Send a serde job to the `JOBS` queue (delay up to 24 h) |
+| `ocre::jobs::consume(batch, env, perform)` | Worker `queue` entry point: `perform(ctx, job)`, ack on `Ok`, retry with backoff on `Err`, drop undecodable messages |
+| `ocre::jobs::cron(event, env, run)` | Worker `scheduled` entry point: `run(ctx, cron)` |
+| `ocre::realtime::broadcast(&ctx, channel, message)` | Send HTML (or JSON text) to every WebSocket on `channel` (feature `realtime`) |
+| `realtime::prepend(target, html)` / `append` / `update` / `remove(id)` | htmx out-of-band swaps for broadcasts |
+| `upgrade: WebSocketUpgrade` then `upgrade.connect(&ctx, channel)` | Extractor for WebSocket handshakes (400 otherwise); connects to the channel's `OcreChannel` Durable Object |
+| `ocre::cache::fetch(&ctx, key, ttl, \|\| async { .. })` | Read-through cache of a JSON value in the `CACHE` KV namespace; also `read`, `write`, `delete` |
+| `CacheControl::no_cache()` / `private(ttl)` / `public(ttl)` / `no_store()` | `Cache-Control` response part |
+| `ETag::new(version)` / `ETag::of(&data)?` | Weak `ETag` response part |
+| `conditional: Conditional` then `conditional.fresh_when(etag, cache_control, \|\| render(..))` | `304 Not Modified` without rendering when the client's copy is current |
+| `static LOCALES: ocre::i18n::Locales = ocre::locales!("en", "fr")` | Translations from `locales/*.yml`; `.layer(ocre::i18n::layer(&LOCALES))` in `routes()` |
+| `i18n: I18n` then `i18n.t(key).arg(name, value).count(n)` | Extractor: the request's locale; translation with `%{name}` values and plural forms |
 
 ## Requirements
 
@@ -373,7 +725,7 @@ cargo llvm-cov --workspace --all-features \
 |---|---|
 | Unit (`crates/*/tests/**`, mirroring `src/`) | Pure logic: params, errors, sessions, crypto formats, MIME, extractors, generators |
 | `crates/ocre-cli/tests/integration/` | The `ocre` binary with a fake wrangler (`tests/support/fake_npx.sh`): every command, `--json` contract, every error hint; `ocre new` in a pseudo-terminal |
-| `crates/ocre-cli/tests/system/e2e.rs` | Generated apps built to WebAssembly (dev build, shared `target/e2e-app`), served by `wrangler dev`: CRUD, sessions, CSRF, auth, email over HTTP |
+| `crates/ocre-cli/tests/system/e2e.rs` | Generated apps built to WebAssembly (dev build, shared `target/e2e-app`), served by `wrangler dev`: CRUD, sessions, CSRF, auth, email over HTTP, realtime broadcasts to WebSocket clients, background jobs and cron runs, translations by `Accept-Language`/cookie/path, KV read-through cache, 304 responses |
 
 CI (manual trigger for now) runs lint, coverage and a generated-app build as parallel jobs, and requires
 100% line coverage. The generated-app job runs `ocre new` and every generator,

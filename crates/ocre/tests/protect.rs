@@ -75,6 +75,25 @@ fn refuses_cross_site_unsafe_requests() {
 }
 
 #[test]
+fn websocket_handshakes_from_other_sites_are_refused() {
+    let trusted = parse_origins(Some("https://app.example".into()));
+    let check = |headers: &[(&str, &str)]| {
+        let mut map = HeaderMap::new();
+        for (name, value) in headers {
+            map.insert(HeaderName::from_bytes(name.as_bytes()).unwrap(), HeaderValue::from_str(value).unwrap());
+        }
+        cross_origin(&Method::GET, &map, &trusted).is_none()
+    };
+    assert!(!check(&[("upgrade", "websocket"), ("sec-fetch-site", "cross-site")]));
+    assert!(!check(&[("upgrade", "WebSocket"), ("origin", "https://evil.dev"), ("host", "x.dev")]), "case-insensitive");
+    assert!(check(&[("upgrade", "websocket"), ("sec-fetch-site", "same-origin")]));
+    assert!(check(&[("upgrade", "websocket"), ("origin", "https://x.dev"), ("host", "x.dev")]));
+    assert!(check(&[("upgrade", "websocket"), ("origin", "https://app.example"), ("sec-fetch-site", "cross-site")]));
+    assert!(check(&[("upgrade", "websocket")]), "no browser headers: not a browser");
+    assert!(check(&[("upgrade", "h2c"), ("sec-fetch-site", "cross-site")]), "other upgrades stay safe GETs");
+}
+
+#[test]
 fn middleware_stack_end_to_end() {
     let mut app = app(key(), "");
     let response = send(&mut app, request("GET", "https://x.dev/", &[]));

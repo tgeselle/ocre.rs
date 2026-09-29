@@ -61,4 +61,12 @@ jobs:
           ocre g migration add_isbn_to_books isbn:string? --json
           ocre g mailer Welcome greeting --json
           ocre g mailbox --json
+          ocre g job SendDigest user_id:integer note:text? --json
+          ocre g job Cleanup --json
+          ocre g schedule nightly_cleanup "0 3 * * *" --json
+          ocre g scaffold Note title:string body:text? --realtime --json
+          ocre g scaffold Photo title:string image:attachment notes:attachment? --json
+          ocre g api Document name:string file:attachment? --graphql --json
+          ocre g cache --json
+          ocre g locale en fr --json
           cargo check --target wasm32-unknown-unknown

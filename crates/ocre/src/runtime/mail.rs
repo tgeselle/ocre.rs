@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use wasm_bindgen::JsValue;
 use worker::{
     EmailAddress, Env, Fetch, ForwardableEmailMessage, Headers, Method, Request, RequestInit, SendEmailBuilder,
@@ -7,6 +9,7 @@ use worker::{
 use super::Ctx;
 use crate::{
     Error, Result,
+    jobs::Payload,
     mail::{
         Adapter, EMAIL_BINDING, Email, LOG_PREFIX, MAIL_ADAPTER, MAIL_FROM, Message, Outgoing, RESEND_API_KEY,
         RESEND_URL, adapter, cloudflare_error, resend_error, resend_key,
@@ -32,11 +35,32 @@ pub fn send(ctx: &Ctx, email: Email) -> impl Future<Output = Result<()>> + Send 
     SendFuture::new(async move { deliver(&env, email).await })
 }
 
+/// Sends `email` later, from the background jobs queue (Rails'
+/// `deliver_later`): the handler answers without waiting for the mail
+/// provider, and a failed delivery is retried (30 s, 1 min, 3 min...) instead
+/// of failing the request. Checks the address, `MAIL_FROM` and
+/// `MAIL_ADAPTER` right away, like [`send`], so a bad address is still a 400.
+///
+/// ```ignore
+/// ocre::mail::deliver_later(&ctx, mailers::user::welcome(&user.email)?).await?;
+/// ```
+///
+/// Needs the `JOBS` queue: run `ocre g job <Name>` once to wire it. The
+/// queue consumer sends the email with [`send`] and logs
+/// `[ocre jobs] mail done`. Costs 3 Queues operations per email.
+pub fn deliver_later(ctx: &Ctx, email: Email) -> impl Future<Output = Result<()>> + Send + use<> {
+    let env = ctx.env();
+    let checked = adapter(var(env, MAIL_ADAPTER).as_deref())
+        .and_then(|_| Outgoing::new(var(env, MAIL_FROM), email))
+        .map(|outgoing| Payload::Mail(outgoing.email));
+    super::jobs::send(ctx, checked, Duration::ZERO)
+}
+
 fn var(env: &Env, name: &str) -> Option<String> {
     env.var(name).ok().map(|value| value.to_string())
 }
 
-async fn deliver(env: &Env, email: Email) -> Result<()> {
+pub(crate) async fn deliver(env: &Env, email: Email) -> Result<()> {
     let adapter = adapter(var(env, MAIL_ADAPTER).as_deref())?;
     let outgoing = Outgoing::new(var(env, MAIL_FROM), email)?;
     match adapter {

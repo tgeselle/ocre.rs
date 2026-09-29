@@ -4,7 +4,7 @@ Feature-level inventory of Rails 8.1 and Loco 1.2, with what Ocre has and how
 each part maps to Cloudflare's free plan. Collected from the official Rails
 guides and the Loco documentation source; every item links to its page.
 
-993 features: 69 done, 63 partial, 837 to do, 24 not applicable on Workers.
+993 features: 104 done, 75 partial, 789 to do, 25 not applicable on Workers.
 
 Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason given).
 (R) Rails, (L) Loco.
@@ -315,7 +315,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** axum handlers and routers, askama templates compiled into the binary, htmx instead of Turbo/Stimulus, Workers Static Assets for files (free, not counted as Worker requests). tower middlewares that do not need tokio compile to WebAssembly.
 
-202 features: 11 done, 8 partial, 182 to do, 1 not applicable.
+202 features: 12 done, 8 partial, 181 to do, 1 not applicable.
 
 ### Controllers
 
@@ -362,7 +362,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [ ] **Redirect log filtering** (R): filter_redirect hides sensitive redirect URLs from logs. [action_controller_advanced_topics](https://guides.rubyonrails.org/action_controller_advanced_topics.html)
 - [ ] **Force HTTPS** (R): config.force_ssl redirects to HTTPS, sets HSTS and secure cookies. [action_controller_advanced_topics](https://guides.rubyonrails.org/action_controller_advanced_topics.html)
 - [x] **Health check endpoint** (R): Built-in /up route (Rails::HealthController) for load balancers and uptime monitors. [action_controller_advanced_topics](https://guides.rubyonrails.org/action_controller_advanced_topics.html)
-- [ ] **Conditional GET** (R): fresh_when/stale? with ETag and Last-Modified return 304 Not Modified; expires_in and http_cache_forever set Cache-Control. [caching_with_rails](https://guides.rubyonrails.org/caching_with_rails.html)
+- [x] **Conditional GET** (R): fresh_when/stale? with ETag and Last-Modified return 304 Not Modified; expires_in and http_cache_forever set Cache-Control. [caching_with_rails](https://guides.rubyonrails.org/caching_with_rails.html)
 
 ### Routing
 
@@ -616,28 +616,28 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** Cloudflare Queues (decided): 10,000 operations/day on the free plan, about 3 per job, so about 3,300 jobs/day, 24 h retention, retries and dead-letter queues. Recurring work with Cron Triggers (free-plan count not verified). Long jobs must split into steps: each invocation has the same CPU limit.
 
-41 features: 0 done, 0 partial, 39 to do, 2 not applicable.
+41 features: 9 done, 3 partial, 26 to do, 3 not applicable.
 
 ### Jobs
 
-- [ ] **BackgroundWorker trait** (L): A worker implements build(ctx) and an async perform(args) with serializable typed args, and can optionally override queue() and tags(). [loco/explanation/background-processing-model](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/explanation/background-processing-model.md)
-- [ ] **Worker registration (connect_workers)** (L): Hooks::connect_workers registers each worker against the shared Queue with queue.register(Worker::build(ctx)). [loco/how-to/add-worker](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/add-worker.md)
-- [ ] **perform_later enqueue** (L): Enqueues a job from any controller, task or worker and returns its job id (from the provider, or a UUID in the in-process modes). [loco/how-to/add-worker](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/add-worker.md)
+- [x] **BackgroundWorker trait** (L): A worker implements build(ctx) and an async perform(args) with serializable typed args, and can optionally override queue() and tags(). [loco/explanation/background-processing-model](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/explanation/background-processing-model.md)
+- [x] **Worker registration (connect_workers)** (L): Hooks::connect_workers registers each worker against the shared Queue with queue.register(Worker::build(ctx)). [loco/how-to/add-worker](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/add-worker.md)
+- [x] **perform_later enqueue** (L): Enqueues a job from any controller, task or worker and returns its job id (from the provider, or a UUID in the in-process modes). [loco/how-to/add-worker](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/add-worker.md)
 - [ ] **Job priority (perform_later_with_priority)** (L): Gives each job an i32 priority; higher values dequeue first, with ties broken by run_at and then job id, on all three backends. [loco/how-to/choose-queue-backend](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/choose-queue-backend.md)
 - [ ] **Bulk enqueue (perform_all_later)** (L): Enqueues a Vec of job args in one atomic round trip and returns one id per job in input order, like Rails perform_all_later. [loco/how-to/add-worker](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/add-worker.md)
 - [ ] **Bulk enqueue with per-job priority** (L): perform_all_later_with_priority enqueues a batch atomically, with each job paired with its own optional priority. [loco/how-to/add-worker](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/add-worker.md)
 - [ ] **Worker tags and tag-filtered workers** (L): Workers declare tags, and `start --worker tag1,tag2` runs a worker process that only picks up jobs with those tags. [loco/how-to/add-worker](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/add-worker.md)
 - [ ] **Worker modes** (L): workers.mode chooses BackgroundQueue (durable queue drained by worker processes), BackgroundAsync (tokio::spawn in the same process), or ForegroundBlocking (runs inline, typically for tests). [loco/how-to/choose-queue-backend](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/choose-queue-backend.md)
 - [ ] **SQLite queue backend** (L): Job queue stored in SQLite (sqlt_loco_queue plus a lock table) that needs no extra infrastructure. [loco/how-to/choose-queue-backend](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/choose-queue-backend.md)
-- [ ] **Named queues per worker** (L): Worker::queue() sends a worker's jobs to a named Redis queue, and the order of the configured queue list sets queue priority. [loco/explanation/background-processing-model](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/explanation/background-processing-model.md)
+- [~] **Named queues per worker** (L): Worker::queue() sends a worker's jobs to a named Redis queue, and the order of the configured queue list sets queue priority. [loco/explanation/background-processing-model](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/explanation/background-processing-model.md)
 - [ ] **Automatic requeue reaper** (L): An opt-in queue.reaper setting (age_minutes, interval_seconds) periodically moves jobs stuck in processing back to queued. [loco/how-to/choose-queue-backend](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/choose-queue-backend.md)
 - [ ] **Tasks (Task trait)** (L): CLI-invokable one-off jobs with a name and help text (TaskInfo), a run(ctx, vars) method that gets full AppContext access, and typed key:value args read with vars.cli_arg. [loco/how-to/write-task](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/write-task.md)
 - [ ] **Task registry (register_tasks)** (L): Hooks::register_tasks registers tasks by name, and registering the same name again replaces the earlier task. [loco/how-to/write-task](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/write-task.md)
-- [ ] **Job generator and job classes** (R): `generate job` creates ApplicationJob subclasses implementing `perform`. [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
-- [ ] **perform_later / perform_now** (R): Enqueue jobs asynchronously or run them inline, with `set(wait:, wait_until:, queue:, priority:)` scheduling options. [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
+- [x] **Job generator and job classes** (R): `generate job` creates ApplicationJob subclasses implementing `perform`. [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
+- [x] **perform_later / perform_now** (R): Enqueue jobs asynchronously or run them inline, with `set(wait:, wait_until:, queue:, priority:)` scheduling options. [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
 - [ ] **Argument serialization with GlobalID** (R): Jobs accept primitives, hashes, dates/times, Active Record objects (via GlobalID) and other supported types as arguments. [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
 - [ ] **Custom argument serializers** (R): Subclass `ActiveJob::Serializers::ObjectSerializer` and register it to support custom argument types. [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
-- [ ] **Named queues** (R): `queue_as` (static or block) plus queue name prefix/delimiter config route jobs to queues. [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
+- [~] **Named queues** (R): `queue_as` (static or block) plus queue name prefix/delimiter config route jobs to queues. [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
 - [ ] **Job priority** (R): `queue_with_priority` or `set(priority:)` assigns priorities to jobs. [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
 - [ ] **Bulk enqueuing** (R): `ActiveJob.perform_all_later` enqueues many jobs (of mixed classes) in one backend call. [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
 - [ ] **Job callbacks** (R): `before/around/after_enqueue` and `before/around/after_perform` callbacks, with halting via `throw :abort`. [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
@@ -646,11 +646,11 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [ ] **Queue ordering and polling** (R): Workers process queues in configured order (including wildcards), with numeric priorities and a polling interval. [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
 - [ ] **Concurrency controls** (R): `limits_concurrency to:, key:, duration:` restricts how many jobs sharing a key run simultaneously. [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
 - [ ] **Enqueue after transaction commit** (R): `enqueue_after_transaction_commit` defers enqueuing until the surrounding DB transaction commits. [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
-- [ ] **Recurring tasks** (R): `recurring.yml` schedules jobs or commands on cron-like schedules. [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
-- [ ] **Pluggable queue adapters** (R): Swap backends (Sidekiq, GoodJob, async, inline, test, etc.) via `queue_adapter`. [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
+- [x] **Recurring tasks** (R): `recurring.yml` schedules jobs or commands on cron-like schedules. [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
+- [-] **Pluggable queue adapters** (R): Swap backends (Sidekiq, GoodJob, async, inline, test, etc.) via `queue_adapter`. *Not applicable: Ocre uses Cloudflare Queues only.* [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
 - [ ] **Mission Control job dashboard** (R): Mission Control Jobs provides a web UI to inspect, retry and discard jobs. [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
 - [ ] **rescue_from in jobs** (R): `rescue_from` handles exceptions raised during job execution. [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
-- [ ] **retry_on / discard_on** (R): Declaratively retry jobs on specific errors with wait/backoff and attempts, or discard them, with optional blocks. [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
+- [~] **retry_on / discard_on** (R): Declaratively retry jobs on specific errors with wait/backoff and attempts, or discard them, with optional blocks. [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
 - [ ] **Missing record handling** (R): `ActiveJob::DeserializationError` is raised when a GlobalID argument record no longer exists and can be discarded or rescued. [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
 - [ ] **Job testing helpers** (R): Test helpers such as `assert_enqueued_with`, `assert_performed_jobs` and `perform_enqueued_jobs` verify job behavior. [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
 - [-] **Redis queue backend** (L): Redis-backed job queue (worker_redis feature) with named priority queues (queue.queues, defaults default and mailer), num_workers, and dangerously_flush. *Not applicable: no Redis on Workers; Ocre uses Queues, KV and Durable Objects.* [loco/how-to/choose-queue-backend](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/choose-queue-backend.md)
@@ -658,10 +658,10 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 ### Scheduler
 
-- [ ] **Scheduler configuration** (L): Recurring jobs are defined either in a dedicated config/scheduler.yaml or in a scheduler: block of the environment config, with a global stdout/silent output setting. [loco/how-to/schedule-jobs](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/schedule-jobs.md)
-- [ ] **Scheduled job definitions** (L): Each job has run (a task name with key:value args, or a shell command when shell: true), schedule, run_on_start, tags, and a per-job output override. [loco/how-to/schedule-jobs](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/schedule-jobs.md)
+- [x] **Scheduler configuration** (L): Recurring jobs are defined either in a dedicated config/scheduler.yaml or in a scheduler: block of the environment config, with a global stdout/silent output setting. [loco/how-to/schedule-jobs](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/schedule-jobs.md)
+- [x] **Scheduled job definitions** (L): Each job has run (a task name with key:value args, or a shell command when shell: true), schedule, run_on_start, tags, and a per-job output override. [loco/how-to/schedule-jobs](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/schedule-jobs.md)
 - [ ] **English schedule syntax** (L): Schedules can be written as plain-English phrases such as 'every 15 seconds', 'every day at 4:00 pm' or 'midnight on Tuesdays', which are converted to cron. [loco/how-to/schedule-jobs](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/schedule-jobs.md)
-- [ ] **Cron schedule syntax** (L): Accepts 7-field UTC cron expressions (seconds through year). [loco/how-to/schedule-jobs](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/schedule-jobs.md)
+- [x] **Cron schedule syntax** (L): Accepts 7-field UTC cron expressions (seconds through year). [loco/how-to/schedule-jobs](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/schedule-jobs.md)
 - [ ] **Run the scheduler embedded or filtered** (L): Runs the scheduler inside the server with --scheduler or --all (reading SCHEDULER_CONFIG), or runs only the jobs matching a name or tag. [loco/how-to/schedule-jobs](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/schedule-jobs.md)
 - [ ] **Subprocess job execution** (L): Each firing runs in a subprocess that inherits LOCO_ENV, and on shutdown the scheduler waits for running jobs to finish. [loco/how-to/schedule-jobs](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/schedule-jobs.md)
 
@@ -724,11 +724,11 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** R2 (10 GB free, no egress fees) through a binding; direct uploads with presigned URLs. Image variants through Cloudflare Images transformations (free quota not verified). Rich text needs a JS editor, HTML sanitizing and R2 for attachments.
 
-51 features: 0 done, 0 partial, 51 to do, 0 not applicable.
+51 features: 7 done, 3 partial, 41 to do, 0 not applicable.
 
 ### Storage
 
-- [ ] **Storage abstraction** (L): A single OpenDAL-based Storage API on ctx.storage, wired in code in after_context; with no driver configured it falls back to a Null driver whose operations all fail. [loco/how-to/configure-storage](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/configure-storage.md)
+- [x] **Storage abstraction** (L): A single OpenDAL-based Storage API on ctx.storage, wired in code in after_context; with no driver configured it falls back to a Null driver whose operations all fail. [loco/how-to/configure-storage](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/configure-storage.md)
 - [ ] **Local filesystem driver** (L): Stores files on disk under the current directory or a given prefix. [loco/how-to/configure-storage](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/configure-storage.md)
 - [ ] **In-memory and null drivers** (L): An in-memory store for tests, and a null store that fails every operation so a missing driver shows up quickly. [loco/how-to/configure-storage](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/configure-storage.md)
 - [ ] **AWS S3 driver** (L): S3 storage (storage_aws_s3) using ambient credentials, explicit credentials, or a custom S3-compatible endpoint. [loco/how-to/configure-storage](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/configure-storage.md)
@@ -737,28 +737,28 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [ ] **Mirror strategy** (L): ReplicatedStrategy::mirror copies writes to every named store and falls back to secondaries on reads. [loco/how-to/configure-storage](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/configure-storage.md)
 - [ ] **Backup strategy and failure policies** (L): ReplicatedStrategy::backup requires the primary to succeed and reads only from it, and FailurePolicy (FailIfAny or AllowAll) decides how secondary failures are handled. [loco/how-to/configure-storage](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/configure-storage.md)
 - [ ] **Per-call strategy override** (L): *_with_strategy and *_with_policy variants override the storage strategy for a single operation. [loco/how-to/configure-storage](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/configure-storage.md)
-- [ ] **Upload and download** (L): Buffered upload/download of bytes, for example from multipart form uploads in controllers. [loco/how-to/configure-storage](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/configure-storage.md)
-- [ ] **Streaming upload and download** (L): upload_stream and download_stream work with BytesStream, which converts to and from an axum Body so large files are not buffered. [loco/how-to/configure-storage](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/configure-storage.md)
+- [x] **Upload and download** (L): Buffered upload/download of bytes, for example from multipart form uploads in controllers. [loco/how-to/configure-storage](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/configure-storage.md)
+- [~] **Streaming upload and download** (L): upload_stream and download_stream work with BytesStream, which converts to and from an axum Body so large files are not buffered. [loco/how-to/configure-storage](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/configure-storage.md)
 - [ ] **Exists, list and stat** (L): Checks whether a key exists, lists keys under a prefix, and returns metadata as ListEntry values. [loco/how-to/configure-storage](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/configure-storage.md)
 - [ ] **Presigned URLs** (L): presign_get and presign_put return time-limited signed URLs so clients can upload or download directly from the cloud store. [loco/how-to/configure-storage](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/configure-storage.md)
 - [ ] **Custom storage drivers (StoreDriver)** (L): Implementing the StoreDriver trait adds your own storage backend. [loco/how-to/configure-storage](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/configure-storage.md)
-- [ ] **Storage service configuration** (R): `storage.yml` defines named services selected per environment via `config.active_storage.service`. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
+- [~] **Storage service configuration** (R): `storage.yml` defines named services selected per environment via `config.active_storage.service`. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [ ] **Disk service** (R): Stores files on the local filesystem. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [ ] **S3 and S3-compatible service** (R): Stores files in Amazon S3 or compatible APIs with configurable region, bucket, upload options and endpoint. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [ ] **Google Cloud Storage service** (R): Stores files in GCS buckets. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [ ] **Mirror service** (R): Writes uploads to a primary and multiple mirror services for migration or redundancy. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [ ] **Public access services** (R): `public: true` services serve permanent public URLs instead of signed expiring ones. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
-- [ ] **has_one_attached** (R): Declares a single file attachment on a model, with per-attachment `service:` and variant definitions. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
+- [x] **has_one_attached** (R): Declares a single file attachment on a model, with per-attachment `service:` and variant definitions. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [ ] **has_many_attached** (R): Declares multiple file attachments on a model. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [ ] **Attaching IO objects** (R): `attach(io:, filename:, content_type:, identify:)` attaches files from IO/File objects or signed blob IDs. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [ ] **Replace vs append attachments** (R): Assigning replaces `has_many_attached` files while `attach` appends to the collection. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
-- [ ] **Attachment form validation** (R): Attachments are staged until the record saves, allowing validations to run before upload. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
+- [x] **Attachment form validation** (R): Attachments are staged until the record saves, allowing validations to run before upload. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [ ] **Querying attachments** (R): `with_attached_<name>` scopes and joins on attachment/blob tables for querying records by attachments. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
-- [ ] **Removing files** (R): `purge` and `purge_later` delete attachments and their blobs synchronously or via a job. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
+- [x] **Removing files** (R): `purge` and `purge_later` delete attachments and their blobs synchronously or via a job. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [ ] **Redirect serving mode** (R): `url_for`/`rails_blob_path` generate stable URLs that redirect to short-lived signed service URLs. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
-- [ ] **Proxy serving mode** (R): Files can be streamed through the app (`rails_storage_proxy_path`), enabling CDN caching in front. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
-- [ ] **Authenticated file controllers** (R): Custom controllers inheriting Active Storage streaming concerns add authentication before serving files. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
-- [ ] **Downloading files** (R): `download` reads blob contents into memory or `open` downloads to a tempfile for processing. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
+- [x] **Proxy serving mode** (R): Files can be streamed through the app (`rails_storage_proxy_path`), enabling CDN caching in front. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
+- [~] **Authenticated file controllers** (R): Custom controllers inheriting Active Storage streaming concerns add authentication before serving files. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
+- [x] **Downloading files** (R): `download` reads blob contents into memory or `open` downloads to a tempfile for processing. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [ ] **File analysis** (R): Blobs are analyzed after upload in a job to extract metadata like image dimensions and video/audio duration. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [ ] **Image variants** (R): `variant` with transformations (resize_to_limit, etc.) via Vips or MiniMagick, including named variants and preprocessed ones. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [ ] **Lazy vs immediate variant loading** (R): Variants are processed on first request or eagerly via `processed`/`preprocessed`. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
@@ -787,22 +787,22 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** Durable Objects with WebSocket hibernation (free with SQLite storage): one object per channel, broadcasting HTML fragments for htmx or JSON.
 
-15 features: 0 done, 0 partial, 15 to do, 0 not applicable.
+15 features: 6 done, 1 partial, 8 to do, 0 not applicable.
 
 ### Realtime
 
-- [ ] **WebSockets via axum-compatible crates** (L): Websocket support (axum ws, socketioxide) mounts on the app's axum Router the same way as controllers; Loco has no built-in websocket abstraction. [loco/how-to/websockets](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/websockets.md)
-- [ ] **WebSocket connections** (R): `ApplicationCable::Connection` authenticates WebSocket connections and declares `identified_by` identifiers. [action_cable_overview](https://guides.rubyonrails.org/action_cable_overview.html)
+- [x] **WebSockets via axum-compatible crates** (L): Websocket support (axum ws, socketioxide) mounts on the app's axum Router the same way as controllers; Loco has no built-in websocket abstraction. [loco/how-to/websockets](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/websockets.md)
+- [x] **WebSocket connections** (R): `ApplicationCable::Connection` authenticates WebSocket connections and declares `identified_by` identifiers. [action_cable_overview](https://guides.rubyonrails.org/action_cable_overview.html)
 - [ ] **Connection exception handling and callbacks** (R): `rescue_from` and `before/after/around_command` callbacks on connections. [action_cable_overview](https://guides.rubyonrails.org/action_cable_overview.html)
-- [ ] **Channels** (R): Channel classes encapsulate logical units of work with `subscribed`/`unsubscribed` hooks and client-invokable actions. [action_cable_overview](https://guides.rubyonrails.org/action_cable_overview.html)
+- [x] **Channels** (R): Channel classes encapsulate logical units of work with `subscribed`/`unsubscribed` hooks and client-invokable actions. [action_cable_overview](https://guides.rubyonrails.org/action_cable_overview.html)
 - [ ] **Channel exception handling and callbacks** (R): `rescue_from` and `before/after_subscribe`, `before/after_unsubscribe` callbacks on channels. [action_cable_overview](https://guides.rubyonrails.org/action_cable_overview.html)
-- [ ] **JavaScript consumer and subscriptions** (R): `createConsumer` and `consumer.subscriptions.create` with `connected`/`disconnected`/`received` handlers and `perform` to call server actions. [action_cable_overview](https://guides.rubyonrails.org/action_cable_overview.html)
-- [ ] **Streams** (R): `stream_from` and `stream_for` subscribe channels to named or model-based broadcastings, with `stop_stream_from`. [action_cable_overview](https://guides.rubyonrails.org/action_cable_overview.html)
-- [ ] **Broadcasting** (R): `ActionCable.server.broadcast` and `Channel.broadcast_to(model, data)` push messages to subscribers from anywhere in the app. [action_cable_overview](https://guides.rubyonrails.org/action_cable_overview.html)
+- [~] **JavaScript consumer and subscriptions** (R): `createConsumer` and `consumer.subscriptions.create` with `connected`/`disconnected`/`received` handlers and `perform` to call server actions. [action_cable_overview](https://guides.rubyonrails.org/action_cable_overview.html)
+- [x] **Streams** (R): `stream_from` and `stream_for` subscribe channels to named or model-based broadcastings, with `stop_stream_from`. [action_cable_overview](https://guides.rubyonrails.org/action_cable_overview.html)
+- [x] **Broadcasting** (R): `ActionCable.server.broadcast` and `Channel.broadcast_to(model, data)` push messages to subscribers from anywhere in the app. [action_cable_overview](https://guides.rubyonrails.org/action_cable_overview.html)
 - [ ] **Channel parameters** (R): Clients pass params on subscription accessible via `params` in the channel. [action_cable_overview](https://guides.rubyonrails.org/action_cable_overview.html)
 - [ ] **Rebroadcasting client messages** (R): Channels can receive client data and rebroadcast it to other subscribers. [action_cable_overview](https://guides.rubyonrails.org/action_cable_overview.html)
 - [ ] **Subscription adapters** (R): `cable.yml` selects pub/sub adapters (async, Redis, PostgreSQL, Solid Cable). [action_cable_overview](https://guides.rubyonrails.org/action_cable_overview.html)
-- [ ] **Allowed request origins** (R): `allowed_request_origins` restricts WebSocket connections to trusted origins. [action_cable_overview](https://guides.rubyonrails.org/action_cable_overview.html)
+- [x] **Allowed request origins** (R): `allowed_request_origins` restricts WebSocket connections to trusted origins. [action_cable_overview](https://guides.rubyonrails.org/action_cable_overview.html)
 - [ ] **Cable server configuration** (R): Configure consumer URL (`action_cable_meta_tag`), worker pool size, client logging, mount path and other options. [action_cable_overview](https://guides.rubyonrails.org/action_cable_overview.html)
 - [ ] **Standalone cable server** (R): Run Action Cable mounted in-app or as a separate standalone server process. [action_cable_overview](https://guides.rubyonrails.org/action_cable_overview.html)
 - [ ] **Action Cable testing** (R): Connection and channel test cases plus broadcast assertions (`assert_broadcasts`, `assert_broadcast_on`). [action_cable_overview](https://guides.rubyonrails.org/action_cable_overview.html)
@@ -811,62 +811,62 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** Cache API (per data center, free) for HTTP and fragment caching, KV for global data that is read often and written rarely (the free plan has a small daily write quota; check the current number before relying on it).
 
-21 features: 0 done, 0 partial, 21 to do, 0 not applicable.
+21 features: 5 done, 2 partial, 14 to do, 0 not applicable.
 
 ### Caching
 
 - [ ] **Cache drivers** (L): cache.kind chooses InMem (moka, max_capacity), Redis (uri, max_size pool) or Null (the default, whose writes fail), with no code changes. [loco/how-to/use-cache](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/use-cache.md)
-- [ ] **Cache get, insert and remove** (L): Stores and reads any Serialize/Deserialize value (JSON-encoded) by key on ctx.cache. [loco/how-to/use-cache](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/use-cache.md)
-- [ ] **Cache TTL (insert_with_expiry)** (L): Stores a value that expires after a given Duration. [loco/how-to/use-cache](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/use-cache.md)
-- [ ] **Fetch-or-compute (get_or_insert)** (L): Returns the cached value, or runs a future to compute, store and return it, optionally with a TTL via get_or_insert_with_expiry. [loco/how-to/use-cache](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/use-cache.md)
+- [~] **Cache get, insert and remove** (L): Stores and reads any Serialize/Deserialize value (JSON-encoded) by key on ctx.cache. [loco/how-to/use-cache](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/use-cache.md)
+- [x] **Cache TTL (insert_with_expiry)** (L): Stores a value that expires after a given Duration. [loco/how-to/use-cache](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/use-cache.md)
+- [x] **Fetch-or-compute (get_or_insert)** (L): Returns the cached value, or runs a future to compute, store and return it, optionally with a TTL via get_or_insert_with_expiry. [loco/how-to/use-cache](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/use-cache.md)
 - [ ] **Cache ping and clear** (L): Checks that the cache backend is reachable and wipes the cache (FLUSHDB on Redis). [loco/how-to/use-cache](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/use-cache.md)
 - [ ] **Development caching toggle** (R): `bin/rails dev:cache` enables/disables caching in development. [caching_with_rails](https://guides.rubyonrails.org/caching_with_rails.html)
-- [ ] **Low-level caching (Rails.cache)** (R): `Rails.cache.fetch/read/write/delete` with `expires_in`, `race_condition_ttl` and cache keys for arbitrary values. [caching_with_rails](https://guides.rubyonrails.org/caching_with_rails.html)
+- [x] **Low-level caching (Rails.cache)** (R): `Rails.cache.fetch/read/write/delete` with `expires_in`, `race_condition_ttl` and cache keys for arbitrary values. [caching_with_rails](https://guides.rubyonrails.org/caching_with_rails.html)
 - [ ] **Fragment caching** (R): `cache` view helper caches template fragments keyed by record `cache_key_with_version` and template digest. [caching_with_rails](https://guides.rubyonrails.org/caching_with_rails.html)
 - [ ] **Conditional fragment caching** (R): `cache_if` / `cache_unless` cache fragments only when a condition holds. [caching_with_rails](https://guides.rubyonrails.org/caching_with_rails.html)
 - [ ] **Collection caching** (R): `render partial:, collection:, cached: true` fetches all cached partials in one multi-read. [caching_with_rails](https://guides.rubyonrails.org/caching_with_rails.html)
 - [ ] **Template dependency tracking** (R): Template digests automatically track render dependencies, with explicit `Template Dependency:` comments for dynamic ones. [caching_with_rails](https://guides.rubyonrails.org/caching_with_rails.html)
 - [ ] **Russian doll caching** (R): Nested fragment caches invalidate outward via `touch: true` associations. [caching_with_rails](https://guides.rubyonrails.org/caching_with_rails.html)
 - [ ] **Shared partial caching** (R): Partials can be cached across formats/mime types by specifying the format explicitly. [caching_with_rails](https://guides.rubyonrails.org/caching_with_rails.html)
-- [ ] **Conditional GET** (R): `fresh_when` and `stale?` set ETag/Last-Modified and return 304 Not Modified for fresh requests; `http_cache_forever` for static content. [caching_with_rails](https://guides.rubyonrails.org/caching_with_rails.html)
-- [ ] **Strong vs weak ETags** (R): Choose weak (default) or strong ETags via `etag:`/`weak_etag:`/`strong_etag:`. [caching_with_rails](https://guides.rubyonrails.org/caching_with_rails.html)
+- [x] **Conditional GET** (R): `fresh_when` and `stale?` set ETag/Last-Modified and return 304 Not Modified for fresh requests; `http_cache_forever` for static content. [caching_with_rails](https://guides.rubyonrails.org/caching_with_rails.html)
+- [~] **Strong vs weak ETags** (R): Choose weak (default) or strong ETags via `etag:`/`weak_etag:`/`strong_etag:`. [caching_with_rails](https://guides.rubyonrails.org/caching_with_rails.html)
 - [ ] **SQL query cache** (R): Identical queries within a request are served from an in-memory result cache. [caching_with_rails](https://guides.rubyonrails.org/caching_with_rails.html)
 - [ ] **Solid Cache store** (R): Database-backed default cache store with configurable database, size/age expiration, sharding and encryption. [caching_with_rails](https://guides.rubyonrails.org/caching_with_rails.html)
 - [ ] **Pluggable cache stores** (R): `config.cache_store` selects Memory, File, MemCache, Redis, Null or custom stores, with connection pool options. [caching_with_rails](https://guides.rubyonrails.org/caching_with_rails.html)
 - [ ] **Custom cache stores** (R): Subclass `ActiveSupport::Cache::Store` to implement a new cache backend. [caching_with_rails](https://guides.rubyonrails.org/caching_with_rails.html)
-- [ ] **Cache usage in jobs and non-request contexts** (R): Caching (including local cache) can be used outside requests, e.g. wrapping jobs with `Rails.cache.with_local_cache`. [caching_with_rails](https://guides.rubyonrails.org/caching_with_rails.html)
+- [x] **Cache usage in jobs and non-request contexts** (R): Caching (including local cache) can be used outside requests, e.g. wrapping jobs with `Rails.cache.with_local_cache`. [caching_with_rails](https://guides.rubyonrails.org/caching_with_rails.html)
 - [ ] **Local (per-request) cache** (R): A strategy layer memoizes cache reads in memory for the duration of a request. [caching_with_rails](https://guides.rubyonrails.org/caching_with_rails.html)
 
 ## I18n and utilities
 
 **On Workers:** Translations compiled into the binary (no filesystem at runtime). Time zones and formatting in Rust crates that compile to wasm32.
 
-22 features: 0 done, 0 partial, 22 to do, 0 not applicable.
+22 features: 7 done, 3 partial, 12 to do, 0 not applicable.
 
 ### I18n
 
-- [ ] **Locale dictionaries** (R): YAML/Ruby locale files under `config/locales` define nested translation keys per locale, organized in subdirectories. [i18n](https://guides.rubyonrails.org/i18n.html)
-- [ ] **Translation helper t / I18n.t** (R): `t`/`translate` looks up translations in views, controllers and models, with missing-translation markup. [i18n](https://guides.rubyonrails.org/i18n.html)
-- [ ] **Interpolation** (R): `%{var}` placeholders in translations are filled from passed options. [i18n](https://guides.rubyonrails.org/i18n.html)
+- [x] **Locale dictionaries** (R): YAML/Ruby locale files under `config/locales` define nested translation keys per locale, organized in subdirectories. [i18n](https://guides.rubyonrails.org/i18n.html)
+- [x] **Translation helper t / I18n.t** (R): `t`/`translate` looks up translations in views, controllers and models, with missing-translation markup. [i18n](https://guides.rubyonrails.org/i18n.html)
+- [x] **Interpolation** (R): `%{var}` placeholders in translations are filled from passed options. [i18n](https://guides.rubyonrails.org/i18n.html)
 - [ ] **Localization of dates and times** (R): `l`/`I18n.l` formats dates/times with locale-defined formats. [i18n](https://guides.rubyonrails.org/i18n.html)
 - [ ] **Localized views** (R): Templates like `index.es.html.erb` are selected automatically for the current locale. [i18n](https://guides.rubyonrails.org/i18n.html)
 - [ ] **Locale-specific inflections** (R): Inflection rules can be defined per locale for pluralize/singularize. [i18n](https://guides.rubyonrails.org/i18n.html)
-- [ ] **Per-request locale switching** (R): `I18n.with_locale` in an around_action sets locale from params, URL path scopes, domain, user preferences, Accept-Language header or session. [i18n](https://guides.rubyonrails.org/i18n.html)
-- [ ] **Locale in generated URLs** (R): `default_url_options` and `scope "(:locale)"` routes preserve the locale across links. [i18n](https://guides.rubyonrails.org/i18n.html)
-- [ ] **Scoped and nested key lookup** (R): Keys resolve with dotted paths or `scope:` options. [i18n](https://guides.rubyonrails.org/i18n.html)
-- [ ] **Translation defaults** (R): `default:` provides fallback strings or alternative keys when a translation is missing. [i18n](https://guides.rubyonrails.org/i18n.html)
+- [x] **Per-request locale switching** (R): `I18n.with_locale` in an around_action sets locale from params, URL path scopes, domain, user preferences, Accept-Language header or session. [i18n](https://guides.rubyonrails.org/i18n.html)
+- [~] **Locale in generated URLs** (R): `default_url_options` and `scope "(:locale)"` routes preserve the locale across links. [i18n](https://guides.rubyonrails.org/i18n.html)
+- [x] **Scoped and nested key lookup** (R): Keys resolve with dotted paths or `scope:` options. [i18n](https://guides.rubyonrails.org/i18n.html)
+- [~] **Translation defaults** (R): `default:` provides fallback strings or alternative keys when a translation is missing. [i18n](https://guides.rubyonrails.org/i18n.html)
 - [ ] **Bulk and namespace lookup** (R): Look up multiple keys at once or return an entire namespace hash. [i18n](https://guides.rubyonrails.org/i18n.html)
 - [ ] **Lazy lookup** (R): Keys starting with `.` resolve relative to the current view/controller action path. [i18n](https://guides.rubyonrails.org/i18n.html)
-- [ ] **Pluralization** (R): `count:` selects plural forms (zero/one/other and locale-specific rules via rails-i18n). [i18n](https://guides.rubyonrails.org/i18n.html)
+- [x] **Pluralization** (R): `count:` selects plural forms (zero/one/other and locale-specific rules via rails-i18n). [i18n](https://guides.rubyonrails.org/i18n.html)
 - [ ] **Explicit locale passing** (R): `locale:` option on t/l and `I18n.locale=`/`default_locale` control the active locale. [i18n](https://guides.rubyonrails.org/i18n.html)
 - [ ] **Safe HTML translations** (R): Keys ending in `_html` or `.html` are marked html_safe with escaped interpolations. [i18n](https://guides.rubyonrails.org/i18n.html)
 - [ ] **Model and attribute name translations** (R): `human_attribute_name` and `model_name.human` use `activerecord.models/attributes` keys. [i18n](https://guides.rubyonrails.org/i18n.html)
 - [ ] **Validation error message translations** (R): Error messages resolve through model/attribute-specific scopes with interpolation of attribute, value and count. [i18n](https://guides.rubyonrails.org/i18n.html)
 - [ ] **Built-in framework translations** (R): Mailer subjects, form helper labels/submit buttons, view helpers (number/date/distance_of_time), Active Model and Active Support (to_sentence, etc.) use translatable keys. [i18n](https://guides.rubyonrails.org/i18n.html)
-- [ ] **Load paths and available locales config** (R): Configure `i18n.load_path`, `default_locale`, `available_locales` and fallbacks. [i18n](https://guides.rubyonrails.org/i18n.html)
+- [~] **Load paths and available locales config** (R): Configure `i18n.load_path`, `default_locale`, `available_locales` and fallbacks. [i18n](https://guides.rubyonrails.org/i18n.html)
 - [ ] **Custom translation storage** (R): Store translations in custom locations or formats (e.g. Ruby hashes, lambdas). [i18n](https://guides.rubyonrails.org/i18n.html)
 - [ ] **Alternate I18n backends** (R): Swap or chain backends (e.g. KeyValue, ActiveRecord, Chain) for translation storage. [i18n](https://guides.rubyonrails.org/i18n.html)
-- [ ] **Missing translation handling** (R): Custom exception handlers and `raise_on_missing_translations` control behavior for missing keys. [i18n](https://guides.rubyonrails.org/i18n.html)
+- [x] **Missing translation handling** (R): Custom exception handlers and `raise_on_missing_translations` control behavior for missing keys. [i18n](https://guides.rubyonrails.org/i18n.html)
 
 ## Errors, logging and debugging
 

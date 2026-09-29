@@ -97,9 +97,16 @@ async fn session(key: Result<Key, String>, mut req: Request, next: Next) -> Resp
     }
 }
 
-/// Why a request is refused, or `None` when it may proceed.
+/// Whether the request is a WebSocket handshake (`Upgrade: websocket`).
+pub(crate) fn is_websocket_upgrade(headers: &HeaderMap) -> bool {
+    headers.get(header::UPGRADE).is_some_and(|value| value.as_bytes().eq_ignore_ascii_case(b"websocket"))
+}
+
+/// Why a request is refused, or `None` when it may proceed. WebSocket
+/// handshakes are GETs, but browsers send cookies with them and let any site
+/// open them (cross-site WebSocket hijacking), so they are checked like forms.
 pub(crate) fn cross_origin(method: &Method, headers: &HeaderMap, trusted: &[HeaderValue]) -> Option<&'static str> {
-    if matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) {
+    if matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) && !is_websocket_upgrade(headers) {
         return None;
     }
     let origin = headers.get(header::ORIGIN);

@@ -36,6 +36,10 @@ pub struct Report {
     /// The deploy uploaded a new SECRET_KEY_BASE (the Worker had none).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub secret_created: bool,
+    /// `ocre deploy`: Cloudflare resources it created because they were
+    /// missing, e.g. `queue shop-jobs`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub provisioned: Vec<String>,
     /// Commands to run next, in order.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub next: Vec<String>,
@@ -133,6 +137,9 @@ fn print_human(report: &Report) {
     }
     if report.secret_created {
         println!("Created the SECRET_KEY_BASE secret on Cloudflare");
+    }
+    for resource in &report.provisioned {
+        println!("Created {resource} on Cloudflare");
     }
     if let Some(url) = &report.url {
         println!("\n{url}");

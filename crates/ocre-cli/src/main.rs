@@ -7,6 +7,7 @@
 
 mod db;
 mod generate;
+mod i18n;
 mod names;
 mod new;
 mod output;
@@ -125,6 +126,9 @@ enum Command {
         /// Only routes whose method, path or handler contains this text (case-insensitive).
         filter: Option<String>,
     },
+    /// Translations: checks of the locale files (see `ocre g locale`).
+    #[command(subcommand)]
+    I18n(I18nCommand),
 }
 
 #[derive(Subcommand)]
@@ -145,13 +149,17 @@ enum GenerateCommand {
     /// Model plus HTML pages for full CRUD.
     /// In an API-only app (`ocre new --api`) this is `ocre g api`.
     ///
-    /// Example: `ocre g scaffold Post title:string body:text published:boolean`.
+    /// Example: `ocre g scaffold Post title:string body:text published:boolean --realtime`.
     Scaffold {
         /// Singular model name, PascalCase or snake_case (e.g. `BlogPost`).
         name: String,
         /// Fields as `name:type` (see `ocre g model --help`).
         #[arg(required = true)]
         fields: Vec<String>,
+        /// Live index page: creates, edits and deletes appear in every open
+        /// browser over a WebSocket (htmx ws extension, Durable Object channel).
+        #[arg(long)]
+        realtime: bool,
     },
     /// Model plus a JSON REST resource under /api/<plural>; with --graphql, also GraphQL.
     ///
@@ -202,6 +210,52 @@ enum GenerateCommand {
     ///
     /// Example: `ocre g mailbox`.
     Mailbox,
+    /// Background job: `src/jobs/<name>.rs` (arguments + `perform`), added to
+    /// the `Job` enum and `perform` match in `src/jobs/mod.rs`. The first job
+    /// wires the `JOBS` queue (wrangler.toml) and the `queue` event (src/lib.rs).
+    ///
+    /// Example: `ocre g job SendWelcome user_id:integer`, then
+    /// `ocre::jobs::enqueue(&ctx, &Job::SendWelcome(SendWelcome { user_id })).await?`.
+    Job {
+        /// Job name, PascalCase or snake_case (e.g. `SendWelcome`; a `Job` suffix is dropped).
+        name: String,
+        /// Arguments as `name:type` (see `ocre g model --help`; no `^`).
+        fields: Vec<String>,
+    },
+    /// Scheduled task: `src/schedules/<name>.rs`, run by a Cron Trigger (UTC)
+    /// added to `[triggers] crons` in wrangler.toml, dispatched by cron in
+    /// `src/schedules/mod.rs`. The first one wires the `scheduled` event.
+    ///
+    /// Example: `ocre g schedule nightly_cleanup "0 3 * * *"`.
+    Schedule {
+        /// Task name in snake_case (e.g. `nightly_cleanup`).
+        name: String,
+        /// Cron expression, five fields in UTC, quoted (e.g. "*/15 * * * *").
+        cron: String,
+    },
+    /// `CACHE` Workers KV binding in wrangler.toml for `ocre::cache::fetch`
+    /// (read-through cache of JSON values). `ocre deploy` creates the namespace.
+    ///
+    /// Example: `ocre g cache`.
+    Cache,
+    /// `locales/<code>.yml` for each code, declared in `ocre::locales!(...)`
+    /// in src/lib.rs. The first run sets up translations: its first code is
+    /// the default locale, and routes() gets the `I18n` extractor's layer.
+    ///
+    /// Example: `ocre g locale en fr`.
+    Locale {
+        /// Locale codes: `en`, `fr`, `pt-BR`...
+        #[arg(required = true)]
+        codes: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum I18nCommand {
+    /// List keys of the default locale missing from other locales (with the
+    /// plural forms each language needs) and invalid locale files. Fails
+    /// when there is any.
+    Missing,
 }
 
 #[derive(Subcommand)]
@@ -260,11 +314,15 @@ fn main() -> ExitCode {
             new::run(args, json)
         }
         Command::Login => wrangler::login(json),
-        Command::Generate(GenerateCommand::Scaffold { name, fields }) => Project::find().and_then(|project| {
-            if project.api_only {
+        Command::Generate(GenerateCommand::Scaffold { name, fields, realtime }) => Project::find().and_then(|project| {
+            if project.api_only && realtime {
+                Err(CliError::new("--realtime updates HTML pages; this app is API-only").hint(
+                    "run `ocre g scaffold` without --realtime; to push JSON to clients, see Realtime in the Ocre README",
+                ))
+            } else if project.api_only {
                 generate::api(&project, &name, &fields, false)
             } else {
-                generate::scaffold(&project, &name, &fields)
+                generate::scaffold(&project, &name, &fields, realtime)
             }
         }),
         Command::Generate(GenerateCommand::Api { name, fields, graphql }) => {
@@ -281,6 +339,17 @@ fn main() -> ExitCode {
             Project::find().and_then(|project| generate::mailer(&project, &name, &actions))
         }
         Command::Generate(GenerateCommand::Mailbox) => Project::find().and_then(|project| generate::mailbox(&project)),
+        Command::Generate(GenerateCommand::Job { name, fields }) => {
+            Project::find().and_then(|project| generate::job(&project, &name, &fields))
+        }
+        Command::Generate(GenerateCommand::Schedule { name, cron }) => {
+            Project::find().and_then(|project| generate::schedule(&project, &name, &cron))
+        }
+        Command::Generate(GenerateCommand::Cache) => Project::find().and_then(|project| generate::cache(&project)),
+        Command::Generate(GenerateCommand::Locale { codes }) => {
+            Project::find().and_then(|project| generate::locale(&project, &codes))
+        }
+        Command::I18n(I18nCommand::Missing) => Project::find().and_then(|project| i18n::missing(&project)),
         Command::Migrate { remote, status: true } => db::status(remote, json),
         Command::Migrate { remote, status: false } => wrangler::migrate(remote, json),
         Command::Db(DbCommand::Seed { remote }) => db::seed(remote, json),

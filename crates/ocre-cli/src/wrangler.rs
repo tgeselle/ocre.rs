@@ -102,8 +102,15 @@ impl<'a> Wrangler<'a> {
     /// migrated before the new code goes live; a new one is created by the
     /// first deploy, then migrated. A Worker without SECRET_KEY_BASE gets a
     /// new one with the deploy; an existing one is never replaced, since that
-    /// would sign everyone out.
+    /// would sign everyone out. Queues named in wrangler.toml are created
+    /// first when missing (a consumer on a missing queue fails the deploy),
+    /// and KV namespaces without an `id` are created or found and linked.
+    /// R2 buckets (`[[r2_buckets]]`, e.g. `STORAGE` for `ocre::storage`) are
+    /// created when missing.
     pub fn deploy(&self, database: &str) -> Result<Deployed, CliError> {
+        let mut provisioned = self.ensure_queues()?;
+        provisioned.extend(self.ensure_kv_namespaces()?);
+        provisioned.extend(self.ensure_buckets()?);
         let secrets = if self.has_secret_key_base()? { None } else { Some(SecretsFile::create(self.cwd)?) };
         let mut deploy = vec!["deploy"];
         if secrets.is_some() {
@@ -121,7 +128,111 @@ impl<'a> Wrangler<'a> {
             .split_whitespace()
             .find(|word| word.starts_with("https://") && word.contains(".workers.dev"))
             .map(str::to_owned);
-        Ok(Deployed { url, secret_created: secrets.is_some() })
+        Ok(Deployed { url, secret_created: secrets.is_some(), provisioned })
+    }
+
+    /// Creates each queue of wrangler.toml (producers, consumers, dead-letter
+    /// queues) that `wrangler queues info` reports missing; returns
+    /// `queue <name>` for each one created.
+    fn ensure_queues(&self) -> Result<Vec<String>, CliError> {
+        let mut created = Vec::new();
+        for queue in configured_queues(&std::fs::read_to_string(self.cwd.join("wrangler.toml"))?) {
+            let output = self
+                .command()
+                .args(["queues", "info", &queue])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .map_err(npx_missing)?;
+            if output.status.success() {
+                continue;
+            }
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stderr.contains("does not exist") {
+                return Err(CliError::new(format!("`wrangler queues info {queue}` failed: {}", stderr.trim()))
+                    .hint("log in with `ocre login`, or set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID"));
+            }
+            self.run(&["queues", "create", &queue])?;
+            created.push(format!("queue {queue}"));
+        }
+        Ok(created)
+    }
+
+    /// Creates each `bucket_name` of `[[r2_buckets]]` that `wrangler r2
+    /// bucket info` reports missing (API code 10006); returns `R2 bucket
+    /// <name>` for each one created.
+    fn ensure_buckets(&self) -> Result<Vec<String>, CliError> {
+        let mut created = Vec::new();
+        for bucket in configured_buckets(&std::fs::read_to_string(self.cwd.join("wrangler.toml"))?) {
+            let output = self
+                .command()
+                .args(["r2", "bucket", "info", &bucket, "--json"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .map_err(npx_missing)?;
+            if output.status.success() {
+                continue;
+            }
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stderr.contains("10006") && !stderr.contains("does not exist") {
+                return Err(CliError::new(format!("`wrangler r2 bucket info {bucket}` failed: {}", stderr.trim())).hint(
+                    if stderr.contains("10042") {
+                        "enable R2 once in the Cloudflare dashboard (Storage & databases > R2; the free plan asks for a payment method but charges nothing within 10 GB, 1M writes and 10M reads a month), then run `ocre deploy` again"
+                    } else {
+                        "log in with `ocre login`, or set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID"
+                    },
+                ));
+            }
+            self.run(&["r2", "bucket", "create", &bucket])?;
+            created.push(format!("R2 bucket {bucket}"));
+        }
+        Ok(created)
+    }
+
+    /// Gives each `[[kv_namespaces]]` entry without an `id` the namespace
+    /// titled `<worker>-<binding>` (`blog-cache`), creating it when
+    /// `wrangler kv namespace list` does not have it, and writes the id into
+    /// wrangler.toml so every later command uses the same namespace. Returns
+    /// `KV namespace <title>` for each one created.
+    fn ensure_kv_namespaces(&self) -> Result<Vec<String>, CliError> {
+        let path = self.cwd.join("wrangler.toml");
+        let mut wrangler_toml = std::fs::read_to_string(&path)?;
+        let (worker, bindings) = kv_bindings_without_id(&wrangler_toml);
+        let mut created = Vec::new();
+        for binding in bindings {
+            let title = format!("{worker}-{}", binding.to_ascii_lowercase().replace('_', "-"));
+            let id = match self.kv_namespace_id(&title)? {
+                Some(id) => id,
+                None => {
+                    self.run(&["kv", "namespace", "create", &title])?;
+                    created.push(format!("KV namespace {title} (id written to wrangler.toml)"));
+                    self.kv_namespace_id(&title)?.ok_or_else(|| {
+                        CliError::new(format!("KV namespace {title} was created but is not listed"))
+                            .hint("run `ocre deploy` again; it links the namespace once Cloudflare lists it")
+                    })?
+                }
+            };
+            wrangler_toml = with_kv_id(&wrangler_toml, &binding, &id);
+            std::fs::write(&path, &wrangler_toml)?;
+        }
+        Ok(created)
+    }
+
+    /// The id of the KV namespace titled `title`, from `wrangler kv namespace list`.
+    fn kv_namespace_id(&self, title: &str) -> Result<Option<String>, CliError> {
+        let output =
+            self.command().args(["kv", "namespace", "list"]).stderr(Stdio::piped()).output().map_err(npx_missing)?;
+        if !output.status.success() {
+            return Err(CliError::new(format!(
+                "`wrangler kv namespace list` failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))
+            .hint("log in with `ocre login`, or set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID"));
+        }
+        let namespaces: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)
+            .map_err(|err| CliError::new(format!("unexpected `wrangler kv namespace list` output: {err}")))?;
+        Ok(namespaces.iter().find(|ns| ns["title"] == title).and_then(|ns| ns["id"].as_str()).map(str::to_owned))
     }
 
     /// Whether the deployed Worker has SECRET_KEY_BASE; `false` when the
@@ -255,6 +366,7 @@ pub fn migrate(remote: bool, json: bool) -> CliResult {
 /// Runs until stopped. The app is served at `http://localhost:<port>`.
 pub fn dev(port: u16, json: bool) -> CliResult {
     let project = Project::find()?;
+    crate::i18n::check_syntax(&project.root)?;
     check_wasm_target()?;
     let wrangler = Wrangler::new(&project.root, Echo::for_json(json)).dev_build();
     wrangler.migrate(&project.database_name, false)?;
@@ -264,9 +376,15 @@ pub fn dev(port: u16, json: bool) -> CliResult {
 
 pub fn deploy(json: bool) -> CliResult {
     let project = Project::find()?;
+    crate::i18n::check_syntax(&project.root)?;
     check_wasm_target()?;
     let deployed = Wrangler::new(&project.root, Echo::for_json(json)).deploy(&project.database_name)?;
-    Ok(Report { url: deployed.url, secret_created: deployed.secret_created, ..Report::new("deploy") })
+    Ok(Report {
+        url: deployed.url,
+        secret_created: deployed.secret_created,
+        provisioned: deployed.provisioned,
+        ..Report::new("deploy")
+    })
 }
 
 /// Result of [`Wrangler::deploy`].
@@ -275,6 +393,81 @@ pub struct Deployed {
     pub url: Option<String>,
     /// A new SECRET_KEY_BASE was uploaded with this deploy.
     pub secret_created: bool,
+    /// Resources created because they were missing, e.g. `queue shop-jobs`.
+    pub provisioned: Vec<String>,
+}
+
+/// Every queue wrangler.toml names, once each, in order: producers'
+/// `queue`, consumers' `queue` and `dead_letter_queue`.
+fn configured_queues(wrangler_toml: &str) -> Vec<String> {
+    let config: toml::Table = wrangler_toml.parse().expect("Project::find parsed wrangler.toml");
+    let entries = |kind: &str| {
+        config.get("queues").and_then(|q| q.get(kind)).and_then(|v| v.as_array()).cloned().unwrap_or_default()
+    };
+    let mut names: Vec<String> = Vec::new();
+    for (kind, keys) in [("producers", &["queue"][..]), ("consumers", &["queue", "dead_letter_queue"])] {
+        for entry in entries(kind) {
+            for key in keys {
+                if let Some(name) = entry.get(*key).and_then(|v| v.as_str())
+                    && !names.iter().any(|known| known == name)
+                {
+                    names.push(name.to_owned());
+                }
+            }
+        }
+    }
+    names
+}
+
+/// The `bucket_name` of each `[[r2_buckets]]` entry, once each.
+fn configured_buckets(wrangler_toml: &str) -> Vec<String> {
+    let config: toml::Table = wrangler_toml.parse().expect("Project::find parsed wrangler.toml");
+    let mut names: Vec<String> = Vec::new();
+    for entry in config.get("r2_buckets").and_then(|v| v.as_array()).into_iter().flatten() {
+        if let Some(name) = entry.get("bucket_name").and_then(|v| v.as_str())
+            && !names.iter().any(|known| known == name)
+        {
+            names.push(name.to_owned());
+        }
+    }
+    names
+}
+
+/// The Worker's `name` and the bindings of `[[kv_namespaces]]` entries
+/// without an `id`.
+fn kv_bindings_without_id(wrangler_toml: &str) -> (String, Vec<String>) {
+    let config: toml::Table = wrangler_toml.parse().expect("Project::find parsed wrangler.toml");
+    let worker = config.get("name").and_then(|name| name.as_str()).unwrap_or("app").to_owned();
+    let bindings = config
+        .get("kv_namespaces")
+        .and_then(|namespaces| namespaces.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|namespace| namespace.get("id").is_none())
+        .filter_map(|namespace| namespace.get("binding").and_then(|b| b.as_str()).map(str::to_owned))
+        .collect();
+    (worker, bindings)
+}
+
+/// Adds `id = "<id>"` after `binding = "<binding>"` in its `[[kv_namespaces]]` entry.
+fn with_kv_id(wrangler_toml: &str, binding: &str, id: &str) -> String {
+    let mut out = String::with_capacity(wrangler_toml.len() + id.len() + 8);
+    let mut in_kv = false;
+    for line in wrangler_toml.lines() {
+        out.push_str(line);
+        out.push('\n');
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_kv = trimmed == "[[kv_namespaces]]";
+        } else if in_kv
+            && trimmed
+                .split_once('=')
+                .is_some_and(|(key, value)| key.trim() == "binding" && value.trim().trim_matches('"') == binding)
+        {
+            out.push_str(&format!("id = \"{id}\"\n"));
+        }
+    }
+    out
 }
 
 /// A new SECRET_KEY_BASE for `wrangler deploy --secrets-file`, in the app's

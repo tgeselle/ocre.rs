@@ -10,7 +10,8 @@ repository.workspace = true
 autotests = false
 
 [dependencies]
-worker.workspace = true
+# `queue`: background jobs (`ocre::jobs`) on Cloudflare Queues.
+worker = { workspace = true, features = ["queue"] }
 axum.workspace = true
 askama = { workspace = true, optional = true }
 serde.workspace = true
@@ -27,6 +28,11 @@ base64 = "0.22.1"
 getrandom = "0.2.17"
 hmac = "0.12.1"
 sha2 = "0.10.9"
+# File storage (`ocre::storage`): multipart parsing with a fast boundary
+# search, form fields through serde, request bodies streamed into R2.
+memchr = "2.8.3"
+serde_urlencoded = "0.7.1"
+futures-util = { version = "0.3", default-features = false }
 
 [features]
 default = ["html"]
@@ -34,6 +40,9 @@ default = ["html"]
 # API-only apps (`ocre new --api`) turn it off.
 html = ["dep:askama"]
 graphql = ["dep:async-graphql"]
+# Realtime channels: exports the `OcreChannel` Durable Object class (WebSocket
+# Hibernation) and `ocre::realtime`. `ocre g scaffold ... --realtime` turns it on.
+realtime = []
 
 [dev-dependencies]
 pollster = "1.0.1"

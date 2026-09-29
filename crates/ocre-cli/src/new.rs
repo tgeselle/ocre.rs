@@ -177,7 +177,7 @@ impl Plan {
             let generated = if self.api {
                 generate::api(&project, "Post", &fields, false)?
             } else {
-                generate::scaffold(&project, "Post", &fields)?
+                generate::scaffold(&project, "Post", &fields, false)?
             };
             report.created.extend(generated.created.into_iter().map(|path| format!("{name}/{path}")));
         }

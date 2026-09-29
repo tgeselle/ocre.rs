@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use super::{
     Edits, MODULES_MARKER,
-    fields::{Field, FieldType, parse_fields},
+    fields::{ATTACHMENT_TYPES, Field, FieldType, parse_fields},
     insert_after_marker, next_migration_path,
 };
 use crate::{CliResult, names::ModelNames, output::CliError, project::Project};
@@ -52,6 +52,9 @@ fn add_model(edits: &mut Edits, names: &ModelNames, fields: &[Field], command: &
         edits.update(&path, updated);
     }
     register_model(edits, &names.singular)?;
+    if fields.iter().any(Field::is_attachment) {
+        super::storage::ensure_bucket(edits)?;
+    }
     if !edits.has_create_migration(&names.plural)? {
         let path = next_migration_path(edits, &format!("create_{}", names.plural))?;
         edits.create(&path, table_sql(&names.plural, fields))?;
@@ -86,7 +89,9 @@ pub(super) fn register_model(edits: &mut Edits, module: &str) -> Result<(), CliE
 pub(super) fn table_sql(table: &str, fields: &[Field]) -> String {
     let mut sql = format!("CREATE TABLE {table} (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n");
     for field in fields {
-        writeln!(sql, "    {},", field.sql_column()).expect("writing to a String");
+        for column in field.sql_columns() {
+            writeln!(sql, "    {column},").expect("writing to a String");
+        }
     }
     sql.push_str("    created_at TEXT NOT NULL DEFAULT (datetime('now')),\n");
     sql.push_str("    updated_at TEXT NOT NULL DEFAULT (datetime('now'))\n);\n");
@@ -112,6 +117,10 @@ pub(super) fn index_sql(table: &str, field: &Field) -> String {
 fn validate_body(fields: &[Field], changes: bool) -> String {
     let mut out = String::new();
     for field in fields {
+        if field.is_attachment() {
+            out.push_str(&attachment_checks(field, changes));
+            continue;
+        }
         let name = &field.name;
         let text = field.ty.is_textual();
         let (open, value, close) = match (changes, field.optional) {
@@ -132,6 +141,21 @@ fn validate_body(fields: &[Field], changes: bool) -> String {
         }
     }
     out
+}
+
+/// Presence (new, required) and `v.file` checks of an attachment's upload.
+fn attachment_checks(field: &Field, changes: bool) -> String {
+    let name = &field.name;
+    let presence = if changes || field.optional {
+        String::new()
+    } else {
+        format!("        v.check(\"{name}\", self.{name}.is_none(), \"can't be blank\");\n")
+    };
+    let pattern = if changes && field.optional { format!("Some(Some({name}))") } else { format!("Some({name})") };
+    format!(
+        "{presence}        if let {pattern} = &self.{name} {{\n            {}\n        }}\n",
+        field.checks(name).join("")
+    )
 }
 
 fn deref(text: bool, name: &str) -> String {
@@ -187,17 +211,34 @@ fn model_rs(names: &ModelNames, fields: &[Field], command: &str) -> String {
     let ModelNames { model, plural, human_singular, human_plural, .. } = names;
     let lower = human_singular.to_lowercase();
     let lower_plural = human_plural.to_lowercase();
-    let columns = fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(", ");
-    let placeholders = (1..=fields.len()).map(|i| format!("?{i}")).collect::<Vec<_>>().join(", ");
-    let insert_params = fields.iter().map(|f| format!("new.{}", f.name)).collect::<Vec<_>>().join(", ");
-    let sets = fields
+    let plain: Vec<&Field> = fields.iter().filter(|f| !f.is_attachment()).collect();
+    let files: Vec<&Field> = fields.iter().filter(|f| f.is_attachment()).collect();
+    // Attachment columns come after the plain ones, so their parameters can be
+    // appended to `params![...]` with `storage::columns`.
+    let column_names: Vec<String> = plain
+        .iter()
+        .map(|f| f.name.clone())
+        .chain(files.iter().flat_map(|f| f.columns().into_iter().map(|(column, _)| column)))
+        .collect();
+    let columns = column_names.join(", ");
+    let placeholders = (1..=column_names.len()).map(|i| format!("?{i}")).collect::<Vec<_>>().join(", ");
+    let insert_params = plain.iter().map(|f| format!("new.{}", f.name)).collect::<Vec<_>>().join(", ");
+    let mut sets: Vec<String> = plain
         .iter()
         .enumerate()
         .map(|(i, f)| format!("{0} = CASE WHEN ?{1} THEN ?{2} ELSE {0} END", f.name, 2 * i + 1, 2 * i + 2))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let update_id = 2 * fields.len() + 1;
-    let update_params = fields
+        .collect();
+    // One flag per attachment decides its four columns.
+    let mut next = 2 * plain.len() + 1;
+    for file in &files {
+        for (i, (column, _)) in file.columns().iter().enumerate() {
+            sets.push(format!("{column} = CASE WHEN ?{next} THEN ?{} ELSE {column} END", next + 1 + i));
+        }
+        next += 5;
+    }
+    let sets = sets.join(", ");
+    let update_id = next;
+    let update_params = plain
         .iter()
         .map(|f| {
             let name = &f.name;
@@ -215,6 +256,29 @@ fn model_rs(names: &ModelNames, fields: &[Field], command: &str) -> String {
     let mut change_fields = String::new();
     for field in fields {
         let (name, ty, column) = (&field.name, field.rust_type(), field.column_type());
+        if field.is_attachment() {
+            for (column, ty) in field.columns() {
+                writeln!(row_fields, "    pub {column}: {ty},").expect("writing to a String");
+            }
+            let replaces = if field.optional {
+                "`Some(Some(file))` replaces the stored file, `Some(None)` removes it"
+            } else {
+                "`Some(file)` replaces the stored file"
+            };
+            write!(
+                new_fields,
+                "    /// The file to store in R2 (checked against `{rules}`). JSON cannot carry it.\n    #[serde(skip)]\n    pub {name}: Option<Upload>,\n",
+                rules = field.rules_const()
+            )
+            .expect("writing to a String");
+            write!(
+                change_fields,
+                "    /// {replaces} (the old one is deleted from R2).\n    #[serde(skip)]\n    pub {name}: {},\n",
+                if field.optional { "Option<Option<Upload>>" } else { "Option<Upload>" }
+            )
+            .expect("writing to a String");
+            continue;
+        }
         if field.ty == FieldType::Boolean {
             row_fields.push_str("    #[serde(deserialize_with = \"ocre::bool_from_sql\")]\n");
             new_fields.push_str("    #[serde(default)]\n");
@@ -229,7 +293,7 @@ fn model_rs(names: &ModelNames, fields: &[Field], command: &str) -> String {
         writeln!(row_fields, "    pub {name}: {column},").expect("writing to a String");
         writeln!(new_fields, "    pub {name}: {column},").expect("writing to a String");
     }
-    let mut belongs_to = String::new();
+    let mut methods = String::new();
     for field in fields {
         let Some(target) = &field.target else { continue };
         let (method, target_model, target_singular, name) =
@@ -242,11 +306,14 @@ fn model_rs(names: &ModelNames, fields: &[Field], command: &str) -> String {
             format!("crate::models::{target_singular}::find(ctx, self.{name}).await")
         };
         write!(
-            belongs_to,
+            methods,
             "\n    /// The {} this {lower} belongs to.\n    pub async fn {method}(&self, ctx: &Ctx) -> Result<Option<crate::models::{target_singular}::{target_model}>> {{\n        {body}\n    }}\n",
             target.human_singular.to_lowercase(),
         )
         .expect("writing to a String");
+    }
+    for file in &files {
+        methods.push_str(&attachment_fn(file, &lower));
     }
     let new_validation = validate_body(fields, false);
     let change_validation = validate_body(fields, true);
@@ -262,6 +329,33 @@ fn model_rs(names: &ModelNames, fields: &[Field], command: &str) -> String {
     } else {
         format!("    let mut v = changes.validate();\n{update_checks}    v.finish()?;\n")
     };
+    let insert_sql = format!("INSERT INTO {plural} ({columns}) VALUES ({placeholders}) RETURNING *");
+    let update_sql =
+        format!("UPDATE {plural} SET {sets}, updated_at = datetime('now') WHERE id = ?{update_id} RETURNING *");
+    let (imports, rules, create_body, update_body, delete_body) = if files.is_empty() {
+        (
+            String::new(),
+            String::new(),
+            format!(
+                "{create_validation}    db.first(\"{insert_sql}\", params![{insert_params}])\n        .await?\n        .ok_or_else(|| Error::internal(\"INSERT ... RETURNING returned no row\"))\n"
+            ),
+            format!(
+                "{update_validation}    db.first(\n        \"{update_sql}\",\n        params![{update_params}, id],\n    )\n    .await\n"
+            ),
+            format!("    Ok(ctx.db()?.execute(\"DELETE FROM {plural} WHERE id = ?1\", params![id]).await? > 0)\n"),
+        )
+    } else {
+        (
+            ", storage::{self, Attachment, Rules, Upload}".to_owned(),
+            files.iter().map(|f| rules_const(f)).collect(),
+            create_with_files(&files, &create_validation, &insert_sql, &insert_params, &names.plural),
+            update_with_files(&files, &update_validation, &update_sql, &update_params, &names.plural),
+            format!(
+                "    let deleted: Option<{model}> = ctx.db()?.first(\"DELETE FROM {plural} WHERE id = ?1 RETURNING *\", params![id]).await?;\n    let Some(record) = deleted else {{ return Ok(false) }};\n    storage::delete_attachments(ctx, &[{}]).await?;\n    Ok(true)\n",
+                files.iter().map(|f| file_value(f, "record")).collect::<Vec<_>>().join(", ")
+            ),
+        )
+    };
 
     format!(
         r#"//! {human_singular} model: the `{plural}` table. Generated by `{command}`.
@@ -269,9 +363,9 @@ fn model_rs(names: &ModelNames, fields: &[Field], command: &str) -> String {
 //! Every query and rule about {lower_plural} lives here. Controllers (HTML
 //! pages, JSON API, GraphQL) call these functions instead of writing SQL.
 
-use ocre::{{Ctx, Error, IntoParam, Page, Result, Validator, params}};
+use ocre::{{Ctx, Error, IntoParam, Page, Result, Validator, params{imports}}};
 use serde::{{Deserialize, Serialize}};
-
+{rules}
 /// A row of the `{plural}` table.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct {model} {{
@@ -307,7 +401,7 @@ impl {model}Changes {{
     }}
 }}
 
-impl {model} {{{belongs_to}
+impl {model} {{{methods}
     {ASSOCIATIONS_MARKER}
 }}
 
@@ -344,27 +438,117 @@ pub async fn find_many(ctx: &Ctx, ids: &[i64]) -> Result<Vec<{model}>> {{
 
 pub async fn create(ctx: &Ctx, new: New{model}) -> Result<{model}> {{
     let db = ctx.db()?;
-{create_validation}    db.first("INSERT INTO {plural} ({columns}) VALUES ({placeholders}) RETURNING *", params![{insert_params}])
-        .await?
-        .ok_or_else(|| Error::internal("INSERT ... RETURNING returned no row"))
-}}
+{create_body}}}
 
 /// `None` when there is no {lower} with this id.
 pub async fn update(ctx: &Ctx, id: i64, changes: {model}Changes) -> Result<Option<{model}>> {{
     let db = ctx.db()?;
-{update_validation}    db.first(
-        "UPDATE {plural} SET {sets}, updated_at = datetime('now') WHERE id = ?{update_id} RETURNING *",
-        params![{update_params}, id],
-    )
-    .await
-}}
+{update_body}}}
 
 /// `false` when there is no {lower} with this id.
 pub async fn delete(ctx: &Ctx, id: i64) -> Result<bool> {{
-    Ok(ctx.db()?.execute("DELETE FROM {plural} WHERE id = ?1", params![id]).await? > 0)
-}}
+{delete_body}}}
 "#,
     )
+}
+
+/// `record.avatar()` wrapped in `Some`, or `record.doc()` (already an `Option`).
+fn file_value(file: &Field, record: &str) -> String {
+    if file.optional { format!("{record}.{}()", file.name) } else { format!("Some({record}.{}())", file.name) }
+}
+
+/// `pub const AVATAR: Rules = ...`: what the attachment accepts.
+fn rules_const(file: &Field) -> String {
+    let types = ATTACHMENT_TYPES.iter().map(|t| format!("\"{t}\"")).collect::<Vec<_>>().join(", ");
+    format!(
+        "\n/// Files `{name}` accepts; `validate()` checks each upload before anything is\n/// stored. The whole request is held in the Worker's memory (128 MB): keep\n/// `max_bytes` modest, and forms add it to their request limit.\npub const {rules}: Rules = Rules {{\n    max_bytes: 10 * 1024 * 1024,\n    content_types: &[{types}],\n}};\n",
+        name = file.name,
+        rules = file.rules_const(),
+    )
+}
+
+/// `post.avatar()`: the stored file's `Attachment`, built from its columns.
+fn attachment_fn(file: &Field, lower: &str) -> String {
+    let name = &file.name;
+    if file.optional {
+        format!(
+            "\n    /// This {lower}'s {name} file, if any; serve it with `ocre::storage::serve`.\n    pub fn {name}(&self) -> Option<Attachment> {{\n        Some(Attachment {{\n            key: self.{name}_key.clone()?,\n            filename: self.{name}_filename.clone()?,\n            content_type: self.{name}_content_type.clone()?,\n            size: self.{name}_size?,\n        }})\n    }}\n"
+        )
+    } else {
+        format!(
+            "\n    /// This {lower}'s {name} file; serve it with `ocre::storage::serve`.\n    pub fn {name}(&self) -> Attachment {{\n        Attachment {{\n            key: self.{name}_key.clone(),\n            filename: self.{name}_filename.clone(),\n            content_type: self.{name}_content_type.clone(),\n            size: self.{name}_size,\n        }}\n    }}\n"
+        )
+    }
+}
+
+/// Stores `source.<name>` (an `Option<Upload>`) in R2 as `Option<Attachment>`.
+fn store_file(file: &Field, source: &str, table: &str) -> String {
+    let name = &file.name;
+    format!(
+        "    let {name} = match {source}.{name} {{\n        Some(upload) => Some(storage::store(ctx, \"{table}/{name}\", upload).await?),\n        None => None,\n    }};\n"
+    )
+}
+
+/// `create` for a model with attachments: files go to R2 once the values
+/// are valid, and are deleted again when the INSERT fails.
+fn create_with_files(files: &[&Field], validation: &str, sql: &str, params: &str, table: &str) -> String {
+    let mut out = format!(
+        "{validation}    // Files go to R2 once the values are valid; they are deleted again if the INSERT fails.\n"
+    );
+    for file in files {
+        out.push_str(&store_file(file, "new", table));
+    }
+    writeln!(out, "    let mut params = params![{params}];").expect("writing to a String");
+    for file in files {
+        writeln!(out, "    params.extend(storage::columns({}.as_ref()));", file.name).expect("writing to a String");
+    }
+    let stored = files.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(", ");
+    write!(
+        out,
+        "    let created = db.first(\"{sql}\", params).await;\n    if !matches!(created, Ok(Some(_))) {{\n        storage::delete_attachments(ctx, &[{stored}]).await?;\n    }}\n    created?.ok_or_else(|| Error::internal(\"INSERT ... RETURNING returned no row\"))\n"
+    )
+    .expect("writing to a String");
+    out
+}
+
+/// `update` for a model with attachments: new files go to R2 first; the
+/// replaced ones are deleted after the UPDATE (the new ones if it fails).
+fn update_with_files(files: &[&Field], validation: &str, sql: &str, params: &str, table: &str) -> String {
+    let mut out = format!(
+        "{validation}    // The current files: deleted from R2 once the row no longer points to them.\n    let Some(old) = find(ctx, id).await? else {{ return Ok(None) }};\n"
+    );
+    let mut replaced = Vec::new();
+    let mut added = Vec::new();
+    for file in files {
+        let name = &file.name;
+        if file.optional {
+            write!(
+                out,
+                "    let {name} = match changes.{name} {{\n        Some(Some(upload)) => Some(Some(storage::store(ctx, \"{table}/{name}\", upload).await?)),\n        Some(None) => Some(None),\n        None => None,\n    }};\n"
+            )
+            .expect("writing to a String");
+            replaced.push(format!("{name}.as_ref().and_then(|_| old.{name}())"));
+            added.push(format!("{name}.flatten()"));
+        } else {
+            out.push_str(&store_file(file, "changes", table));
+            replaced.push(format!("{name}.as_ref().map(|_| old.{name}())"));
+            added.push(name.clone());
+        }
+    }
+    writeln!(out, "    let mut params = params![{params}];").expect("writing to a String");
+    for file in files {
+        let change = if file.optional { "map(Option::as_ref)" } else { "map(Some)" };
+        writeln!(out, "    params.extend(storage::column_changes({}.as_ref().{change}));", file.name)
+            .expect("writing to a String");
+    }
+    write!(
+        out,
+        "    params.push(id.into_param());\n    let updated = db.first(\"{sql}\", params).await;\n    let unused = if matches!(updated, Ok(Some(_))) {{ [{}] }} else {{ [{}] }};\n    storage::delete_attachments(ctx, &unused).await?;\n    updated\n",
+        replaced.join(", "),
+        added.join(", ")
+    )
+    .expect("writing to a String");
+    out
 }
 
 /// `posts(ctx, page)` on the referenced model: the other side of `references`.

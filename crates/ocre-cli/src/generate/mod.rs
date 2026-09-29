@@ -1,26 +1,36 @@
-//! `ocre generate model|scaffold|api|migration|mailer|mailbox`.
+//! `ocre generate model|scaffold|api|migration|mailer|mailbox|job|schedule|cache|locale`.
 //!
 //! Generators collect every change in [`Edits`] and write nothing until the
 //! whole generation succeeded, so a failure never leaves half a resource.
 
 mod api;
 mod auth;
+mod cache;
 mod fields;
+mod job;
+mod locale;
 mod mailbox;
 mod mailer;
 mod migration;
 mod model;
+mod realtime;
 mod scaffold;
+mod schedule;
+pub(crate) mod storage;
 
-use std::path::PathBuf;
+use std::{fmt::Write as _, path::PathBuf};
 
 pub use api::api;
 pub use auth::auth;
+pub use cache::cache;
+pub use job::job;
+pub use locale::locale;
 pub use mailbox::mailbox;
 pub use mailer::mailer;
 pub use migration::migration;
 pub use model::model;
 pub use scaffold::scaffold;
+pub use schedule::schedule;
 
 use crate::{
     output::{CliError, Report},
@@ -162,6 +172,36 @@ pub(crate) fn register_routes(edits: &mut Edits, module: &str) -> Result<(), Cli
     let lib = insert_after_marker(&lib, ROUTES_MARKER, &format!(".merge({module}::routes())")).ok_or_else(missing)?;
     edits.update("src/lib.rs", lib);
     Ok(())
+}
+
+/// Turns on Ocre's `feature` in the one-line `ocre = { ... }` dependency of
+/// Cargo.toml; unchanged when it is already on.
+pub(crate) fn with_ocre_feature(cargo_toml: &str, feature: &str) -> Result<String, CliError> {
+    let quoted = format!("\"{feature}\"");
+    let mut out = String::with_capacity(cargo_toml.len() + quoted.len() + 16);
+    let mut found = false;
+    for line in cargo_toml.lines() {
+        if line.starts_with("ocre = {") && line.ends_with('}') {
+            found = true;
+            if line.contains(&quoted) {
+                out.push_str(line);
+            } else if let Some((before, after)) = line.split_once("features = [") {
+                write!(out, "{before}features = [{quoted}, {after}").expect("writing to a String");
+            } else {
+                write!(out, "{}, features = [{quoted}] }}", line.trim_end_matches('}').trim_end())
+                    .expect("writing to a String");
+            }
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    if found {
+        Ok(out)
+    } else {
+        Err(CliError::new("Cargo.toml has no one-line `ocre = { ... }` dependency")
+            .hint("declare Ocre as `ocre = { ... }` on one line under [dependencies], then run the command again"))
+    }
 }
 
 #[cfg(test)]

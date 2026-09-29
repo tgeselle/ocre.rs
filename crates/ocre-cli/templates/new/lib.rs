@@ -6,7 +6,7 @@ use worker::{Context, Env, HttpRequest, event};
 // ocre:modules
 
 #[event(fetch)]
-async fn fetch(req: HttpRequest, env: Env, _ctx: Context) -> worker::Result<axum::http::Response<axum::body::Body>> {
+async fn fetch(req: HttpRequest, env: Env, _ctx: Context) -> worker::Result<worker::web_sys::Response> {
     ocre::serve(routes(), req, env).await
 }
 

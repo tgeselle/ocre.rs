@@ -14,12 +14,17 @@
 //! `RESEND_API_KEY` secret) or `cloudflare` (the `EMAIL` send_email binding).
 //! The sender is the `MAIL_FROM` variable, `noreply@example.com` or
 //! `Name <noreply@example.com>`.
+//!
+//! [`deliver_later`] sends from the background jobs queue instead (see
+//! [`jobs`](crate::jobs)): the request does not wait for the provider, and a
+//! failed delivery is retried.
 
 mod parse;
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-pub use crate::runtime::mail::{InboundEmail, receive, send};
+pub use crate::runtime::mail::{InboundEmail, deliver_later, receive, send};
 pub(crate) use parse::Message;
 
 use crate::{Error, Result, validate::is_email};
@@ -46,7 +51,7 @@ pub const LOG_PREFIX: &str = "[ocre mail]";
 ///     .reply_to("support@example.com");
 /// assert_eq!(email.to, "ada@example.com");
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Email {
     /// Recipient address, `ada@example.com`.
     pub to: String,

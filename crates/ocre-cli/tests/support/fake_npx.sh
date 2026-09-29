@@ -82,6 +82,61 @@ case "$1" in
       echo '[{"name":"OTHER","type":"secret_text"}]'
     fi
     ;;
+  queues)
+    # `queues info <name>` succeeds for queues created before (state file
+    # queue_<name>); `queues create <name>` creates one.
+    case "$2" in
+      info)
+        fail_if queues_info_fails
+        if [ -e "$state/queue_$3" ]; then echo "Queue Name: $3"; else echo "✘ [ERROR] Queue \"$3\" does not exist. To create it, run: wrangler queues create $3" >&2; exit 1; fi
+        ;;
+      create)
+        fail_if queues_create_fails
+        touch "$state/queue_$3"
+        echo "Created queue $3"
+        ;;
+    esac
+    ;;
+  r2)
+    # `r2 bucket info <name> --json` succeeds for buckets created before
+    # (state file bucket_<name>); r2_not_enabled makes it fail like an
+    # account without R2; `r2 bucket create <name>` creates one.
+    case "$3" in
+      info)
+        if [ -e "$state/r2_not_enabled" ]; then echo "✘ [ERROR] A request to the Cloudflare API failed. Please enable R2 through the Cloudflare Dashboard. [code: 10042]" >&2; exit 1; fi
+        if [ -e "$state/bucket_$4" ]; then echo "{\"name\": \"$4\"}"; else echo "✘ [ERROR] The specified bucket does not exist. [code: 10006]" >&2; exit 1; fi
+        ;;
+      create)
+        fail_if r2_create_fails
+        touch "$state/bucket_$4"
+        echo "Created bucket '$4' with default storage class of Standard."
+        ;;
+    esac
+    ;;
+  kv)
+    # `kv namespace list` prints the namespaces created before (state files
+    # kvns_<title> holding the id) as JSON; `kv namespace create <title>`
+    # creates one (but does not list it with kv_create_unlisted).
+    case "$3" in
+      list)
+        fail_if kv_list_fails
+        if [ -e "$state/kv_list_garbage" ]; then echo "not json"; exit 0; fi
+        printf '['
+        sep=''
+        for file in "$state"/kvns_*; do
+          [ -e "$file" ] || continue
+          printf '%s{"id":"%s","title":"%s","supports_url_encoding":true}' "$sep" "$(cat "$file")" "${file##*/kvns_}"
+          sep=','
+        done
+        echo ']'
+        ;;
+      create)
+        fail_if kv_create_fails
+        if [ ! -e "$state/kv_create_unlisted" ]; then echo "id-$4" > "$state/kvns_$4"; fi
+        echo "Creating namespace with title \"$4\""
+        ;;
+    esac
+    ;;
   deploy)
     fail_if deploy_fails
     if [ "$2" = "--secrets-file" ]; then

@@ -110,9 +110,10 @@ fn page(mut response: ureq::http::Response<ureq::Body>) -> Page {
         response.headers().get("set-cookie").map_or("", |v| v.to_str().unwrap().split(';').next().unwrap()).to_owned();
     let status = response.status().as_u16();
     let headers = response.headers().clone();
-    // 204 has no body by definition; wrangler dev still labels it gzip, which
-    // makes the client's decompressor fail on the empty stream.
-    let body = if status == 204 { String::new() } else { response.body_mut().read_to_string().unwrap() };
+    // 204 and 304 have no body by definition; wrangler dev still labels them
+    // gzip, which makes the client's decompressor fail on the empty stream.
+    let empty = status == 204 || status == 304;
+    let body = if empty { String::new() } else { response.body_mut().read_to_string().unwrap() };
     Page { status, location, cookie, headers, body }
 }
 
@@ -593,4 +594,671 @@ fn generated_auth_signs_users_in_on_workerd() {
     );
     assert_eq!(bearer_json(&server, "DELETE", &format!("/api/auth/keys/{id}"), jwt, "").0, 404);
     assert_eq!(bearer_json(&server, "GET", "/api/auth/me", key, "").0, 401, "revoked");
+}
+
+/// Polls `path` until its body contains `needle` (jobs run in the background).
+fn wait_for_body(server: &Server, path: &str, needle: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let body = get(server, path).body;
+        if body.contains(needle) {
+            return body;
+        }
+        assert!(Instant::now() < deadline, "{path} never showed {needle:?}: {body}");
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// Like `wait_for_log`, with room for a queue batch (`max_batch_timeout = 5`).
+fn wait_for_job_log(sandbox: &Sandbox, needle: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let log = std::fs::read_to_string(sandbox.work.join("dev.log")).unwrap();
+        if log.contains(needle) {
+            return log;
+        }
+        assert!(Instant::now() < deadline, "the dev log never showed {needle:?}:\n{log}");
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+#[test]
+#[ignore = "builds WebAssembly and runs wrangler dev; run with --ignored"]
+fn generated_app_runs_jobs_and_crons_on_workerd() {
+    let sandbox = Sandbox::new();
+    sandbox.use_real_wrangler();
+    let root = sandbox.new_app("e2e-jobs", &[]);
+    for args in [
+        &["g", "migration", "create_visits", "name:string"][..],
+        &["g", "job", "RecordVisit", "name:string"],
+        &["g", "schedule", "nightly", "0 3 * * *"],
+    ] {
+        let (report, ok) = sandbox.json(args, &root);
+        assert!(ok, "{report}");
+    }
+    // The job and the task write a row; a route enqueues, another lists rows.
+    let job = std::fs::read_to_string(root.join("src/jobs/record_visit.rs")).unwrap().replace(
+        "    pub async fn perform(self, _ctx: &Ctx) -> Result<()> {\n        Ok(())",
+        "    pub async fn perform(self, ctx: &Ctx) -> Result<()> {\n        if self.name == \"fail\" {\n            \
+         return Err(ocre::Error::internal(\"boom\"));\n        }\n        ctx.db()?.execute(\"INSERT INTO visits (name) \
+         VALUES (?1)\", ocre::params![self.name]).await?;\n        Ok(())",
+    );
+    std::fs::write(root.join("src/jobs/record_visit.rs"), job).unwrap();
+    let task = std::fs::read_to_string(root.join("src/schedules/nightly.rs")).unwrap().replace(
+        "pub async fn run(_ctx: &Ctx) -> Result<()> {\n    Ok(())",
+        "pub async fn run(ctx: &Ctx) -> Result<()> {\n    ctx.db()?.execute(\"INSERT INTO visits (name) VALUES ('cron')\", \
+         ocre::params![]).await?;\n    Ok(())",
+    );
+    std::fs::write(root.join("src/schedules/nightly.rs"), task).unwrap();
+    let lib = std::fs::read_to_string(root.join("src/lib.rs")).unwrap().replace(
+        "// ocre:routes",
+        "// ocre:routes\n        .route(\"/enqueue\", axum::routing::post(enqueue))\n        \
+         .route(\"/garbage\", axum::routing::post(garbage))\n        \
+         .route(\"/mail_later\", axum::routing::post(mail_later))\n        .route(\"/visits\", get(visits))",
+    ) + r#"
+type Form = axum::Form<std::collections::HashMap<String, String>>;
+
+async fn enqueue(axum::extract::State(ctx): axum::extract::State<Ctx>, axum::Form(form): Form) -> Result<&'static str> {
+    let job = jobs::Job::RecordVisit(jobs::RecordVisit { name: form["name"].clone() });
+    match form.get("delay") {
+        Some(delay) => {
+            let delay = std::time::Duration::from_secs(delay.parse().unwrap());
+            ocre::jobs::enqueue_in(&ctx, &job, delay).await?
+        }
+        None => ocre::jobs::enqueue(&ctx, &job).await?,
+    }
+    Ok("queued")
+}
+
+/// A message that is not an Ocre job: logged and dropped.
+async fn garbage(axum::extract::State(ctx): axum::extract::State<Ctx>) -> Result<&'static str> {
+    let queue = ctx.env().queue("JOBS")?;
+    let message = worker::MessageBuilder::new("garbage".to_owned()).content_type(worker::QueueContentType::Text).build();
+    worker::send::SendFuture::new(async move { queue.send(message).await }).await?;
+    Ok("queued")
+}
+
+async fn mail_later(axum::extract::State(ctx): axum::extract::State<Ctx>, axum::Form(form): Form) -> Result<&'static str> {
+    let email = ocre::mail::Email::new(form["to"].as_str(), "Later", "Sent from the jobs queue");
+    ocre::mail::deliver_later(&ctx, email).await?;
+    Ok("queued")
+}
+
+#[derive(serde::Deserialize)]
+struct Visit {
+    name: String,
+}
+
+async fn visits(axum::extract::State(ctx): axum::extract::State<Ctx>) -> Result<String> {
+    let rows: Vec<Visit> = ctx.db()?.all("SELECT name FROM visits ORDER BY id", ocre::params![]).await?;
+    Ok(rows.into_iter().map(|visit| visit.name).collect::<Vec<_>>().join(","))
+}
+"#;
+    std::fs::write(root.join("src/lib.rs"), lib).unwrap();
+    let server = start(&sandbox, &root);
+
+    // A job enqueued by a request runs in the queue consumer and writes to D1.
+    assert_eq!(post(&server, "/enqueue", &[("name", "ada")]).body, "queued");
+    wait_for_body(&server, "/visits", "ada");
+    wait_for_job_log(&sandbox, "[ocre jobs] record_visit done");
+
+    // Delayed.
+    let sent = Instant::now();
+    assert_eq!(post(&server, "/enqueue", &[("name", "bob"), ("delay", "2")]).body, "queued");
+    wait_for_body(&server, "/visits", "ada,bob");
+    assert!(sent.elapsed() >= Duration::from_secs(2), "ran after {:?}", sent.elapsed());
+    // Longer than Queues allow: the request fails, naming the fix.
+    assert_eq!(post(&server, "/enqueue", &[("name", "x"), ("delay", "172800")]).status, 500);
+    wait_for_log(&sandbox, "cannot delay a job by 172800 s");
+
+    // A failing job is retried later; an undecodable message is dropped.
+    assert_eq!(post(&server, "/enqueue", &[("name", "fail")]).body, "queued");
+    wait_for_job_log(&sandbox, "[ocre jobs] record_visit failed, retrying in 30 s: internal error: boom");
+    assert_eq!(post(&server, "/garbage", &[]).body, "queued");
+    let log = wait_for_job_log(&sandbox, "[ocre jobs] dropped message");
+    assert!(log.contains("not an Ocre job message (") && log.contains("): garbage"), "{log}");
+
+    // deliver_later: checked now (a bad address is a 400), sent by the consumer.
+    assert_eq!(post(&server, "/mail_later", &[("to", "not an address")]).status, 400);
+    assert_eq!(post(&server, "/mail_later", &[("to", "ada@example.com")]).body, "queued");
+    let log = wait_for_job_log(&sandbox, "[ocre jobs] mail done");
+    assert!(log.contains("To: ada@example.com\nSubject: Later\n\nSent from the jobs queue"), "{log}");
+
+    // Cron Triggers, fired through wrangler dev's local endpoint.
+    let cron = get(&server, "/cdn-cgi/local/scheduled?cron=0+3+*+*+*");
+    assert_eq!(cron.status, 200, "{}", cron.body);
+    wait_for_body(&server, "/visits", "cron");
+    wait_for_log(&sandbox, "[ocre cron] 0 3 * * * done");
+    assert_eq!(get(&server, "/cdn-cgi/local/scheduled?cron=*/5+*+*+*+*").status, 200);
+    wait_for_log(&sandbox, "[ocre cron] */5 * * * * failed: internal error: no scheduled task for cron `*/5 * * * *`");
+}
+
+type Socket = tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>;
+
+/// Opens a WebSocket like a browser page would, with extra handshake headers;
+/// `Err(status)` when the server refuses the handshake.
+fn websocket(server: &Server, path: &str, headers: &[(&'static str, &str)]) -> Result<Socket, u16> {
+    use tungstenite::client::IntoClientRequest;
+    let mut request = format!("{}{path}", server.base.replace("http://", "ws://")).into_client_request().unwrap();
+    for (name, value) in headers {
+        request.headers_mut().insert(*name, value.parse().unwrap());
+    }
+    match tungstenite::connect(request) {
+        Ok((socket, _)) => {
+            if let tungstenite::stream::MaybeTlsStream::Plain(stream) = socket.get_ref() {
+                stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            }
+            Ok(socket)
+        }
+        Err(tungstenite::Error::Http(response)) => Err(response.status().as_u16()),
+        Err(err) => panic!("WebSocket handshake failed: {err}"),
+    }
+}
+
+/// The next text message, skipping pings.
+fn receive(socket: &mut Socket) -> String {
+    loop {
+        match socket.read().expect("a broadcast within 10 s") {
+            tungstenite::Message::Text(text) => return text.to_string(),
+            tungstenite::Message::Ping(_) | tungstenite::Message::Pong(_) => {}
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+}
+
+#[test]
+#[ignore = "builds WebAssembly and runs wrangler dev; run with --ignored"]
+fn generated_app_broadcasts_changes_to_websockets_on_workerd() {
+    let sandbox = Sandbox::new();
+    sandbox.use_real_wrangler();
+    let root = sandbox.new_app("e2e-live", &[]);
+    let (report, ok) = sandbox.json(&["g", "scaffold", "Note", "title:string", "--realtime"], &root);
+    assert!(ok, "{report}");
+    let server = start(&sandbox, &root);
+
+    // A broadcast to a channel nobody listens to still succeeds.
+    assert_eq!(post(&server, "/notes", &[("title", "Before")]).status, 303);
+    let index = get(&server, "/notes");
+    assert!(index.body.contains("<div hx-ext=\"ws\" ws-connect=\"/realtime/notes\">"), "{}", index.body);
+    assert!(index.body.contains("<tr id=\"note_1\"><td>Before</td>"), "{}", index.body);
+
+    // Two browsers on the index page.
+    let mut first = websocket(&server, "/realtime/notes", &[]).unwrap();
+    let mut second = websocket(&server, "/realtime/notes", &[("sec-fetch-site", "same-origin")]).unwrap();
+
+    // Create: the escaped row goes to the top of both tables.
+    let created = post(&server, "/notes", &[("title", "Live <b>")]);
+    assert_eq!((created.status, created.location.as_str()), (303, "/notes/2"));
+    let row = "<tr id=\"note_2\"><td>Live &#60;b&#62;</td><td><a href=\"/notes/2\">Show</a> \
+               <a href=\"/notes/2/edit\">Edit</a></td></tr>";
+    let expected = format!("<tbody hx-swap-oob=\"afterbegin:#notes\">{row}</tbody>");
+    assert_eq!(receive(&mut first), expected);
+    assert_eq!(receive(&mut second), expected);
+
+    // Update: the row replaces the one with the same id.
+    assert_eq!(post(&server, "/notes/2", &[("title", "Renamed")]).status, 303);
+    let renamed = receive(&mut first);
+    assert!(renamed.starts_with("<tr id=\"note_2\"><td>Renamed</td>"), "{renamed}");
+    assert_eq!(receive(&mut second), renamed);
+
+    // One browser leaves; delete reaches the other.
+    first.close(None).unwrap();
+    while first.read().is_ok() {}
+    assert_eq!(post(&server, "/notes/2/delete", &[]).status, 303);
+    assert_eq!(receive(&mut second), "<div id=\"note_2\" hx-swap-oob=\"delete\"></div>");
+
+    // Refused: unknown channel, a plain GET, a handshake from another site.
+    assert_eq!(websocket(&server, "/realtime/secrets", &[]).err(), Some(404));
+    assert_eq!(get(&server, "/realtime/notes").status, 400, "plain GET");
+    let evil = [("origin", "https://evil.example"), ("sec-fetch-site", "cross-site")];
+    assert_eq!(websocket(&server, "/realtime/notes", &evil).err(), Some(403), "cross-site WebSocket hijacking");
+}
+
+const E2E_EN: &str = r#"en:
+  hello:
+    title: "Hello"
+    greeting: "Welcome, %{name}!"
+    posts:
+      one: "%{count} post"
+      other: "%{count} posts"
+    only_en: "English only"
+"#;
+
+const E2E_FR: &str = r#"fr:
+  hello:
+    title: "Bonjour"
+    greeting: "Bienvenue, %{name} !"
+    posts:
+      one: "%{count} article"
+      other: "%{count} articles"
+"#;
+
+const E2E_PAGES: &str = r#"use std::{
+    sync::atomic::{AtomicUsize, Ordering},
+    time::Duration,
+};
+
+use askama::Template;
+use axum::{
+    Router,
+    extract::State,
+    response::{Html, Response},
+    routing::{get, post},
+};
+use ocre::{
+    Ctx, Json, Result,
+    cache::{CacheControl, Conditional, ETag},
+    i18n::I18n,
+    render,
+};
+
+/// Runs of the cached computation in this Worker instance.
+static MISSES: AtomicUsize = AtomicUsize::new(0);
+
+pub fn routes() -> Router<Ctx> {
+    Router::new()
+        .route("/hello", get(hello))
+        .route("/{locale}/hello", get(hello))
+        .route("/cached", get(cached))
+        .route("/cached/delete", post(forget))
+        .route("/fresh", get(fresh))
+}
+
+#[derive(Template)]
+#[template(source = "<html lang=\"{{ i18n.locale() }}\"><h1>{{ i18n.t(\"hello.title\") }}</h1><p>{{ i18n.t(\"hello.greeting\").arg(\"name\", name) }}</p><p>{{ i18n.t(\"hello.posts\").count(count) }}</p><p>{{ i18n.t(\"hello.only_en\") }}</p></html>", ext = "html")]
+struct HelloView {
+    i18n: I18n,
+    name: String,
+    count: usize,
+}
+
+async fn hello(i18n: I18n) -> Result<Html<String>> {
+    render(&HelloView { i18n, name: "Ada <3".to_owned(), count: 3 })
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Token {
+    value: String,
+}
+
+async fn cached(State(ctx): State<Ctx>) -> Result<Json<serde_json::Value>> {
+    let token: Token = ocre::cache::fetch(&ctx, "e2e:token:v1", Duration::from_secs(3600), || async {
+        MISSES.fetch_add(1, Ordering::Relaxed);
+        Ok(Token { value: ocre::token::generate() })
+    })
+    .await?;
+    let read: Option<Token> = ocre::cache::read(&ctx, "e2e:token:v1").await?;
+    Ok(Json(serde_json::json!({
+        "value": token.value,
+        "read": read.map(|token| token.value),
+        "misses": MISSES.load(Ordering::Relaxed),
+    })))
+}
+
+async fn forget(State(ctx): State<Ctx>) -> Result<&'static str> {
+    ocre::cache::delete(&ctx, "e2e:token:v1").await?;
+    ocre::cache::write(&ctx, "e2e:other:v1", &1, Duration::from_secs(60)).await?;
+    Ok("deleted")
+}
+
+async fn fresh(i18n: I18n, conditional: Conditional) -> Result<Response> {
+    let etag = ETag::of(&("v1", i18n.locale()))?;
+    conditional.fresh_when(etag, CacheControl::no_cache(), || Ok(Html(i18n.t("hello.title").to_string())))
+}
+"#;
+
+#[test]
+#[ignore = "builds WebAssembly and runs wrangler dev; run with --ignored"]
+fn generated_app_translates_and_caches_on_workerd() {
+    let sandbox = Sandbox::new();
+    sandbox.use_real_wrangler();
+    let root = sandbox.new_app("e2e-i18n", &[]);
+    for args in [&["g", "locale", "en", "fr"][..], &["g", "cache"]] {
+        let (report, ok) = sandbox.json(args, &root);
+        assert!(ok, "{report}");
+    }
+    std::fs::write(root.join("locales/en.yml"), E2E_EN).unwrap();
+    std::fs::write(root.join("locales/fr.yml"), E2E_FR).unwrap();
+    std::fs::write(root.join("src/pages.rs"), E2E_PAGES).unwrap();
+    let lib = std::fs::read_to_string(root.join("src/lib.rs"))
+        .unwrap()
+        .replace("// ocre:modules", "// ocre:modules\nmod pages;")
+        .replace("// ocre:routes", "// ocre:routes\n        .merge(pages::routes())");
+    std::fs::write(root.join("src/lib.rs"), lib).unwrap();
+    let cargo = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    std::fs::write(root.join("Cargo.toml"), cargo.replace("[dependencies]\n", "[dependencies]\nserde_json = \"1\"\n"))
+        .unwrap();
+    let server = start(&sandbox, &root);
+
+    // Accept-Language picks French; interpolated values are escaped; plurals
+    // follow French rules; a key missing in French is visible in dev builds.
+    let french = send(&server, "GET", "/hello", &[("accept-language", "fr-CH, fr;q=0.9, en;q=0.8")], &[]);
+    assert_eq!(french.status, 200, "{}", french.body);
+    assert_eq!(
+        french.body,
+        "<html lang=\"fr\"><h1>Bonjour</h1><p>Bienvenue, Ada &#60;3 !</p><p>3 articles</p>\
+         <p>translation missing: fr.hello.only_en</p></html>"
+    );
+    let english = get(&server, "/hello");
+    assert!(english.body.starts_with("<html lang=\"en\"><h1>Hello</h1><p>Welcome, Ada &#60;3!</p><p>3 posts</p>"));
+    assert!(english.body.contains("<p>English only</p>"), "{}", english.body);
+    // The path segment wins over the header; the cookie over the header.
+    let path = send(&server, "GET", "/en/hello", &[("accept-language", "fr")], &[]);
+    assert!(path.body.contains("<h1>Hello</h1>"), "{}", path.body);
+    assert_eq!(get(&server, "/xx/hello").status, 404);
+    let cookie = send(&server, "GET", "/hello", &[("cookie", "locale=fr"), ("accept-language", "en")], &[]);
+    assert!(cookie.body.contains("<h1>Bonjour</h1>"), "{}", cookie.body);
+
+    // Read-through cache: the second request reads KV instead of computing.
+    let (status, first) = json(&server, "GET", "/cached", "");
+    assert_eq!(status, 200, "{first}");
+    assert_eq!((first["misses"].as_u64(), &first["read"]), (Some(1), &first["value"]), "{first}");
+    let (_, second) = json(&server, "GET", "/cached", "");
+    assert_eq!((second["misses"].as_u64(), &second["value"]), (Some(1), &first["value"]), "{second}");
+    let deleted = post(&server, "/cached/delete", &[]);
+    assert_eq!((deleted.status, deleted.body.as_str()), (200, "deleted"));
+    let (_, third) = json(&server, "GET", "/cached", "");
+    assert_eq!(third["misses"].as_u64(), Some(2), "{third}");
+    assert_ne!(third["value"], first["value"]);
+
+    // Conditional GET: the same version answers 304 without a body.
+    let page = send(&server, "GET", "/fresh", &[("accept-language", "fr")], &[]);
+    let etag = page.headers["etag"].to_str().unwrap().to_owned();
+    assert_eq!((page.status, page.body.as_str()), (200, "Bonjour"));
+    assert_eq!(page.headers["cache-control"], "private, no-cache");
+    let again = send(&server, "GET", "/fresh", &[("accept-language", "fr"), ("if-none-match", &etag)], &[]);
+    assert_eq!((again.status, again.body.as_str()), (304, ""));
+    let other = send(&server, "GET", "/fresh", &[("accept-language", "en"), ("if-none-match", &etag)], &[]);
+    assert_eq!((other.status, other.body.as_str()), (200, "Hello"), "the locale is part of the version");
+}
+
+/// Routes exercising the rest of `ocre::storage` directly.
+const E2E_FILES: &str = r#"use axum::{
+    Router,
+    body::Body,
+    extract::{Path, Query, State},
+    http::{HeaderMap, header},
+    routing::{get, post},
+};
+use ocre::{Ctx, Error, OptionExt, Result, storage};
+
+pub fn routes() -> Router<Ctx> {
+    Router::new()
+        .route("/e2e/objects", get(object).delete(remove))
+        .route("/e2e/raw", post(raw))
+        .route("/e2e/bytes", post(bytes))
+        .route("/e2e/photos/{id}/keys", get(keys))
+}
+
+#[derive(serde::Deserialize)]
+struct Key {
+    key: String,
+}
+
+async fn object(State(ctx): State<Ctx>, Query(Key { key }): Query<Key>) -> Result<Vec<u8>> {
+    storage::read(&ctx, &key).await?.or_404()
+}
+
+async fn remove(State(ctx): State<Ctx>, Query(Key { key }): Query<Key>) -> Result<&'static str> {
+    storage::delete(&ctx, &key).await?;
+    Ok("deleted")
+}
+
+/// A request body streamed into R2 (no multipart).
+async fn raw(State(ctx): State<Ctx>, headers: HeaderMap, body: Body) -> Result<String> {
+    let size = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok()?.parse().ok())
+        .ok_or_else(|| Error::bad_request("Content-Length required"))?;
+    Ok(storage::store_body(&ctx, "raw", "raw.bin", "application/octet-stream", size, body).await?.key)
+}
+
+async fn bytes(State(ctx): State<Ctx>) -> Result<String> {
+    Ok(storage::store_bytes(&ctx, "generated", "hello.txt", "text/plain", b"hello".to_vec()).await?.key)
+}
+
+/// The R2 keys of a photo's files, `image` then `notes` (empty when none).
+async fn keys(State(ctx): State<Ctx>, Path(id): Path<i64>) -> Result<String> {
+    let photo = crate::models::photo::find(&ctx, id).await?.or_404()?;
+    Ok(format!("{} {}", photo.image_key, photo.notes_key.unwrap_or_default()))
+}
+"#;
+
+/// A `multipart/form-data` request, as a browser form with file inputs sends it:
+/// text fields, then `(name, filename, content type, bytes)` files.
+fn multipart(
+    server: &Server,
+    method: &str,
+    path: &str,
+    fields: &[(&str, &str)],
+    files: &[(&str, &str, &str, &[u8])],
+) -> Page {
+    let boundary = "----e2eBoundary7MA4YWxkTrZu0gW";
+    let mut body = Vec::new();
+    for (name, value) in fields {
+        body.extend(
+            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n").bytes(),
+        );
+    }
+    for (name, filename, content_type, bytes) in files {
+        body.extend(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\nContent-Type: {content_type}\r\n\r\n"
+            )
+            .bytes(),
+        );
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend(format!("--{boundary}--\r\n").bytes());
+    let url = format!("{}{path}", server.base);
+    let content_type = format!("multipart/form-data; boundary={boundary}");
+    let response = match method {
+        "PUT" => agent().put(&url).content_type(&content_type).header("accept", "application/json").send(&body[..]),
+        _ => agent().post(&url).content_type(&content_type).header("accept", "text/html").send(&body[..]),
+    };
+    page(response.unwrap())
+}
+
+/// GET with headers, returning the raw bytes of the body.
+fn download(server: &Server, path: &str, headers: &[(&str, &str)]) -> (u16, ureq::http::HeaderMap, Vec<u8>) {
+    let mut request = agent().get(&format!("{}{path}", server.base));
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let mut response = request.call().unwrap();
+    let status = response.status().as_u16();
+    let headers = response.headers().clone();
+    let body = if status == 304 { Vec::new() } else { response.body_mut().read_to_vec().unwrap() };
+    (status, headers, body)
+}
+
+/// Bytes that break naive parsers: every byte value, CRLFs and boundary-like dashes.
+fn binary_file(len: usize) -> Vec<u8> {
+    let mut bytes: Vec<u8> = (0..len).map(|i| (i * 7 % 256) as u8).collect();
+    bytes.splice(0..0, b"\x89PNG\r\n\x1a\n\r\n------e2eBoundary\r\n".iter().copied());
+    bytes
+}
+
+#[test]
+#[ignore = "builds WebAssembly and runs wrangler dev; run with --ignored"]
+fn generated_app_stores_uploads_in_r2_on_workerd() {
+    let sandbox = Sandbox::new();
+    sandbox.use_real_wrangler();
+    let root = sandbox.new_app("e2e-files", &[]);
+    for args in [
+        &["g", "scaffold", "Photo", "title:string", "image:attachment", "notes:attachment?"][..],
+        &["g", "api", "Document", "name:string", "file:attachment?"],
+    ] {
+        let (report, ok) = sandbox.json(args, &root);
+        assert!(ok, "{report}");
+    }
+    let wrangler = std::fs::read_to_string(root.join("wrangler.toml")).unwrap();
+    assert!(
+        wrangler.contains("[[r2_buckets]]\nbinding = \"STORAGE\"\nbucket_name = \"e2e-files-storage\""),
+        "{wrangler}"
+    );
+    // Small limits, to reach them with small requests.
+    for (path, rules) in [("src/models/photo.rs", "IMAGE"), ("src/models/document.rs", "FILE")] {
+        let model = std::fs::read_to_string(root.join(path)).unwrap().replacen(
+            &format!("pub const {rules}: Rules = Rules {{\n    max_bytes: 10 * 1024 * 1024,"),
+            &format!("pub const {rules}: Rules = Rules {{\n    max_bytes: 64 * 1024,"),
+            1,
+        );
+        std::fs::write(root.join(path), model).unwrap();
+    }
+    std::fs::write(root.join("src/e2e_files.rs"), E2E_FILES).unwrap();
+    let lib = std::fs::read_to_string(root.join("src/lib.rs"))
+        .unwrap()
+        .replace("// ocre:modules", "// ocre:modules\nmod e2e_files;")
+        .replace("// ocre:routes", "// ocre:routes\n        .merge(e2e_files::routes())");
+    std::fs::write(root.join("src/lib.rs"), lib).unwrap();
+    let server = start(&sandbox, &root);
+    let object = |key: &str| download(&server, &format!("/e2e/objects?key={key}"), &[]);
+
+    // Upload through the scaffolded form, then download it back byte for byte.
+    let form = get(&server, "/photos/new");
+    assert!(
+        form.body.contains(r#"enctype="multipart/form-data""#) && form.body.contains(r#"type="file" name="image""#)
+    );
+    let png = binary_file(40_000);
+    let created =
+        multipart(&server, "POST", "/photos", &[("title", "Sunset")], &[("image", "sunset é.png", "image/png", &png)]);
+    assert_eq!((created.status, created.location.as_str()), (303, "/photos/1"), "{}", created.body);
+    let shown = get(&server, "/photos/1");
+    assert!(shown.body.contains(r#"<a href="/photos/1/image">sunset é.png</a> (39.1 KB)"#), "{}", shown.body);
+    let (status, headers, body) = download(&server, "/photos/1/image", &[]);
+    assert_eq!(status, 200);
+    assert!(body == png, "downloaded {} bytes, uploaded {}", body.len(), png.len());
+    assert_eq!(headers["content-type"], "image/png", "{headers:?}");
+    assert_eq!(headers["content-length"], png.len().to_string().as_str(), "{headers:?}");
+    assert_eq!(
+        headers["content-disposition"],
+        "inline; filename=\"sunset _.png\"; filename*=UTF-8''sunset%20%C3%A9.png"
+    );
+    assert_eq!(headers["accept-ranges"], "bytes");
+    assert_eq!(headers["cache-control"], "private, no-cache");
+    let etag = headers["etag"].to_str().unwrap().to_owned();
+    let (status, _, body) = download(&server, "/photos/1/image", &[("if-none-match", &etag)]);
+    assert_eq!((status, body.len()), (304, 0), "conditional GET");
+    let (status, headers, body) = download(&server, "/photos/1/image", &[("range", "bytes=4-9")]);
+    assert_eq!((status, &body[..]), (206, &png[4..10]));
+    assert_eq!(headers["content-range"], format!("bytes 4-9/{}", png.len()).as_str());
+    let (status, headers, _) = download(&server, "/photos/1/image", &[("range", "bytes=999999-")]);
+    assert_eq!(status, 416);
+    assert_eq!(headers["content-range"], format!("bytes */{}", png.len()).as_str());
+    assert_eq!(get(&server, "/photos/1/notes").status, 404, "no optional file yet");
+    let keys = get(&server, "/e2e/photos/1/keys").body;
+    let image_key = keys.split(' ').next().unwrap().to_owned();
+    assert!(image_key.starts_with("photos/image/"), "{keys}");
+    assert_eq!(object(&image_key).2, png, "stored in the local R2 bucket");
+
+    // Validation: required, size and type; nothing is stored for invalid forms.
+    let missing = multipart(&server, "POST", "/photos", &[("title", "No file")], &[]);
+    assert_eq!(missing.status, 422);
+    assert!(missing.body.contains("<li>Image can&#39;t be blank</li>"), "{}", missing.body);
+    assert!(missing.body.contains(r#"value="No file""#), "typed values are kept");
+    let big = binary_file(70_000);
+    let svg: &[u8] = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script></svg>";
+    let invalid = multipart(
+        &server,
+        "POST",
+        "/photos",
+        &[("title", "x")],
+        &[("image", "a.svg", "image/svg+xml", svg), ("notes", "big.png", "image/png", &big)],
+    );
+    assert_eq!(invalid.status, 422);
+    assert!(invalid.body.contains("<li>Image has an unsupported type (allowed: image/png, image/jpeg, image/gif, image/webp, application/pdf, text/plain)</li>"), "{}", invalid.body);
+    let too_large =
+        multipart(&server, "POST", "/photos", &[("title", "x")], &[("image", "big.png", "image/png", &big)]);
+    assert!(too_large.body.contains("<li>Image is too large (maximum is 64 KB)</li>"), "{}", too_large.body);
+    assert_eq!(get(&server, "/photos/2").status, 404);
+
+    // Update: a new image and a notes file replace the old ones, which leave R2.
+    let notes: &[u8] = b"Shot at 6 pm.\r\n";
+    let updated = multipart(
+        &server,
+        "POST",
+        "/photos/1",
+        &[("title", "Sunset 2")],
+        &[("image", "b.jpg", "image/jpeg", b"JPEG"), ("notes", "notes.txt", "text/plain", notes)],
+    );
+    assert_eq!((updated.status, updated.location.as_str()), (303, "/photos/1"), "{}", updated.body);
+    assert_eq!(object(&image_key).0, 404, "the replaced image is deleted");
+    let (status, headers, body) = download(&server, "/photos/1/image", &[]);
+    assert_eq!((status, &body[..]), (200, &b"JPEG"[..]));
+    assert_eq!(headers["content-type"], "image/jpeg");
+    let (status, _, body) = download(&server, "/photos/1/notes", &[]);
+    assert_eq!((status, &body[..]), (200, notes));
+    let keys = get(&server, "/e2e/photos/1/keys").body;
+    let (image_key, notes_key) = keys.split_once(' ').map(|(a, b)| (a.to_owned(), b.to_owned())).unwrap();
+    assert!(get(&server, "/photos/1/edit").body.contains(r#"name="remove_notes""#));
+    let kept = multipart(&server, "POST", "/photos/1", &[("title", "Kept"), ("remove_notes", "true")], &[]);
+    assert_eq!(kept.status, 303, "{}", kept.body);
+    assert_eq!(get(&server, "/photos/1/notes").status, 404, "removed");
+    assert_eq!(object(&notes_key).0, 404, "and deleted from R2");
+    assert_eq!(download(&server, "/photos/1/image", &[]).2, b"JPEG", "no new file keeps the image");
+
+    // Delete removes the objects with the record.
+    let deleted = post(&server, "/photos/1/delete", &[]);
+    assert_eq!((deleted.status, deleted.location.as_str()), (303, "/photos"));
+    assert_eq!(object(&image_key).0, 404);
+    assert_eq!(get(&server, "/photos/1/image").status, 404);
+
+    // JSON API: optional file uploaded with PUT, served, removed.
+    let created = page(
+        agent()
+            .post(&format!("{}/api/documents", server.base))
+            .content_type("application/json")
+            .send(r#"{"name": "Spec"}"#)
+            .unwrap(),
+    );
+    assert_eq!(created.status, 201, "{}", created.body);
+    let (status, document): (u16, serde_json::Value) = (created.status, serde_json::from_str(&created.body).unwrap());
+    assert_eq!((status, &document["file_key"]), (201, &serde_json::Value::Null), "{document}");
+    let pdf = binary_file(1000);
+    let put = multipart(&server, "PUT", "/api/documents/1/file", &[], &[("file", "spec.pdf", "application/pdf", &pdf)]);
+    assert_eq!(put.status, 200, "{}", put.body);
+    let document: serde_json::Value = serde_json::from_str(&put.body).unwrap();
+    assert_eq!(
+        (document["file_filename"].as_str(), document["file_size"].as_i64()),
+        (Some("spec.pdf"), Some(pdf.len() as i64))
+    );
+    let (status, headers, body) = download(&server, "/api/documents/1/file", &[]);
+    assert!(status == 200 && body == pdf);
+    assert_eq!(headers["content-disposition"], "inline; filename=\"spec.pdf\"");
+    let file_key = document["file_key"].as_str().unwrap().to_owned();
+    let empty = multipart(&server, "PUT", "/api/documents/1/file", &[], &[]);
+    assert_eq!(empty.status, 422);
+    assert!(empty.body.contains(r#""fields":{"file":["can't be blank"]}"#), "{}", empty.body);
+    let removed = page(agent().delete(&format!("{}/api/documents/1/file", server.base)).call().unwrap());
+    assert_eq!(removed.status, 200, "{}", removed.body);
+    let (status, document): (u16, serde_json::Value) = (removed.status, serde_json::from_str(&removed.body).unwrap());
+    assert_eq!((status, &document["file_key"]), (200, &serde_json::Value::Null), "{document}");
+    assert_eq!(get(&server, "/api/documents/1/file").status, 404);
+    assert_eq!(object(&file_key).0, 404);
+
+    // Framework API: bytes and a streamed body, read back, deleted.
+    let key = post(&server, "/e2e/bytes", &[]).body;
+    assert!(key.starts_with("generated/"), "{key}");
+    assert_eq!(object(&key).2, b"hello");
+    let raw = binary_file(300_000);
+    let mut response = agent().post(&format!("{}/e2e/raw", server.base)).send(&raw[..]).unwrap();
+    let raw_key = response.body_mut().read_to_string().unwrap();
+    assert!(raw_key.starts_with("raw/"), "{raw_key}");
+    assert!(object(&raw_key).2 == raw, "streamed body stored byte for byte");
+    let removed = page(agent().delete(&format!("{}/e2e/objects?key={raw_key}", server.base)).call().unwrap());
+    assert_eq!((removed.status, removed.body.as_str()), (200, "deleted"));
+    assert_eq!(object(&raw_key).0, 404);
+
+    // Over the request limit: refused from Content-Length, before the body is read.
+    let over = multipart(
+        &server,
+        "PUT",
+        "/api/documents/1/file",
+        &[],
+        &[("file", "big.pdf", "application/pdf", &binary_file(200_000))],
+    );
+    assert_eq!(over.status, 413, "{}", over.body);
+    assert!(over.body.contains(r#""message":"The request is too large (maximum is 128 KB)""#), "{}", over.body);
 }

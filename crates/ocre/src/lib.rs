@@ -8,6 +8,8 @@
 //!   that name the fix.
 
 mod api;
+/// Caching: read-through values in Workers KV, HTTP `Cache-Control`/`ETag` and 304 responses.
+pub mod cache;
 mod clock;
 mod error;
 mod fields;
@@ -16,6 +18,10 @@ mod fields;
 pub mod graphql;
 #[cfg(feature = "html")]
 mod htmx;
+/// Translations: `locales/*.yml`, `%{name}` interpolation, plurals, locale per request.
+pub mod i18n;
+/// Background jobs (Cloudflare Queues) and scheduled tasks (Cron Triggers).
+pub mod jobs;
 /// JSON Web Tokens (HS256) for API clients.
 pub mod jwt;
 /// Email: send with adapters (log, Resend, Cloudflare), receive from Email Routing.
@@ -24,9 +30,14 @@ mod names;
 /// Password hashing (PBKDF2-HMAC-SHA256).
 pub mod password;
 mod protect;
+/// Realtime updates: WebSocket channels on a Durable Object, HTML broadcasts for htmx (feature `realtime`).
+#[cfg(feature = "realtime")]
+pub mod realtime;
 mod runtime;
 mod session;
 mod sql;
+/// File storage in Cloudflare R2: multipart uploads, attachments, streamed downloads.
+pub mod storage;
 #[cfg(test)]
 #[path = "../tests/support.rs"]
 mod support;

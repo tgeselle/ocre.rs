@@ -35,6 +35,14 @@ fn add_columns_give_existing_rows_a_value() {
         infer("add_author_to_posts", &fields(&["author:references"])).unwrap_err().message,
         "`author_id` must be optional when added to an existing table"
     );
+    let error = infer("add_cover_to_posts", &fields(&["cover:attachment"])).unwrap_err();
+    assert_eq!(error.message, "`cover` must be optional when added to an existing table");
+    assert_eq!(error.hint.as_deref(), Some("existing rows have no file: use `name:attachment?`"));
+    assert_eq!(
+        infer("add_cover_to_posts", &fields(&["cover:attachment?"])).unwrap(),
+        "ALTER TABLE posts ADD COLUMN cover_key TEXT;\nALTER TABLE posts ADD COLUMN cover_filename TEXT;\n\
+         ALTER TABLE posts ADD COLUMN cover_content_type TEXT;\nALTER TABLE posts ADD COLUMN cover_size INTEGER;\n"
+    );
 }
 
 #[test]
@@ -43,6 +51,11 @@ fn remove_columns_from_the_name_or_the_fields() {
     assert_eq!(
         infer("remove_old_from_posts", &fields(&["a:string", "b:integer"])).unwrap(),
         "ALTER TABLE posts DROP COLUMN a;\nALTER TABLE posts DROP COLUMN b;\n"
+    );
+    assert_eq!(
+        infer("remove_cover_from_posts", &fields(&["cover:attachment?"])).unwrap(),
+        "ALTER TABLE posts DROP COLUMN cover_key;\nALTER TABLE posts DROP COLUMN cover_filename;\n\
+         ALTER TABLE posts DROP COLUMN cover_content_type;\nALTER TABLE posts DROP COLUMN cover_size;\n"
     );
 }
 

@@ -71,7 +71,7 @@ fn action_names(actions: &[String]) -> Result<Vec<String>, CliError> {
 }
 
 /// `password_reset` -> `PasswordReset`.
-fn pascal(snake: &str) -> String {
+pub(super) fn pascal(snake: &str) -> String {
     snake
         .split('_')
         .map(|word| {

@@ -6,7 +6,7 @@ use super::{
     Edits,
     fields::{Field, FieldType, parse_fields},
     model::ensure_model,
-    register_routes,
+    register_routes, with_ocre_feature,
 };
 use crate::{CliResult, names::ModelNames, output::CliError, project::Project};
 
@@ -17,6 +17,12 @@ const GRAPHQL_DEP: &str = r#"async-graphql = { version = "7.2.1", default-featur
 pub fn api(project: &Project, name: &str, specs: &[String], graphql: bool) -> CliResult {
     let names = ModelNames::parse(name)?;
     let fields = parse_fields(specs)?;
+    if let Some(file) = fields.iter().find(|f| f.is_attachment() && !f.optional) {
+        return Err(CliError::new(format!("attachment `{}` must be optional in a JSON API", file.name)).hint(format!(
+            "JSON cannot carry a file, so create cannot require one: use `{0}:attachment?`, then upload with `curl -X PUT -F {0}=@file http://localhost:8787/api/<plural>/1/{0}`",
+            file.name
+        )));
+    }
     let command = format!("ocre g api {name} {}{}", specs.join(" "), if graphql { " --graphql" } else { "" });
     let module = format!("{}_api", names.plural);
     let mut edits = Edits::new(project);
@@ -53,36 +59,20 @@ pub fn api(project: &Project, name: &str, specs: &[String], graphql: bool) -> Cl
 
 /// Turns on Ocre's `graphql` feature and adds the async-graphql dependency.
 fn with_graphql(cargo_toml: &str) -> Result<String, CliError> {
-    let mut out = String::with_capacity(cargo_toml.len() + GRAPHQL_DEP.len() + 32);
-    let mut found = false;
-    let has_dep = cargo_toml.lines().any(|line| line.starts_with("async-graphql"));
-    for line in cargo_toml.lines() {
-        if line.starts_with("ocre = {") && line.ends_with('}') {
-            found = true;
-            if line.contains("\"graphql\"") {
-                out.push_str(line);
-            } else if let Some((before, after)) = line.split_once("features = [") {
-                write!(out, "{before}features = [\"graphql\", {after}").expect("writing to a String");
-            } else {
-                write!(out, "{}, features = [\"graphql\"] }}", line.trim_end_matches('}').trim_end())
-                    .expect("writing to a String");
-            }
-            out.push('\n');
-            if !has_dep {
-                out.push_str(GRAPHQL_DEP);
-                out.push('\n');
-            }
-        } else {
-            out.push_str(line);
+    let cargo = with_ocre_feature(cargo_toml, "graphql")?;
+    if cargo.lines().any(|line| line.starts_with("async-graphql")) {
+        return Ok(cargo);
+    }
+    let mut out = String::with_capacity(cargo.len() + GRAPHQL_DEP.len() + 1);
+    for line in cargo.lines() {
+        out.push_str(line);
+        out.push('\n');
+        if line.starts_with("ocre = {") {
+            out.push_str(GRAPHQL_DEP);
             out.push('\n');
         }
     }
-    if found {
-        Ok(out)
-    } else {
-        Err(CliError::new("Cargo.toml has no one-line `ocre = { ... }` dependency")
-            .hint("declare Ocre as `ocre = { ... }` on one line under [dependencies], then run the command again"))
-    }
+    Ok(out)
 }
 
 fn new_schema(module: &str, names: &ModelNames) -> String {
@@ -156,6 +146,57 @@ fn module_rs(names: &ModelNames, fields: &[Field], command: &str, graphql: bool)
     let ModelNames { model, singular, plural, human_plural, .. } = names;
     let gql = if graphql { graphql_rs(names, fields) } else { String::new() };
     let also = if graphql { " and GraphQL" } else { "" };
+    let files: Vec<&Field> = fields.iter().filter(|f| f.is_attachment()).collect();
+    let (mut file_docs, mut file_routes, mut file_items) = (String::new(), String::new(), String::new());
+    for file in &files {
+        let (name, rules) = (&file.name, file.rules_const());
+        let limit = format!("{}_LIMIT", rules);
+        write!(
+            file_docs,
+            "\n//! GET /api/{plural}/{{id}}/{name}        the file (404 when none)\n//! PUT /api/{plural}/{{id}}/{name}        multipart body with the file as `{name}` (`curl -X PUT -F {name}=@file`); replaces it\n//! DELETE /api/{plural}/{{id}}/{name}     removes the file"
+        )
+        .expect("writing to a String");
+        write!(file_routes, "\n        .route(\"/api/{plural}/{{id}}/{name}\", get({name}_file).put(attach_{name}).delete(remove_{name}))")
+            .expect("writing to a String");
+        write!(
+            file_items,
+            r#"
+/// Largest `PUT .../{name}` body: the file at its limit, plus room for the multipart framing.
+const {limit}: usize = {singular}::{rules}.max_bytes + 64 * 1024;
+
+async fn {name}_file(State(ctx): State<Ctx>, Path(id): Path<i64>, headers: HeaderMap) -> ApiResult<Response> {{
+    let record = {singular}::find(&ctx, id).await?.or_404()?;
+    Ok(storage::serve(&ctx, &record.{name}().or_404()?, &headers, Disposition::Inline).await?)
+}}
+
+/// Stores the file and deletes the one it replaces; 422 when the file is missing or not allowed.
+async fn attach_{name}(
+    State(ctx): State<Ctx>,
+    Path(id): Path<i64>,
+    Multipart(mut form): Multipart<{limit}>,
+) -> ApiResult<Json<{model}>> {{
+    let upload = form.file("{name}").ok_or_else(|| Error::Invalid(vec![FieldError::new("{name}", "can't be blank")]))?;
+    let changes = {model}Changes {{ {name}: Some(Some(upload)), ..Default::default() }};
+    Ok(Json({singular}::update(&ctx, id, changes).await?.or_404()?))
+}}
+
+async fn remove_{name}(State(ctx): State<Ctx>, Path(id): Path<i64>) -> ApiResult<Json<{model}>> {{
+    let changes = {model}Changes {{ {name}: Some(None), ..Default::default() }};
+    Ok(Json({singular}::update(&ctx, id, changes).await?.or_404()?))
+}}
+"#
+        )
+        .expect("writing to a String");
+    }
+    let (http_import, response_import, ocre_import) = if files.is_empty() {
+        ("http::StatusCode", "", "")
+    } else {
+        (
+            "http::{HeaderMap, StatusCode}",
+            "\n    response::Response,",
+            ", FieldError, storage::{self, Disposition, Multipart}",
+        )
+    };
     format!(
         r#"//! {human_plural} JSON API{also}. Generated by `{command}`.
 //! Queries and rules live in the model, `crate::models::{singular}`.
@@ -164,23 +205,23 @@ fn module_rs(names: &ModelNames, fields: &[Field], command: &str, graphql: bool)
 //! GET /api/{plural}/{{id}}             one
 //! POST /api/{plural}                  create (every required field), 201
 //! PATCH /api/{plural}/{{id}}           update (only the fields sent; null clears an optional field)
-//! DELETE /api/{plural}/{{id}}          delete, 204
+//! DELETE /api/{plural}/{{id}}          delete, 204{file_docs}
 //! Failed validations answer 422 with {{"error": {{"fields": {{"title": ["can't be blank"]}}}}}}.
 
 use axum::{{
     Router,
     extract::{{Path, State}},
-    http::StatusCode,
+    {http_import},{response_import}
     routing::get,
 }};
-use ocre::{{ApiResult, Created, Ctx, Error, Json, OptionExt, Page}};
+use ocre::{{ApiResult, Created, Ctx, Error, Json, OptionExt, Page{ocre_import}}};
 
 use crate::models::{singular}::{{self, New{model}, {model}, {model}Changes}};
 
 pub fn routes() -> Router<Ctx> {{
     Router::new()
         .route("/api/{plural}", get(index).post(create))
-        .route("/api/{plural}/{{id}}", get(show).patch(update).delete(delete))
+        .route("/api/{plural}/{{id}}", get(show).patch(update).delete(delete)){file_routes}
 }}
 
 async fn index(State(ctx): State<Ctx>, page: Page) -> ApiResult<Json<Vec<{model}>>> {{
@@ -206,7 +247,7 @@ async fn update(
 async fn delete(State(ctx): State<Ctx>, Path(id): Path<i64>) -> ApiResult<StatusCode> {{
     if {singular}::delete(&ctx, id).await? {{ Ok(StatusCode::NO_CONTENT) }} else {{ Err(Error::NotFound.into()) }}
 }}
-{gql}"#
+{file_items}{gql}"#
     )
 }
 
@@ -223,6 +264,16 @@ fn graphql_rs(names: &ModelNames, fields: &[Field]) -> String {
     let mut patch_values = String::new();
     for field in fields {
         let (name, ty, column) = (&field.name, field.rust_type(), field.column_type());
+        if field.is_attachment() {
+            // The file's columns are readable; files are uploaded over REST.
+            for (column, ty) in field.columns() {
+                writeln!(node_fields, "    pub {column}: {ty},").expect("writing to a String");
+                writeln!(node_values, "            {column}: record.{column},").expect("writing to a String");
+            }
+            writeln!(input_values, "            {name}: None,").expect("writing to a String");
+            writeln!(patch_values, "            {name}: None,").expect("writing to a String");
+            continue;
+        }
         writeln!(node_fields, "    pub {name}: {column},").expect("writing to a String");
         writeln!(node_values, "            {name}: record.{name},").expect("writing to a String");
         if field.ty == FieldType::Boolean {
@@ -242,7 +293,7 @@ fn graphql_rs(names: &ModelNames, fields: &[Field]) -> String {
             writeln!(patch_values, "            {name}: patch.{name},").expect("writing to a String");
         }
     }
-    let uses_maybe = if fields.iter().any(|f| f.optional) { ", MaybeUndefined" } else { "" };
+    let uses_maybe = if fields.iter().any(|f| f.optional && !f.is_attachment()) { ", MaybeUndefined" } else { "" };
     format!(
         r#"
 // ---- GraphQL ----

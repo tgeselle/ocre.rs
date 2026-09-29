@@ -20,6 +20,9 @@ pub enum Error {
     Forbidden,
     /// 422: failed validations, one entry per field error (see [`Validator`](crate::Validator)).
     Invalid(Vec<FieldError>),
+    /// 413: the request body is over a limit (see
+    /// [`storage::Multipart`](crate::storage::Multipart)); the message is shown to the user.
+    PayloadTooLarge(String),
     /// 500; the message goes to the Worker logs only.
     Internal(String),
 }
@@ -61,6 +64,7 @@ impl Error {
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "Unauthorized".to_owned(), vec![]),
             Self::Forbidden => (StatusCode::FORBIDDEN, "Forbidden".to_owned(), vec![]),
             Self::Invalid(fields) => (StatusCode::UNPROCESSABLE_ENTITY, "Validation failed".to_owned(), fields),
+            Self::PayloadTooLarge(message) => (StatusCode::PAYLOAD_TOO_LARGE, message, vec![]),
             Self::Internal(message) => {
                 log_internal(&message);
                 (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_owned(), vec![])
@@ -81,6 +85,7 @@ impl std::fmt::Display for Error {
                 let messages: Vec<String> = fields.iter().map(FieldError::full_message).collect();
                 write!(f, "invalid: {}", messages.join(", "))
             }
+            Self::PayloadTooLarge(message) => write!(f, "payload too large: {message}"),
             Self::Internal(message) => write!(f, "internal error: {message}"),
         }
     }
@@ -95,7 +100,7 @@ impl From<worker::Error> for Error {
 }
 
 /// Worker logs (visible in `wrangler tail`); stderr in native unit tests.
-fn log_internal(message: &str) {
+pub(crate) fn log_internal(message: &str) {
     #[cfg(target_arch = "wasm32")]
     worker::console_error!("[ocre] {message}");
     #[cfg(not(target_arch = "wasm32"))]

@@ -28,11 +28,15 @@ fn rejects_bad_fields() {
     assert_eq!(error("done:boolean?"), "boolean field `done` cannot be optional");
     assert_eq!(error("2x:references"), "invalid field name `2x`");
     assert!(parse_fields(&["a:string".into(), "a:text".into()]).is_err(), "duplicate");
+    assert_eq!(error("avatar:attachment^"), "attachment `avatar` cannot be unique");
+    assert_eq!(error("edit:attachment"), "attachment name `edit` clashes with a scaffold route");
+    let clash = parse_fields(&["avatar:attachment".into(), "avatar_size:integer".into()]).unwrap_err();
+    assert_eq!(clash.message, "field `avatar_size` is listed twice");
 }
 
 #[test]
 fn sql_columns() {
-    let column = |spec: &str| Field::parse(spec).unwrap().sql_column();
+    let column = |spec: &str| Field::parse(spec).unwrap().sql_columns().join(", ");
     assert_eq!(column("title:string"), "title TEXT NOT NULL");
     assert_eq!(column("summary:text?"), "summary TEXT");
     assert_eq!(column("pages:integer"), "pages INTEGER NOT NULL");
@@ -42,6 +46,11 @@ fn sql_columns() {
     assert_eq!(column("at:datetime?"), "at TEXT");
     assert_eq!(column("author:references"), "author_id INTEGER NOT NULL REFERENCES authors(id) ON DELETE CASCADE");
     assert_eq!(column("editor:references?"), "editor_id INTEGER REFERENCES editors(id) ON DELETE CASCADE");
+    assert_eq!(
+        column("avatar:attachment"),
+        "avatar_key TEXT NOT NULL, avatar_filename TEXT NOT NULL, avatar_content_type TEXT NOT NULL, avatar_size INTEGER NOT NULL"
+    );
+    assert_eq!(column("doc:attachment?"), "doc_key TEXT, doc_filename TEXT, doc_content_type TEXT, doc_size INTEGER");
 }
 
 #[test]
@@ -54,6 +63,10 @@ fn rust_types_labels_and_kinds() {
     assert_eq!(field("owner_id:integer").label(), "Owner id");
     assert!(field("on:date").ty.is_textual() && !field("on:date").ty.is_numeric());
     assert!(field("author:references").ty.is_numeric());
+    let doc = field("doc:attachment?");
+    assert_eq!((doc.column_type().as_str(), doc.rules_const().as_str()), ("Option<Upload>", "DOC"));
+    assert_eq!(field("title:string").columns(), [("title".to_owned(), "String".to_owned())]);
+    assert_eq!(doc.columns()[3], ("doc_size".to_owned(), "Option<i64>".to_owned()));
 }
 
 #[test]
@@ -65,4 +78,5 @@ fn checks_per_type() {
     assert_eq!(checks("at:datetime?"), ["v.datetime(\"at\", x);"]);
     assert_eq!(checks("pages:integer"), ["v.safe_integer(\"pages\", x);"]);
     assert!(checks("rating:float").is_empty() && checks("done:boolean").is_empty());
+    assert_eq!(checks("avatar:attachment"), ["v.file(\"avatar\", x, &AVATAR);"]);
 }
