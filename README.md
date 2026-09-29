@@ -75,9 +75,22 @@ Production, free plan (`wrangler tail`, 55 requests):
 
 | Route | CPU median | CPU max | Wall median |
 |---|---|---|---|
-| `GET /` (list, 1 D1 query) | 2 ms | 23 ms (1 of 40, new isolate) | 18 ms |
+| `GET /` (list, 1 D1 query) | 2 ms | 23 ms (1 of 40, likely a new isolate) | 18 ms |
 | `GET /posts/:id` | 2 ms | 4 ms | 16.5 ms |
 | `POST /posts` (insert) | 3 ms | 6 ms | 28 ms |
 
 The free-plan limit is 10 ms CPU per request; Cloudflare tolerates infrequent
 overruns per isolate, and kills requests only when overruns become frequent.
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <https://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
+dual licensed as above, without any additional terms or conditions.
