@@ -42,9 +42,19 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
+      # worker-build has no prebuilt binaries: compiling it takes ~2.5 min, so
+      # keep it (and the wasm-bindgen/wasm-opt/esbuild it downloads) cached.
+      - id: worker-build
+        uses: actions/cache@v4
         with:
-          tool: worker-build
+          path: |
+            ~/.cargo/bin/worker-build
+            ~/.cargo/bin/worker-codegen
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+            ~/.cache/worker-build
+          key: worker-build-0.8.7-${{ runner.os }}
+      - if: steps.worker-build.outputs.cache-hit != 'true'
+        run: cargo install worker-build@0.8.7 --locked
       # Generated app on the real `wrangler dev` (workerd + local D1).
       - run: cargo test -p ocre-cli --test e2e -- --ignored
