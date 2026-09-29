@@ -1,7 +1,8 @@
 # __APP_NAME__
 
 Ocre app: Rust compiled to WebAssembly, running on Cloudflare Workers (free
-plan) with a D1 (SQLite) database, askama templates and htmx.
+plan) with a D1 (SQLite) database. Full-stack apps render HTML with askama and
+htmx; API-only apps (`mode = "api"` in Cargo.toml) serve JSON only.
 
 ## Commands
 
@@ -10,7 +11,9 @@ on stdout (`"ok": true|false`, plus `error` and `hint` on failure).
 
 | Task | Command |
 |---|---|
-| CRUD resource | `ocre g scaffold Post title:string body:text published:boolean` |
+| CRUD resource (HTML pages; JSON in API-only apps) | `ocre g scaffold Post title:string body:text published:boolean` |
+| JSON REST resource, `/api/posts` | `ocre g api Post title:string body:text` |
+| Same, also on `/graphql` (costs CPU, see below) | `ocre g api Post title:string --graphql` |
 | Empty migration | `ocre g migration add_slug_to_posts` |
 | Apply migrations locally | `ocre migrate` |
 | Run locally (http://localhost:8787) | `ocre dev` |
@@ -26,7 +29,9 @@ numbers as JavaScript numbers. Scaffolded forms already reject larger values.
 
 ```
 src/lib.rs          entry point and router; keep the `// ocre:` marker comments
-src/<plural>.rs     one module per resource: model, form, routes, handlers
+src/<plural>.rs     HTML resource: model, form, routes, handlers
+src/<plural>_api.rs JSON resource: list/find/create/update/delete, REST handlers, GraphQL resolvers
+src/graphql.rs      GraphQL schema (when used); keep the `// ocre:graphql-*` markers
 templates/          askama templates, compiled into the binary
 migrations/         numbered D1 SQL migrations, applied in order
 wrangler.toml       Cloudflare config; the D1 binding must be named DB
@@ -49,6 +54,10 @@ wrangler.toml       Cloudflare config; the D1 binding must be named DB
 - New module: `ocre g scaffold` registers it in `src/lib.rs`. By hand, add
   `mod name;` under `// ocre:modules` and `.merge(name::routes())` under
   `// ocre:routes`.
+- JSON handlers return `ApiResult<T>` (errors become `{"error": {"status",
+  "message"}}`), take bodies with `ocre::Json<T>` and lists with `Page`.
+  Put logic in the module's `list`/`find`/`create`/`update`/`delete`
+  functions so REST and GraphQL share it.
 
 ## Free-plan limits (design for them)
 
@@ -57,6 +66,8 @@ wrangler.toml       Cloudflare config; the D1 binding must be named DB
 - D1: daily read/write row quotas. Avoid N+1 queries: one query with `JOIN` or
   `WHERE id IN (...)` instead of a query per row.
 - 100,000 requests per day.
+- GraphQL adds ~1.1 MB of WebAssembly and 20-60 ms of CPU when a Worker
+  instance starts. Only add `--graphql` when a client needs it.
 
 ## Runtime constraints
 

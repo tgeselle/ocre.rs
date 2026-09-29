@@ -19,24 +19,34 @@ use crate::{
 
 const OCRE_GIT: &str = "https://github.com/tgeselle/ocre.rs";
 
-/// (path in the app, template contents)
+/// (path in the app, template contents), shared by both app kinds.
 const FILES: &[(&str, &str)] = &[
     ("Cargo.toml", include_str!("../templates/new/Cargo.toml.tmpl")),
     ("wrangler.toml", include_str!("../templates/new/wrangler.toml")),
     ("rust-toolchain.toml", include_str!("../templates/new/rust-toolchain.toml")),
     (".gitignore", include_str!("../templates/new/gitignore")),
     ("AGENTS.md", include_str!("../templates/new/AGENTS.md")),
-    ("src/lib.rs", include_str!("../templates/new/lib.rs")),
-    ("templates/layout.html", include_str!("../templates/new/layout.html")),
-    ("templates/home.html", include_str!("../templates/new/home.html")),
     ("migrations/.gitkeep", ""),
 ];
 
+/// Full-stack apps: HTML pages.
+const HTML_FILES: &[(&str, &str)] = &[
+    ("src/lib.rs", include_str!("../templates/new/lib.rs")),
+    ("templates/layout.html", include_str!("../templates/new/layout.html")),
+    ("templates/home.html", include_str!("../templates/new/home.html")),
+];
+
+/// API-only apps: JSON, no templates, no askama.
+const API_FILES: &[(&str, &str)] = &[("src/lib.rs", include_str!("../templates/new/lib_api.rs"))];
+
+const ASKAMA_DEP: &str = "askama = \"0.16.1\"\n";
+const API_METADATA: &str = "\n[package.metadata.ocre]\n# JSON only: `ocre g scaffold` generates APIs, Ocre's `html` feature is off.\nmode = \"api\"\n";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum Starter {
-    /// Home page only.
+    /// Home page (or status endpoint in API mode) only.
     Empty,
-    /// A `Post` resource (title, body, published) with CRUD pages.
+    /// A `Post` resource (title, body, published) with CRUD pages or a JSON API.
     Blog,
 }
 
@@ -45,6 +55,7 @@ pub enum Starter {
 pub struct NewArgs {
     pub name: Option<String>,
     pub ocre_path: Option<PathBuf>,
+    pub api: Option<bool>,
     pub starter: Option<Starter>,
     pub account_id: Option<String>,
     pub git: Option<bool>,
@@ -66,8 +77,15 @@ fn run_with_flags(args: NewArgs, cwd: &Path, json: bool) -> CliResult {
     })?;
     let deploy = args.deploy.unwrap_or(false);
     let starter = args.starter.unwrap_or(Starter::Empty);
-    let mut plan =
-        Plan::new(cwd, &name, args.ocre_path.as_deref(), starter, args.git.unwrap_or(false), args.account_id)?;
+    let mut plan = Plan::new(
+        cwd,
+        &name,
+        args.ocre_path.as_deref(),
+        args.api.unwrap_or(false),
+        starter,
+        args.git.unwrap_or(false),
+        args.account_id,
+    )?;
     let echo = Echo::for_json(json);
     // Deploying needs a session, so `--deploy` implies `--login`.
     let session =
@@ -89,6 +107,7 @@ pub struct Plan {
     pub name: String,
     pub root: PathBuf,
     ocre_dep: String,
+    pub api: bool,
     pub starter: Starter,
     pub git: bool,
     pub account_id: Option<String>,
@@ -100,44 +119,58 @@ impl Plan {
         cwd: &Path,
         name: &str,
         ocre_path: Option<&Path>,
+        api: bool,
         starter: Starter,
         git: bool,
         account_id: Option<String>,
     ) -> Result<Self, CliError> {
         check_new_app(cwd, name)?;
-        let ocre_dep = match ocre_path {
+        let source = match ocre_path {
             Some(path) => {
                 let path = path.canonicalize().map_err(|err| {
                     CliError::new(format!("--ocre-path {}: {err}", path.display()))
                         .hint("pass the directory of the `ocre` crate (crates/ocre in the Ocre repository)")
                 })?;
-                format!("ocre = {{ path = {:?} }}", path.display().to_string())
+                format!("path = {:?}", path.display().to_string())
             }
-            None => format!("ocre = {{ git = \"{OCRE_GIT}\" }}"),
+            None => format!("git = \"{OCRE_GIT}\""),
+        };
+        let ocre_dep = if api {
+            format!("ocre = {{ {source}, default-features = false }}")
+        } else {
+            format!("ocre = {{ {source} }}")
         };
         if git && !git_available() {
             return Err(CliError::new("git is not installed").hint("install git, or create the app without `--git`"));
         }
-        Ok(Self { name: name.to_owned(), root: cwd.join(name), ocre_dep, starter, git, account_id })
+        Ok(Self { name: name.to_owned(), root: cwd.join(name), ocre_dep, api, starter, git, account_id })
     }
 
     pub fn create(&self) -> CliResult {
         let name = &self.name;
         let mut report = Report::new("new");
-        for (relative, template) in FILES {
+        let kind_files = if self.api { API_FILES } else { HTML_FILES };
+        for (relative, template) in FILES.iter().chain(kind_files) {
             let path = self.root.join(relative);
             std::fs::create_dir_all(path.parent().expect("file paths have a parent"))?;
             let mut contents = template.replace("__APP_NAME__", name).replace("__OCRE_DEP__", &self.ocre_dep);
-            if let (&"wrangler.toml", Some(id)) = (relative, &self.account_id) {
-                contents = with_account_id(&contents, id);
+            match (*relative, &self.account_id) {
+                ("wrangler.toml", Some(id)) => contents = with_account_id(&contents, id),
+                ("Cargo.toml", _) if self.api => contents = contents.replace(ASKAMA_DEP, "") + API_METADATA,
+                _ => {}
             }
             std::fs::write(&path, contents)?;
             report.created.push(format!("{name}/{relative}"));
         }
         if self.starter == Starter::Blog {
             let fields = ["title:string", "body:text", "published:boolean"].map(String::from);
-            let scaffold = generate::scaffold(&Project::at(self.root.clone())?, "Post", &fields)?;
-            report.created.extend(scaffold.created.into_iter().map(|path| format!("{name}/{path}")));
+            let project = Project::at(self.root.clone())?;
+            let generated = if self.api {
+                generate::api(&project, "Post", &fields, false)?
+            } else {
+                generate::scaffold(&project, "Post", &fields)?
+            };
+            report.created.extend(generated.created.into_iter().map(|path| format!("{name}/{path}")));
         }
         if self.git {
             let status = Command::new("git").args(["init", "--quiet"]).current_dir(&self.root).status()?;
@@ -192,24 +225,4 @@ fn git_available() -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn app_names_follow_worker_rules() {
-        for ok in ["a", "my-blog", "app2", &"a".repeat(63)] {
-            assert!(validate_app_name(ok).is_ok(), "{ok}");
-        }
-        for bad in ["", "My-app", "2app", "-app", "app-", "my_app", "my app", &"a".repeat(64)] {
-            assert!(validate_app_name(bad).is_err(), "{bad}");
-        }
-    }
-
-    #[test]
-    fn account_id_goes_after_the_name_line() {
-        let toml = with_account_id("name = \"x\"\nmain = \"y\"\n", "abc");
-        assert_eq!(toml, "name = \"x\"\naccount_id = \"abc\"\nmain = \"y\"\n");
-        let parsed: toml::Table = toml.parse().unwrap();
-        assert_eq!(parsed["account_id"].as_str(), Some("abc"));
-    }
-}
+mod tests;

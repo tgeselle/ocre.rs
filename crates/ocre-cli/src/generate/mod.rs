@@ -1,4 +1,8 @@
-//! `ocre generate scaffold|migration`.
+//! `ocre generate scaffold|api|migration`.
+
+mod api;
+
+pub use api::api;
 
 use std::{
     fmt::Write as _,
@@ -188,16 +192,16 @@ pub fn scaffold(project: &Project, name: &str, field_specs: &[String]) -> CliRes
     // Validate lib.rs before writing anything, so a failure leaves no partial scaffold.
     let lib_path = project.root.join("src/lib.rs");
     let lib = register_module(&std::fs::read_to_string(&lib_path)?, &names.plural)?;
-    let migration_path = next_migration_path(&project.root, &format!("create_{}", names.plural))?;
+    let migration = create_table_migration(project, &names, &fields)?;
 
-    let files: Vec<(PathBuf, String)> = vec![
-        (migration_path, migration_sql(&names, &fields)),
+    let mut files: Vec<(PathBuf, String)> = migration.into_iter().collect();
+    files.extend([
         (module_path, module_rs(&names, &fields, name, field_specs)),
         (template_dir.join("index.html"), index_html(&names, &fields)),
         (template_dir.join("show.html"), show_html(&names, &fields)),
         (template_dir.join("new.html"), form_html(&names, &fields, false)),
         (template_dir.join("edit.html"), form_html(&names, &fields, true)),
-    ];
+    ]);
     let mut report = Report::new("generate scaffold");
     for (path, contents) in files {
         std::fs::create_dir_all(path.parent().expect("generated files have a parent"))?;
@@ -228,6 +232,25 @@ pub fn migration(project: &Project, name: &str) -> CliResult {
     Ok(report)
 }
 
+/// The `CREATE TABLE` migration for a resource, unless one already exists
+/// (for example `ocre g api` after `ocre g scaffold` for the same model).
+fn create_table_migration(
+    project: &Project,
+    names: &ModelNames,
+    fields: &[Field],
+) -> Result<Option<(PathBuf, String)>, CliError> {
+    let name = format!("create_{}", names.plural);
+    let dir = project.root.join("migrations");
+    let suffix = format!("_{name}.sql");
+    if dir.is_dir() {
+        for entry in std::fs::read_dir(&dir)? {
+            if entry?.file_name().to_string_lossy().ends_with(&suffix) {
+                return Ok(None);
+            }
+        }
+    }
+    Ok(Some((next_migration_path(&project.root, &name)?, migration_sql(names, fields))))
+}
 /// `migrations/NNNN_<name>.sql`, numbered after the highest existing migration.
 fn next_migration_path(root: &Path, name: &str) -> Result<PathBuf, CliError> {
     let dir = root.join("migrations");
@@ -555,46 +578,4 @@ fn form_html(names: &ModelNames, fields: &[Field], edit: bool) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_fields_and_rejects_bad_ones() {
-        assert_eq!(Field::parse("pages:integer").unwrap(), Field { name: "pages".into(), ty: FieldType::Integer });
-        assert!(Field::parse("title").is_err(), "missing type");
-        assert!(Field::parse("title:varchar").is_err(), "unknown type");
-        assert!(Field::parse("Title:string").is_err(), "not snake_case");
-        assert!(Field::parse("type:string").is_err(), "Rust keyword");
-        assert!(Field::parse("order:integer").is_err(), "SQL keyword");
-        assert!(Field::parse("id:integer").is_err(), "generated column");
-        assert!(parse_fields(&["a:string".into(), "a:text".into()]).is_err(), "duplicate");
-    }
-
-    #[test]
-    fn registers_module_after_markers_keeping_indent() {
-        let lib = "use x;\n// ocre:modules\n\nfn routes() {\n    Router::new()\n        .route(\"/\", get(home))\n        // ocre:routes\n}\n";
-        let out = register_module(lib, "books").unwrap();
-        assert!(out.contains("// ocre:modules\nmod books;\n"));
-        assert!(out.contains("        // ocre:routes\n        .merge(books::routes())\n}"));
-        let again = register_module(&out, "authors").unwrap();
-        assert!(again.contains("// ocre:modules\nmod authors;\nmod books;\n"));
-    }
-
-    #[test]
-    fn refuses_lib_without_markers() {
-        assert!(register_module("fn main() {}\n", "books").is_err());
-    }
-
-    #[test]
-    fn numbers_migrations_after_the_highest_existing() {
-        let dir = std::env::temp_dir().join(format!("ocre-migrations-{}", std::process::id()));
-        let migrations = dir.join("migrations");
-        std::fs::create_dir_all(&migrations).unwrap();
-        assert!(next_migration_path(&dir, "a").unwrap().ends_with("0001_a.sql"));
-        std::fs::write(migrations.join("0001_a.sql"), "").unwrap();
-        std::fs::write(migrations.join("0009_b.sql"), "").unwrap();
-        std::fs::write(migrations.join(".gitkeep"), "").unwrap();
-        assert!(next_migration_path(&dir, "c").unwrap().ends_with("0010_c.sql"));
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-}
+mod tests;

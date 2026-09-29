@@ -83,7 +83,80 @@ fn post(server: &Server, path: &str, form: &[(&str, &str)]) -> Page {
 
 fn page(mut response: ureq::http::Response<ureq::Body>) -> Page {
     let location = response.headers().get("location").map_or("", |v| v.to_str().unwrap()).to_owned();
-    Page { status: response.status().as_u16(), location, body: response.body_mut().read_to_string().unwrap() }
+    let status = response.status().as_u16();
+    // 204 has no body by definition; wrangler dev still labels it gzip, which
+    // makes the client's decompressor fail on the empty stream.
+    let body = if status == 204 { String::new() } else { response.body_mut().read_to_string().unwrap() };
+    Page { status, location, body }
+}
+
+/// JSON request (`POST`, `PATCH`, `DELETE`); returns status and parsed body
+/// (`null` for an empty body).
+fn json(server: &Server, method: &str, path: &str, body: &str) -> (u16, serde_json::Value) {
+    let url = format!("{}{path}", server.base);
+    let agent = agent();
+    let response = match method {
+        "POST" => agent.post(&url).content_type("application/json").send(body),
+        "PATCH" => agent.patch(&url).content_type("application/json").send(body),
+        "DELETE" => agent.delete(&url).call(),
+        _ => agent.get(&url).call(),
+    };
+    let page = page(response.unwrap());
+    (
+        page.status,
+        if page.body.is_empty() { serde_json::Value::Null } else { serde_json::from_str(&page.body).unwrap() },
+    )
+}
+
+#[test]
+#[ignore = "builds WebAssembly and runs wrangler dev; run with --ignored"]
+fn api_only_app_serves_rest_and_graphql_on_workerd() {
+    let sandbox = Sandbox::new();
+    sandbox.use_real_wrangler();
+    let root = sandbox.new_app("e2e-api", &["--api", "--starter", "blog"]);
+    let (report, ok) =
+        sandbox.json(&["g", "api", "Book", "title:string", "pages:integer", "available:boolean", "--graphql"], &root);
+    assert!(ok, "{report}");
+    let server = start(&sandbox, &root);
+
+    assert_eq!(json(&server, "GET", "/", ""), (200, serde_json::json!({"app": "e2e-api", "status": "ok"})));
+
+    // REST.
+    let (status, book) = json(&server, "POST", "/api/books", r#"{"title": "Dune", "pages": 412}"#);
+    assert_eq!((status, book["id"].as_i64(), book["title"].as_str()), (201, Some(1), Some("Dune")));
+    let (status, book) = json(&server, "PATCH", "/api/books/1", r#"{"pages": 500}"#);
+    assert_eq!((status, book["pages"].as_i64(), book["title"].as_str()), (200, Some(500), Some("Dune")));
+    let (status, list) = json(&server, "GET", "/api/books?limit=10", "");
+    assert_eq!((status, list.as_array().map(Vec::len)), (200, Some(1)));
+    assert_eq!(json(&server, "GET", "/api/books?limit=0", "").0, 400);
+    assert_eq!(
+        json(&server, "GET", "/api/books/9", ""),
+        (404, serde_json::json!({"error": {"status": 404, "message": "Not found"}}))
+    );
+    assert_eq!(
+        json(&server, "POST", "/api/books", r#"{"title": " ", "pages": 1}"#).1["error"]["message"],
+        "Title is required."
+    );
+    assert_eq!(json(&server, "POST", "/api/books", "{").0, 400);
+    assert_eq!(json(&server, "POST", "/api/posts", r#"{"title": "Hi", "body": "there"}"#).0, 201, "starter resource");
+
+    // GraphQL on the same data.
+    let graphql = |query: &str| json(&server, "POST", "/graphql", &serde_json::json!({ "query": query }).to_string()).1;
+    assert_eq!(
+        graphql("{ books { title pages available } }"),
+        serde_json::json!({"data": {"books": [{"title": "Dune", "pages": 500, "available": false}]}})
+    );
+    let created =
+        graphql(r#"mutation { createBook(input: {title: "Emma", pages: 10, available: true}) { id available } }"#);
+    assert_eq!(created["data"]["createBook"]["available"], true);
+    assert_eq!(created["data"]["createBook"]["id"], 2);
+    let missing = graphql("mutation { updateBook(id: 9, changes: {}) { id } }");
+    assert_eq!(missing["errors"][0]["extensions"]["status"], 404);
+    assert_eq!(get(&server, "/graphql").status, 200, "GraphiQL");
+
+    // Delete.
+    assert_eq!(json(&server, "DELETE", "/api/books/2", ""), (204, serde_json::Value::Null));
+    assert_eq!(json(&server, "DELETE", "/api/books/2", "").0, 404);
 }
 
 #[test]

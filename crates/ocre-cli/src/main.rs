@@ -42,6 +42,12 @@ enum Command {
     New {
         /// App name: lowercase letters, digits and dashes (e.g. `my-blog`).
         name: Option<String>,
+        /// API only: JSON endpoints, no HTML templates (like `rails new --api`).
+        #[arg(long, overrides_with = "full_stack")]
+        api: bool,
+        /// HTML pages with askama and htmx, plus JSON APIs when generated.
+        #[arg(long)]
+        full_stack: bool,
         /// Starter content.
         #[arg(long, value_enum)]
         starter: Option<Starter>,
@@ -94,6 +100,7 @@ enum Command {
 #[derive(Subcommand)]
 enum GenerateCommand {
     /// CRUD resource: migration, model, handlers, routes and templates.
+    /// In an API-only app (`ocre new --api`) this is `ocre g api`.
     ///
     /// Example: `ocre g scaffold Post title:string body:text published:boolean`.
     /// Field types: string, text, integer, float, boolean.
@@ -103,6 +110,20 @@ enum GenerateCommand {
         /// Fields as `name:type`.
         #[arg(required = true)]
         fields: Vec<String>,
+    },
+    /// JSON REST resource under /api/<plural>; with --graphql, also GraphQL.
+    ///
+    /// Example: `ocre g api Post title:string body:text --graphql`.
+    Api {
+        /// Singular model name, PascalCase or snake_case (e.g. `BlogPost`).
+        name: String,
+        /// Fields as `name:type`.
+        #[arg(required = true)]
+        fields: Vec<String>,
+        /// Also expose the resource on /graphql. Adds ~1.1 MB of WebAssembly and
+        /// 20-60 ms of CPU when a Worker instance starts.
+        #[arg(long)]
+        graphql: bool,
     },
     /// Empty numbered SQL migration file.
     Migration {
@@ -126,10 +147,25 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let json = cli.json;
     let result = match cli.command {
-        Command::New { name, starter, login, no_login, account_id, git, no_git, deploy, no_deploy, yes, ocre_path } => {
+        Command::New {
+            name,
+            api,
+            full_stack,
+            starter,
+            login,
+            no_login,
+            account_id,
+            git,
+            no_git,
+            deploy,
+            no_deploy,
+            yes,
+            ocre_path,
+        } => {
             let args = NewArgs {
                 name,
                 ocre_path,
+                api: toggle(api, full_stack),
                 starter,
                 account_id,
                 git: toggle(git, no_git),
@@ -140,8 +176,15 @@ fn main() -> ExitCode {
             new::run(args, json)
         }
         Command::Login => wrangler::login(json),
-        Command::Generate(GenerateCommand::Scaffold { name, fields }) => {
-            Project::find().and_then(|project| generate::scaffold(&project, &name, &fields))
+        Command::Generate(GenerateCommand::Scaffold { name, fields }) => Project::find().and_then(|project| {
+            if project.api_only {
+                generate::api(&project, &name, &fields, false)
+            } else {
+                generate::scaffold(&project, &name, &fields)
+            }
+        }),
+        Command::Generate(GenerateCommand::Api { name, fields, graphql }) => {
+            Project::find().and_then(|project| generate::api(&project, &name, &fields, graphql))
         }
         Command::Generate(GenerateCommand::Migration { name }) => {
             Project::find().and_then(|project| generate::migration(&project, &name))

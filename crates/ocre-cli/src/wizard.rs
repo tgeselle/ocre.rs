@@ -26,10 +26,18 @@ pub fn new_app(args: NewArgs, cwd: &Path) -> CliResult {
         }
     };
 
+    let api = match args.api {
+        Some(api) => api,
+        None => ask(select("What are you building?")
+            .item(false, "Full-stack app", "HTML pages with askama and htmx, JSON APIs when you need them")
+            .item(true, "API only", "JSON endpoints, no HTML (like `rails new --api`)")
+            .interact())?,
+    };
+
     let starter = match args.starter {
         Some(starter) => starter,
         None => ask(select("Pick a starter")
-            .item(Starter::Empty, "Empty", "a home page")
+            .item(Starter::Empty, "Empty", if api { "a status endpoint" } else { "a home page" })
             .item(Starter::Blog, "Blog", "posts with title, body and published, full CRUD")
             .interact())?,
     };
@@ -60,7 +68,7 @@ pub fn new_app(args: NewArgs, cwd: &Path) -> CliResult {
         }
     };
 
-    let plan = Plan::new(cwd, &name, args.ocre_path.as_deref(), starter, git, account_id)?;
+    let plan = Plan::new(cwd, &name, args.ocre_path.as_deref(), api, starter, git, account_id)?;
     let mut report = step("Creating your app", &format!("Created {name}/"), || plan.create())?;
     if deploy {
         report.url = step("Building and deploying to Cloudflare", "Deployed", || plan.deploy(Echo::Capture))?;
@@ -127,15 +135,4 @@ fn prompt_error(err: std::io::Error) -> CliError {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::io::{Error, ErrorKind};
-
-    use super::*;
-
-    #[test]
-    fn interrupted_prompts_cancel_and_other_errors_pass_through() {
-        assert_eq!(prompt_error(Error::from(ErrorKind::Interrupted)).message, "cancelled");
-        let err = prompt_error(Error::new(ErrorKind::BrokenPipe, "terminal closed"));
-        assert_eq!((err.message.as_str(), err.hint), ("terminal closed", None));
-    }
-}
+mod tests;

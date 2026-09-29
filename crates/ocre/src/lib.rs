@@ -7,18 +7,27 @@
 //! - One way to do each thing; failures surface at compile time or as errors
 //!   that name the fix.
 
+mod api;
 mod error;
+/// GraphQL support (feature `graphql`).
+#[cfg(feature = "graphql")]
+pub mod graphql;
+#[cfg(feature = "html")]
 mod htmx;
 mod runtime;
 mod sql;
 #[cfg(test)]
 mod test_util;
+#[cfg(feature = "html")]
 mod view;
 
+pub use api::{ApiError, ApiResult, Created, Json, Page};
 pub use error::{Error, OptionExt, Result};
+#[cfg(feature = "html")]
 pub use htmx::Htmx;
 pub use runtime::{Ctx, Db, serve};
 pub use sql::{IntoParam, MAX_SAFE_INTEGER, Param, bool_from_sql};
+#[cfg(feature = "html")]
 pub use view::render;
 
 /// Builds query parameters for [`Db`] methods: `params![title, id]`.

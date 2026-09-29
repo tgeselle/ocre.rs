@@ -1,48 +1,43 @@
-use askama::Template;
-use axum::response::Html;
+//! HTML rendering (feature `html`): askama templates and HTML error pages.
 
-use crate::Result;
+use askama::Template;
+use axum::response::{Html, IntoResponse, Response};
+
+use crate::{Error, Result};
 
 /// Renders an askama template (compiled at build time) into an HTML response.
 pub fn render<T: Template>(template: &T) -> Result<Html<String>> {
     Ok(Html(template.render()?))
 }
 
-#[cfg(test)]
-mod tests {
-    use std::fmt;
-
-    use super::*;
-
-    #[derive(Template)]
-    #[template(source = "<p>{{ name }}</p>", ext = "html")]
-    struct Greeting<'a> {
-        name: &'a str,
-    }
-
-    #[test]
-    fn renders_html_with_escaped_values() {
-        let Html(html) = render(&Greeting { name: "<Ocre>" }).unwrap();
-        assert_eq!(html, "<p>&#60;Ocre&#62;</p>");
-    }
-
-    struct Unprintable;
-
-    impl fmt::Display for Unprintable {
-        fn fmt(&self, _: &mut fmt::Formatter<'_>) -> fmt::Result {
-            Err(fmt::Error)
-        }
-    }
-
-    #[derive(Template)]
-    #[template(source = "{{ value }}", ext = "html")]
-    struct Broken {
-        value: Unprintable,
-    }
-
-    #[test]
-    fn rendering_failure_is_an_internal_error() {
-        let err = render(&Broken { value: Unprintable }).unwrap_err();
-        assert!(err.to_string().starts_with("internal error: template rendering failed"), "{err}");
+impl From<askama::Error> for Error {
+    fn from(err: askama::Error) -> Self {
+        Self::Internal(format!("template rendering failed: {err}"))
     }
 }
+
+/// HTML error page. JSON endpoints return [`ApiError`](crate::ApiError) instead.
+impl IntoResponse for Error {
+    fn into_response(self) -> Response {
+        let (status, message) = self.into_public();
+        (status, Html(format!("<h1>{}</h1><p>{}</p>", status.as_u16(), escape(&message)))).into_response()
+    }
+}
+
+fn escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests;

@@ -34,7 +34,8 @@ free-plan limits an agent needs.
 |---|---|
 | `ocre new [name]` | App skeleton. In a terminal, asks for anything flags did not answer |
 | `ocre login` | Cloudflare login in the browser, unless already logged in |
-| `ocre g scaffold <Model> field:type...` | Migration, model, form, CRUD handlers, routes, templates; registers the module in `src/lib.rs` |
+| `ocre g scaffold <Model> field:type...` | Migration, model, form, CRUD handlers, routes, templates; registers the module in `src/lib.rs`. In an API-only app: same as `ocre g api` |
+| `ocre g api <Model> field:type... [--graphql]` | JSON REST resource under `/api/<plural>`; `--graphql` also exposes it on `/graphql` |
 | `ocre g migration <name>` | Empty numbered migration |
 | `ocre migrate [--remote]` | Apply D1 migrations |
 | `ocre dev [--port N]` | Local migrations, then `wrangler dev` |
@@ -44,6 +45,7 @@ free-plan limits an agent needs.
 
 | Flag | Effect | Default without prompts |
 |---|---|---|
+| `--api` / `--full-stack` | API only: JSON, no templates, Ocre's `html` feature off (like `rails new --api`) | full-stack |
 | `--starter empty\|blog` | `blog` adds a `Post` resource (title, body, published) | `empty` |
 | `--login` / `--no-login` | Log in to Cloudflare if needed (opens a browser) | no login |
 | `--account-id <id>` | Account to deploy to; required when the login has several | none |
@@ -55,6 +57,35 @@ free-plan limits an agent needs.
 Field types: `string`, `text`, `integer`, `float`, `boolean`. Scaffold routes:
 `GET /posts`, `GET /posts/new`, `POST /posts`, `GET /posts/{id}`,
 `GET /posts/{id}/edit`, `POST /posts/{id}` (update), `POST /posts/{id}/delete`.
+
+## JSON APIs
+
+`ocre g api Post title:string body:text` generates `src/posts_api.rs`:
+
+| Route | Effect |
+|---|---|
+| `GET /api/posts?limit=&offset=` | List, newest first; `limit` 1-100 (default 50) |
+| `GET /api/posts/{id}` | One record |
+| `POST /api/posts` | Create; every field required; `201` |
+| `PATCH /api/posts/{id}` | Update only the fields sent |
+| `DELETE /api/posts/{id}` | Delete; `204` |
+
+Errors are JSON: `{"error": {"status": 404, "message": "Not found"}}`;
+internal details are logged, never returned. The module exposes `list`,
+`find`, `create`, `update` and `delete` functions, which the REST handlers and
+the GraphQL resolvers share. When a `CREATE TABLE` migration for the model
+already exists (after `ocre g scaffold`), it is reused.
+
+With `--graphql`, the same resource gets `posts(limit, offset)`, `post(id)`,
+`createPost(input)`, `updatePost(id, changes)` and `deletePost(id)` on
+`POST /graphql`, and GraphiQL on `GET /graphql`. GraphQL is opt-in because it
+costs on the free plan: about 1.1 MB more WebAssembly, and 20-60 ms of CPU
+each time a new Worker instance starts, measured with `wrangler tail` (the
+free plan allows 10 ms per request, with tolerance for infrequent overruns).
+
+An API-only app (`ocre new --api`) has no templates and no askama; `ocre g
+scaffold` generates JSON APIs there. The mode is stored in `Cargo.toml` as
+`[package.metadata.ocre] mode = "api"`.
 
 Contract for agents: with `--json` (or without a terminal) commands never
 prompt, and stdout carries exactly one JSON object, `{"ok": true, "command",
@@ -74,10 +105,14 @@ failure. Generators never overwrite files.
 ## Layout
 
 ```
-crates/ocre/        framework crate
+crates/ocre/        framework crate (features: html [default], graphql)
 crates/ocre-cli/    `ocre` command-line tool and app templates
 examples/blog/      example app (D1 + askama + htmx)
 ```
+
+Unit tests live next to each module in a separate file (`src/sql.rs` →
+`src/sql/tests.rs`, declared with `#[cfg(test)] mod tests;`), so they can test
+private items without mixing with production code.
 
 ## API
 
@@ -89,10 +124,14 @@ examples/blog/      example app (D1 + askama + htmx)
 | `db.all::<T>(sql, params![..])` | All rows as `Vec<T>` |
 | `db.first::<T>(sql, params![..])` | First row as `Option<T>`; use with `INSERT ... RETURNING *` |
 | `db.execute(sql, params![..])` | Rows changed |
-| `render(&template)` | askama template to `Html<String>` |
-| `Htmx(is_htmx)` | Extractor: true when `HX-Request: true` |
+| `render(&template)` | askama template to `Html<String>` (feature `html`) |
+| `Htmx(is_htmx)` | Extractor: true when `HX-Request: true` (feature `html`) |
 | `option.or_404()?` | Missing record to 404 |
-| `Error::bad_request(msg)` / `Error::internal(msg)` | 400 / 500 responses |
+| `Error::bad_request(msg)` / `Error::internal(msg)` | 400 / 500; HTML page, or JSON through `ApiError` |
+| `ApiResult<T>`, `ApiError` | JSON error responses; `?` converts from `Error` |
+| `Json(value)`, `Created(value)` | JSON body extractor (invalid JSON is a JSON 400) and responses |
+| `Page { limit, offset }` | `?limit=&offset=` extractor with bounds; `Page::new` for GraphQL |
+| `ocre::graphql::routes(schema)` | `/graphql` endpoint and GraphiQL (feature `graphql`) |
 | `#[serde(deserialize_with = "ocre::bool_from_sql")]` | Read SQLite INTEGER 0/1 as `bool` |
 
 ## Requirements

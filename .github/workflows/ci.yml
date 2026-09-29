@@ -19,8 +19,11 @@ jobs:
       - run: rustup component add clippy rustfmt
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      # Full-stack (default), API-only (no `html`) and GraphQL builds of the framework.
       - run: cargo check --target wasm32-unknown-unknown -p ocre -p blog
+      - run: cargo check --target wasm32-unknown-unknown -p ocre --no-default-features
+      - run: cargo check --target wasm32-unknown-unknown -p ocre --all-features
 
   test:
     runs-on: ubuntu-latest
@@ -30,8 +33,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-llvm-cov
       # Unit, CLI (fake wrangler) and pseudo-terminal tests; 100% line coverage.
-      # crates/ocre/src/runtime only runs inside workerd: the e2e job covers it.
+      # crates/ocre/src/runtime only runs inside workerd: the e2e test covers it.
       - run: >
-          cargo llvm-cov --workspace --exclude blog
+          cargo llvm-cov --workspace --exclude blog --all-features
           --ignore-filename-regex 'crates/ocre/src/runtime/'
           --fail-under-lines 100 --show-missing-lines

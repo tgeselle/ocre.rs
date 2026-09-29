@@ -9,11 +9,20 @@ repository.workspace = true
 [dependencies]
 worker.workspace = true
 axum.workspace = true
-askama.workspace = true
+askama = { workspace = true, optional = true }
 serde.workspace = true
 wasm-bindgen.workspace = true
+serde_json = "1.0.151"
 tower-service = "0.3.3"
+# `custom-error-conversion` lets Ocre map its errors so internal details never reach clients.
+async-graphql = { version = "7.2.1", default-features = false, features = ["graphiql", "custom-error-conversion"], optional = true }
+
+[features]
+default = ["html"]
+# Server-rendered pages: askama templates, HTML error pages, htmx extractor.
+# API-only apps (`ocre new --api`) turn it off.
+html = ["dep:askama"]
+graphql = ["dep:async-graphql"]
 
 [dev-dependencies]
 pollster = "1.0.1"
-serde_json = "1.0.151"

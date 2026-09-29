@@ -4,9 +4,13 @@
 
 mod ctx;
 mod d1;
+#[cfg(feature = "graphql")]
+mod graphql;
 
 pub use ctx::Ctx;
 pub use d1::Db;
+#[cfg(feature = "graphql")]
+pub use graphql::routes as graphql_routes;
 
 use axum::{Router, body::Body, http::Response};
 use tower_service::Service;

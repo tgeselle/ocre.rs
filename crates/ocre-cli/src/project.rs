@@ -14,6 +14,8 @@ pub struct Project {
     pub root: PathBuf,
     /// `database_name` of the `DB` binding in wrangler.toml.
     pub database_name: String,
+    /// `[package.metadata.ocre] mode = "api"` in Cargo.toml: JSON only, no HTML.
+    pub api_only: bool,
 }
 
 impl Project {
@@ -34,13 +36,29 @@ impl Project {
     /// The app whose wrangler.toml is in `root`.
     pub fn at(root: PathBuf) -> Result<Self, CliError> {
         let database_name = read_database_name(&root.join("wrangler.toml"))?;
-        Ok(Self { root, database_name })
+        let api_only = read_api_mode(&root.join("Cargo.toml"));
+        Ok(Self { root, database_name, api_only })
     }
 
     /// Path relative to the app root, for reports.
     pub fn relative(&self, path: &Path) -> String {
         path.strip_prefix(&self.root).unwrap_or(path).display().to_string()
     }
+}
+
+/// A missing or unreadable Cargo.toml means a full-stack app; cargo reports
+/// its own errors when building.
+fn read_api_mode(path: &Path) -> bool {
+    let Some(manifest) = std::fs::read_to_string(path).ok().and_then(|text| text.parse::<toml::Table>().ok()) else {
+        return false;
+    };
+    manifest
+        .get("package")
+        .and_then(|p| p.get("metadata"))
+        .and_then(|m| m.get("ocre"))
+        .and_then(|o| o.get("mode"))
+        .and_then(|mode| mode.as_str())
+        == Some("api")
 }
 
 fn read_database_name(path: &Path) -> Result<String, CliError> {
