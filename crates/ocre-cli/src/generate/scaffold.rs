@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use super::{
     Edits,
-    fields::{ATTACHMENT_TYPES, Field, FieldType, parse_fields},
+    fields::{ATTACHMENT_TYPES, Field, FieldType, parse_model_fields},
     model::ensure_model,
     realtime::add_channel,
     register_routes,
@@ -23,10 +23,10 @@ use crate::{
 
 pub fn scaffold(project: &Project, name: &str, specs: &[String], realtime: bool) -> CliResult {
     let names = ModelNames::parse(name)?;
-    let fields = parse_fields(specs)?;
+    let (fields, many) = parse_model_fields(specs)?;
     let command = format!("ocre g scaffold {name} {}{}", specs.join(" "), if realtime { " --realtime" } else { "" });
     let mut edits = Edits::new(project);
-    ensure_model(&mut edits, &names, &fields, &command)?;
+    ensure_model(&mut edits, &names, &fields, &many, &command)?;
     let plural = &names.plural;
     edits.create(&format!("src/{plural}.rs"), controller_rs(&names, &fields, &command, realtime))?;
     for (file, contents) in views(&edits, &names, &fields, realtime)? {

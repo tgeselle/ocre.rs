@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use super::{
     Edits,
-    fields::{Field, FieldType, parse_fields},
+    fields::{Field, FieldType, parse_model_fields},
     model::ensure_model,
     register_routes, with_ocre_feature,
 };
@@ -16,7 +16,7 @@ const GRAPHQL_DEP: &str = r#"async-graphql = { version = "7.2.1", default-featur
 
 pub fn api(project: &Project, name: &str, specs: &[String], graphql: bool) -> CliResult {
     let names = ModelNames::parse(name)?;
-    let fields = parse_fields(specs)?;
+    let (fields, many) = parse_model_fields(specs)?;
     if let Some(field) = fields.iter().find(|f| graphql && f.enumeration.is_some()) {
         return Err(CliError::new(format!("enum `{}` is not supported with --graphql yet", field.name)).hint(format!(
             "use `{}:string` checked with `v.inclusion(...)` in the model, or generate the JSON API without --graphql",
@@ -32,8 +32,8 @@ pub fn api(project: &Project, name: &str, specs: &[String], graphql: bool) -> Cl
     let command = format!("ocre g api {name} {}{}", specs.join(" "), if graphql { " --graphql" } else { "" });
     let module = format!("{}_api", names.plural);
     let mut edits = Edits::new(project);
-    ensure_model(&mut edits, &names, &fields, &command)?;
-    edits.create(&format!("src/{module}.rs"), module_rs(&names, &fields, &command, graphql))?;
+    ensure_model(&mut edits, &names, &fields, &many, &command)?;
+    edits.create(&format!("src/{module}.rs"), module_rs(&names, &fields, &many, &command, graphql))?;
     register_routes(&mut edits, &module)?;
     super::test_files::api_tests(&mut edits, &names, &fields, &command)?;
     if graphql {
@@ -149,7 +149,7 @@ fn add_to_schema(schema: &str, module: &str, names: &ModelNames) -> Result<Strin
     }
 }
 
-fn module_rs(names: &ModelNames, fields: &[Field], command: &str, graphql: bool) -> String {
+fn module_rs(names: &ModelNames, fields: &[Field], many: &[String], command: &str, graphql: bool) -> String {
     let ModelNames { model, singular, plural, human_plural, .. } = names;
     let gql = if graphql { graphql_rs(names, fields) } else { String::new() };
     let also = if graphql { " and GraphQL" } else { "" };
@@ -195,7 +195,13 @@ async fn remove_{name}(State(ctx): State<Ctx>, Path(id): Path<i64>) -> ApiResult
         )
         .expect("writing to a String");
     }
-    let (http_import, response_import, ocre_import) = if files.is_empty() {
+    for name in many {
+        let (docs, route, items) = many_attachments_api(names, name);
+        file_docs.push_str(&docs);
+        file_routes.push_str(&route);
+        file_items.push_str(&items);
+    }
+    let (http_import, response_import, ocre_import) = if files.is_empty() && many.is_empty() {
         ("http::StatusCode", "", "")
     } else {
         (
@@ -258,6 +264,69 @@ async fn delete(State(ctx): State<Ctx>, Path(id): Path<i64>) -> ApiResult<Status
 }}
 {file_items}{gql}"#
     )
+}
+
+/// Docs, routes and handlers of `photos:attachments`: list, add (multipart,
+/// several files), serve and delete the files of a record.
+fn many_attachments_api(names: &ModelNames, name: &str) -> (String, String, String) {
+    let ModelNames { plural, singular, .. } = names;
+    let one = crate::names::singularize(name).expect("checked when parsed");
+    let child = ModelNames::parse(&format!("{singular}_{one}")).expect("a valid model name");
+    let (module, model, limit) = (&child.singular, &child.model, format!("{}_LIMIT", name.to_uppercase()));
+    let docs = format!(
+        "\n//! GET /api/{plural}/{{id}}/{name}               the {name}, oldest first\n//! POST /api/{plural}/{{id}}/{name}              multipart body, one or more files as `{name}` (`curl -F {name}=@a.png -F {name}=@b.png`); adds them\n//! GET /api/{plural}/{{id}}/{name}/{{file_id}}     one file\n//! DELETE /api/{plural}/{{id}}/{name}/{{file_id}}  deletes it, 204"
+    );
+    let route = format!(
+        "\n        .route(\"/api/{plural}/{{id}}/{name}\", get(list_{name}).post(attach_{name}))\n        .route(\"/api/{plural}/{{id}}/{name}/{{file_id}}\", get({one}_file).delete(delete_{one}))"
+    );
+    let items = format!(
+        r#"
+/// Largest `POST .../{name}` body: ten files at their limit, plus room for the multipart framing.
+const {limit}: usize = 10 * crate::models::{module}::FILE.max_bytes + 64 * 1024;
+
+async fn list_{name}(State(ctx): State<Ctx>, Path(id): Path<i64>) -> ApiResult<Json<Vec<crate::models::{module}::{model}>>> {{
+    let record = {singular}::find(&ctx, id).await?.or_404()?;
+    let rows = crate::models::{module}::query().eq("{singular}_id", record.id).order_asc("id").all(&ctx.db()?).await?;
+    Ok(Json(rows))
+}}
+
+/// Stores the files; 422 when none is sent or one is not allowed (then none is stored).
+async fn attach_{name}(
+    State(ctx): State<Ctx>,
+    Path(id): Path<i64>,
+    Multipart(mut form): Multipart<{limit}>,
+) -> ApiResult<Json<Vec<crate::models::{module}::{model}>>> {{
+    let record = {singular}::find(&ctx, id).await?.or_404()?;
+    let uploads = form.files("{name}");
+    if uploads.is_empty() {{
+        return Err(Error::Invalid(vec![FieldError::new("{name}", "can't be blank")]).into());
+    }}
+    Ok(Json(record.attach_{name}(&ctx, uploads).await?))
+}}
+
+/// The row of file `file_id` of record `id`.
+async fn find_{one}(ctx: &Ctx, id: i64, file_id: i64) -> ocre::Result<crate::models::{module}::{model}> {{
+    let query = crate::models::{module}::query().eq("id", file_id).eq("{singular}_id", id);
+    query.first(&ctx.db()?).await?.or_404()
+}}
+
+async fn {one}_file(
+    State(ctx): State<Ctx>,
+    Path((id, file_id)): Path<(i64, i64)>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {{
+    let row = find_{one}(&ctx, id, file_id).await?;
+    Ok(storage::serve(&ctx, &row.file(), &headers, Disposition::Inline).await?)
+}}
+
+async fn delete_{one}(State(ctx): State<Ctx>, Path((id, file_id)): Path<(i64, i64)>) -> ApiResult<StatusCode> {{
+    let row = find_{one}(&ctx, id, file_id).await?;
+    crate::models::{module}::delete(&ctx, row.id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}}
+"#
+    );
+    (docs, route, items)
 }
 
 /// GraphQL types mirror the model: `PostNode` (output), `NewPostInput`,

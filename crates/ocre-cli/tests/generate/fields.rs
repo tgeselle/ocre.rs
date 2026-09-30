@@ -145,3 +145,17 @@ fn polymorphic_fields_expand_to_a_type_and_an_id() {
         "field `owner_id` is listed twice"
     );
 }
+
+#[test]
+fn many_attachments_are_set_apart_from_the_fields() {
+    let specs = |specs: &[&str]| parse_model_fields(&specs.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>());
+    let (fields, many) = specs(&["title:string", "photos:attachments", "scans:attachments"]).unwrap();
+    assert_eq!((fields.len(), many), (1, vec!["photos".to_owned(), "scans".to_owned()]));
+    let error = |spec: &[&str]| specs(spec).unwrap_err().message;
+    assert_eq!(error(&["photos:attachments?"]), "`photos:attachments` takes no `?` or `^`");
+    assert_eq!(error(&["photo:attachments"]), "invalid attachments name `photo`");
+    assert_eq!(error(&["Photos:attachments"]), "invalid attachments name `Photos`");
+    assert_eq!(error(&["photos:attachments", "photos:attachments"]), "field `photos` is listed twice");
+    assert_eq!(error(&["title:attachments", "x:bogus"]), "invalid attachments name `title`");
+    assert!(error(&["photos:attachments", "x:bogus"]).starts_with("unknown field type `bogus`"));
+}

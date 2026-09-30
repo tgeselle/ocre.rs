@@ -345,6 +345,40 @@ impl MultipartForm {
         Some(self.files.remove(index).1)
     }
 
+    /// Takes every file sent as `name` or `name[]` (an `<input type="file" multiple>`), in order.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use axum::{body::Body, extract::FromRequest, http::Request};
+    /// # use ocre::storage::Multipart;
+    /// # fn block_on<F: Future>(f: F) -> F::Output {
+    /// #     let waker = std::task::Waker::noop();
+    /// #     let mut cx = std::task::Context::from_waker(waker);
+    /// #     let mut f = std::pin::pin!(f);
+    /// #     loop { if let std::task::Poll::Ready(v) = f.as_mut().poll(&mut cx) { return v; } }
+    /// # }
+    /// let body = "--x\r\nContent-Disposition: form-data; name=\"photos\"; filename=\"a.png\"\r\n\
+    ///     Content-Type: image/png\r\n\r\nA\r\n\
+    ///     --x\r\nContent-Disposition: form-data; name=\"photos\"; filename=\"b.png\"\r\n\
+    ///     Content-Type: image/png\r\n\r\nB\r\n--x--\r\n";
+    /// let request = Request::post("/albums/1/photos")
+    ///     .header("content-type", "multipart/form-data; boundary=x")
+    ///     .body(Body::from(body))
+    ///     .unwrap();
+    /// let Multipart(mut form) = block_on(Multipart::<1024>::from_request(request, &())).unwrap();
+    /// let names: Vec<String> = form.files("photos").into_iter().map(|file| file.filename).collect();
+    /// assert_eq!(names, ["a.png", "b.png"]);
+    /// assert!(form.files("photos").is_empty()); // taken
+    /// ```
+    pub fn files(&mut self, name: &str) -> Vec<Upload> {
+        let listed = format!("{name}[]");
+        let (taken, kept) =
+            std::mem::take(&mut self.files).into_iter().partition(|(field, _)| field == name || *field == listed);
+        self.files = kept;
+        taken.into_iter().map(|(_, upload)| upload).collect()
+    }
+
     /// Splits `body` at `boundary`. Parts without a `name` are skipped.
     pub(crate) fn parse(body: Bytes, boundary: &str) -> Result<Self> {
         let malformed = |detail: &str| Error::bad_request(format!("Malformed multipart/form-data body: {detail}"));

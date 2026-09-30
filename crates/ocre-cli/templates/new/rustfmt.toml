@@ -1,0 +1,3 @@
+# `cargo fmt` style; `ocre g` formats what it writes with it, and `ocre ci` checks it.
+max_width = 120
+use_small_heuristics = "Max"

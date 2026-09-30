@@ -63,18 +63,20 @@ pub fn split_words(input: &str) -> Vec<String> {
     words
 }
 
+/// Singular and plural of the irregular nouns generators know.
+const IRREGULAR: &[(&str, &str)] = &[
+    ("person", "people"),
+    ("child", "children"),
+    ("man", "men"),
+    ("woman", "women"),
+    ("mouse", "mice"),
+    ("goose", "geese"),
+    ("tooth", "teeth"),
+    ("foot", "feet"),
+];
+
 /// English plural for the regular cases generators need.
 pub fn pluralize(word: &str) -> String {
-    const IRREGULAR: &[(&str, &str)] = &[
-        ("person", "people"),
-        ("child", "children"),
-        ("man", "men"),
-        ("woman", "women"),
-        ("mouse", "mice"),
-        ("goose", "geese"),
-        ("tooth", "teeth"),
-        ("foot", "feet"),
-    ];
     if let Some((_, plural)) = IRREGULAR.iter().find(|(singular, _)| *singular == word) {
         return (*plural).to_owned();
     }
@@ -88,6 +90,18 @@ pub fn pluralize(word: &str) -> String {
     } else {
         format!("{word}s")
     }
+}
+
+/// The singular that [`pluralize`] turns into `word` (`photos` -> `photo`),
+/// or `None` when `word` is not such a plural.
+pub fn singularize(word: &str) -> Option<String> {
+    let candidates = [
+        IRREGULAR.iter().find(|(_, plural)| *plural == word).map(|(singular, _)| (*singular).to_owned()),
+        word.strip_suffix("ies").map(|stem| format!("{stem}y")),
+        word.strip_suffix("es").map(str::to_owned),
+        word.strip_suffix('s').map(str::to_owned),
+    ];
+    candidates.into_iter().flatten().find(|candidate| !candidate.is_empty() && pluralize(candidate) == word)
 }
 
 /// Rust keywords (strict and reserved, 2024 edition): never a function or module name.

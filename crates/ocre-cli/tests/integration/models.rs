@@ -269,3 +269,43 @@ fn polymorphic_references_point_to_one_of_several_models() {
     assert!(!ok);
     assert_eq!(report["error"], "polymorphic `status` would be named `Status`, a name the model already uses");
 }
+
+#[test]
+fn many_attachments_get_a_child_model_and_api_routes() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    let (report, ok) = sandbox.json(&["g", "api", "Album", "title:string", "photos:attachments"], &root);
+    assert!(ok, "{report}");
+    let created = report["created"].as_array().unwrap();
+    for file in ["migrations/0002_create_album_photos.sql", "src/models/album_photo.rs", "src/albums_api.rs"] {
+        assert!(created.contains(&json!(file)), "{file} in {report}");
+    }
+    let read = |path: &str| fs::read_to_string(root.join(path)).unwrap();
+    let album = read("src/models/album.rs");
+    for expected in [
+        "    pub async fn attach_photos(",
+        "            .map(|file| crate::models::album_photo::NewAlbumPhoto { album_id: self.id, file: Some(file) })",
+        "        self.purge_photos(ctx).await?;\n        self.attach_photos(ctx, uploads).await",
+        "    before_delete(ctx, id).await?;\n    purge_photos(ctx, id).await?;\n",
+        "async fn purge_photos(ctx: &Ctx, id: i64) -> Result<()> {",
+    ] {
+        assert!(album.contains(expected), "missing {expected}\n{album}");
+    }
+    assert!(
+        read("migrations/0002_create_album_photos.sql")
+            .contains("album_id INTEGER NOT NULL REFERENCES albums(id) ON DELETE CASCADE")
+    );
+    let api = read("src/albums_api.rs");
+    for expected in [
+        ".route(\"/api/albums/{id}/photos\", get(list_photos).post(attach_photos))",
+        ".route(\"/api/albums/{id}/photos/{file_id}\", get(photo_file).delete(delete_photo))",
+        "const PHOTOS_LIMIT: usize = 10 * crate::models::album_photo::FILE.max_bytes + 64 * 1024;",
+        "    let uploads = form.files(\"photos\");",
+        ", FieldError, storage::{self, Disposition, Multipart}",
+    ] {
+        assert!(api.contains(expected), "missing {expected}\n{api}");
+    }
+    let (report, ok) = sandbox.json(&["g", "model", "Shelf", "photos:attachments?"], &root);
+    assert!(!ok);
+    assert_eq!(report["error"], "`photos:attachments` takes no `?` or `^`");
+}

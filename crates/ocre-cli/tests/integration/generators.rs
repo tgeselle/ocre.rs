@@ -597,3 +597,27 @@ fn data_loaders_compile_a_json_file_into_the_worker() {
         "src/lib.rs is missing the `// ocre:modules` marker"
     );
 }
+
+#[test]
+fn generated_rust_is_formatted_by_rustfmt_when_available() {
+    let mut sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    sandbox.remove_tool("rustfmt");
+    let (report, ok) = sandbox.json(&["g", "scaffold", "Post", "title:string", "body:text?"], &root);
+    assert!(ok, "{report}");
+    for file in ["src/models/post.rs", "src/posts.rs", "src/lib.rs", "tests/posts.rs"] {
+        let status = std::process::Command::new("rustfmt")
+            .args(["--edition", "2024", "--check", file])
+            .current_dir(&root)
+            .status()
+            .unwrap();
+        assert!(status.success(), "{file} is not rustfmt-clean");
+    }
+    // A rustfmt that fails, or none at all: the text is written as generated.
+    sandbox.script("rustfmt", "#!/bin/sh\nexit 1\n");
+    assert!(sandbox.json(&["g", "model", "Tag", "name:string"], &root).1);
+    sandbox.remove_tool("rustfmt");
+    sandbox.isolate_path();
+    assert!(sandbox.json(&["g", "model", "Label", "name:string"], &root).1);
+    assert!(fs::read_to_string(root.join("src/models/label.rs")).unwrap().contains("pub fn query() -> Query<Label>"));
+}

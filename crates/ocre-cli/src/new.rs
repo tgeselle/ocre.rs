@@ -35,6 +35,7 @@ const FILES: &[(&str, &str)] = &[
     ("package.json", include_str!("../templates/new/package.json")),
     ("tsconfig.json", include_str!("../templates/new/tsconfig.json")),
     ("rust-toolchain.toml", include_str!("../templates/new/rust-toolchain.toml")),
+    ("rustfmt.toml", include_str!("../templates/new/rustfmt.toml")),
     (".gitignore", include_str!("../templates/new/gitignore")),
     ("AGENTS.md", include_str!("../templates/new/AGENTS.md")),
     ("migrations/.gitkeep", ""),

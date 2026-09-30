@@ -7,7 +7,7 @@
 use minijinja::Value;
 use serde::Serialize;
 
-use super::{Edits, fields::parse_fields, model::ensure_model, register_routes, templates::render};
+use super::{Edits, fields::parse_model_fields, model::ensure_model, register_routes, templates::render};
 use crate::{
     CliResult,
     names::{ModelNames, RUST_KEYWORDS, humanize, is_identifier, split_words},
@@ -146,11 +146,11 @@ struct ResourceContext<'a> {
 
 pub fn resource(project: &Project, name: &str, specs: &[String], api: bool) -> CliResult {
     let names = ModelNames::parse(name)?;
-    let fields = parse_fields(specs)?;
+    let (fields, many) = parse_model_fields(specs)?;
     let json = api || project.api_only;
     let command = format!("ocre g resource {name} {}{}", specs.join(" "), if api { " --api" } else { "" });
     let mut edits = Edits::new(project);
-    ensure_model(&mut edits, &names, &fields, &command)?;
+    ensure_model(&mut edits, &names, &fields, &many, &command)?;
     let ModelNames { model, singular, plural, human_singular, human_plural } = &names;
     let context = ResourceContext {
         command: &command,

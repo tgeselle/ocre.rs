@@ -198,3 +198,17 @@ fn body_read_errors_are_400() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body.contains("Could not read the request body: reset"));
 }
+
+#[test]
+fn several_files_of_one_input_come_in_order() {
+    let files: &[(&str, &str, &str, &[u8])] = &[
+        ("photos", "a.png", "image/png", b"A"),
+        ("cover", "c.png", "image/png", b"C"),
+        ("photos[]", "b.png", "image/png", b"B"),
+    ];
+    let mut form = parse(&body(&[], files)).unwrap();
+    let names: Vec<String> = form.files("photos").into_iter().map(|file| file.filename).collect();
+    assert_eq!(names, ["a.png", "b.png"]);
+    assert!(form.files("photos").is_empty(), "taken");
+    assert_eq!(form.file("cover").unwrap().filename, "c.png", "other inputs stay");
+}

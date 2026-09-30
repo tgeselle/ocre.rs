@@ -33,3 +33,15 @@ fn rejects_names_that_are_not_identifiers() {
     assert!(ModelNames::parse("2Fast").is_err());
     assert!(ModelNames::parse("--").is_err());
 }
+
+#[test]
+fn singularizes_what_pluralize_makes() {
+    for (plural, singular) in
+        [("photos", "photo"), ("categories", "category"), ("boxes", "box"), ("keys", "key"), ("people", "person")]
+    {
+        assert_eq!(singularize(plural).as_deref(), Some(singular), "{plural}");
+    }
+    for not_plural in ["photo", "s", "data", "series_x"] {
+        assert_eq!(singularize(not_plural), None, "{not_plural}");
+    }
+}

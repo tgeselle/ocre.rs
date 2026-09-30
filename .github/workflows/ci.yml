@@ -96,12 +96,15 @@ jobs:
           ocre g cache --json
           ocre g data countries --json
           ocre g locale en fr --json
+          printf 'fr:\n  app:\n    welcome: "Bienvenue"\n' > locales/fr.yml
           # Rich text (Trix), optimistic locking and a self join.
           ocre g scaffold Article title:string body:rich_text summary:rich_text? lock_version:integer cover:attachment? --json
           ocre g api Wiki name:string content:rich_text lock_version:integer --graphql --json
           ocre g model Employee name:string employee:references:manager_id? --json
           ocre g scaffold Remark body:text subject:polymorphic:book,review --json
           ocre g model Sticker label:string owner:polymorphic:book,sticker? --json
+          ocre g api Album title:string photos:attachments --json
+          ocre g model Gallery name:string images:attachments scans:attachments --json
           ocre g migration add_lock_version_to_books lock_version:integer --json
           # CI workflow, PWA files, a custom domain (type-checked by tsc below).
           ocre g ci --json
@@ -155,6 +158,5 @@ jobs:
           ocre schedules --json
           ocre doctor --json
           npx tsc -p .
-          # cargo test, then the wasm32 check.
-          ocre test --json
-          cargo check --target wasm32-unknown-unknown
+          # fmt, clippy, cargo test, the wasm32 check and missing translations.
+          ocre ci --json

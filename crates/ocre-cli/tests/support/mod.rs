@@ -59,6 +59,9 @@ impl Sandbox {
         for name in FAKES {
             sandbox.script(name, include_str!("fake_cf.sh"));
         }
+        // Generators pipe Rust through rustfmt; tests check the text as written
+        // (`remove_tool("rustfmt")` uses the real one).
+        sandbox.script("rustfmt", "#!/bin/sh\nexec cat\n");
         sandbox
     }
 

@@ -170,6 +170,8 @@ impl<'a> Edits<'a> {
         let mut record = record::Record::new(command, &options.invocation);
         for (path, contents, existed) in self.files {
             let full = self.project.root.join(&path);
+            // Generated Rust goes through rustfmt, so `cargo fmt --check` (`ocre ci`) passes.
+            let contents = if path.ends_with(".rs") { rustfmt(&self.project.root, contents) } else { contents };
             if existed {
                 let old = std::fs::read_to_string(&full)?;
                 if old == contents {
@@ -192,6 +194,28 @@ impl<'a> Edits<'a> {
             record.save(&self.project.root)?;
         }
         Ok(report)
+    }
+}
+
+/// `contents` as rustfmt formats it (with the app's rustfmt.toml); unchanged
+/// when rustfmt is missing or refuses it.
+fn rustfmt(root: &std::path::Path, contents: String) -> String {
+    use std::{
+        io::Write as _,
+        process::{Command, Stdio},
+    };
+    let child = Command::new("rustfmt")
+        .args(["--edition", "2024"])
+        .current_dir(root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn();
+    let Ok(mut child) = child else { return contents };
+    let written = child.stdin.take().is_some_and(|mut stdin| stdin.write_all(contents.as_bytes()).is_ok());
+    match child.wait_with_output() {
+        Ok(output) if written && output.status.success() => String::from_utf8(output.stdout).unwrap_or(contents),
+        _ => contents,
     }
 }
 

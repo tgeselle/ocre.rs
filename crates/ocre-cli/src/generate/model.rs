@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use super::{
     Edits, MODULES_MARKER,
-    fields::{ATTACHMENT_TYPES, Enumeration, Field, FieldType, parse_fields},
+    fields::{ATTACHMENT_TYPES, Enumeration, Field, FieldType, parse_model_fields},
     insert_after_marker, next_migration_path,
 };
 use crate::{CliResult, names::ModelNames, output::CliError, project::Project};
@@ -29,9 +29,9 @@ const TAKEN_TYPE_NAMES: &[&str] = &[
 
 pub fn model(project: &Project, name: &str, specs: &[String]) -> CliResult {
     let names = ModelNames::parse(name)?;
-    let fields = parse_fields(specs)?;
+    let (fields, many) = parse_model_fields(specs)?;
     let mut edits = Edits::new(project);
-    add_model(&mut edits, &names, &fields, &format!("ocre g model {name} {}", specs.join(" ")))?;
+    add_model(&mut edits, &names, &fields, &many, &format!("ocre g model {name} {}", specs.join(" ")))?;
     let mut report = edits.apply("generate model")?;
     report.next = vec!["ocre migrate".to_owned(), "cargo check --target wasm32-unknown-unknown".to_owned()];
     Ok(report)
@@ -43,16 +43,23 @@ pub(super) fn ensure_model(
     edits: &mut Edits,
     names: &ModelNames,
     fields: &[Field],
+    many: &[String],
     command: &str,
 ) -> Result<(), CliError> {
-    if edits.exists(&model_path(names)) { Ok(()) } else { add_model(edits, names, fields, command) }
+    if edits.exists(&model_path(names)) { Ok(()) } else { add_model(edits, names, fields, many, command) }
 }
 
 fn model_path(names: &ModelNames) -> String {
     format!("src/models/{}.rs", names.singular)
 }
 
-fn add_model(edits: &mut Edits, names: &ModelNames, fields: &[Field], command: &str) -> Result<(), CliError> {
+fn add_model(
+    edits: &mut Edits,
+    names: &ModelNames,
+    fields: &[Field],
+    many: &[String],
+    command: &str,
+) -> Result<(), CliError> {
     for field in fields {
         let Some(enumeration) = &field.enumeration else { continue };
         let own = [names.model.clone(), format!("New{}", names.model), format!("{}Changes", names.model)];
@@ -117,7 +124,75 @@ fn add_model(edits: &mut Edits, names: &ModelNames, fields: &[Field], command: &
         source = insert_after_marker(&source, ASSOCIATIONS_MARKER, &own_associations).unwrap_or(source);
     }
     edits.create(&model_path(names), source)?;
-    super::test_files::add_factory(edits, names, fields, command)
+    super::test_files::add_factory(edits, names, fields, command)?;
+    for name in many {
+        add_many_attachments(edits, names, name, command)?;
+    }
+    Ok(())
+}
+
+/// `photos:attachments` on `Post`: the child model `PostPhoto` (one file per
+/// row, `post:references file:attachment`), and on `Post` the methods to
+/// attach, replace and purge them; deleting a post deletes their files.
+fn add_many_attachments(edits: &mut Edits, parent: &ModelNames, name: &str, command: &str) -> Result<(), CliError> {
+    let singular = crate::names::singularize(name).expect("checked when parsed");
+    let child = ModelNames::parse(&format!("{}_{singular}", parent.singular))?;
+    let owner = Field::parse(&format!("{}:references", parent.singular))?;
+    let file = Field::parse("file:attachment")?;
+    add_model(edits, &child, &[owner, file], &[], command)?;
+    let (module, model, column) = (&child.singular, &child.model, format!("{}_id", parent.singular));
+    let lower = parent.human_singular.to_lowercase();
+    let code = format!(
+        r#"    /// Stores `uploads` as new {name} of this {lower} (Rails' `{name}.attach`):
+    /// every file is checked against `{module}::FILE` before any is stored.
+    pub async fn attach_{name}(
+        &self,
+        ctx: &Ctx,
+        uploads: Vec<ocre::storage::Upload>,
+    ) -> Result<Vec<crate::models::{module}::{model}>> {{
+        let rows: Vec<crate::models::{module}::New{model}> = uploads
+            .into_iter()
+            .map(|file| crate::models::{module}::New{model} {{ {column}: self.id, file: Some(file) }})
+            .collect();
+        let mut v = Validator::new();
+        for row in &rows {{
+            v.merge(row.validate());
+        }}
+        v.finish()?;
+        let mut stored = Vec::with_capacity(rows.len());
+        for row in rows {{
+            stored.push(crate::models::{module}::create(ctx, row).await?);
+        }}
+        Ok(stored)
+    }}
+
+    /// Replaces the {name} of this {lower} with `uploads` (Rails' `{name} =`).
+    pub async fn replace_{name}(
+        &self,
+        ctx: &Ctx,
+        uploads: Vec<ocre::storage::Upload>,
+    ) -> Result<Vec<crate::models::{module}::{model}>> {{
+        self.purge_{name}(ctx).await?;
+        self.attach_{name}(ctx, uploads).await
+    }}
+
+    /// Deletes the {name} of this {lower}, rows and files (Rails' `{name}.purge`).
+    pub async fn purge_{name}(&self, ctx: &Ctx) -> Result<()> {{
+        purge_{name}(ctx, self.id).await
+    }}
+"#
+    );
+    add_association(edits, parent, &code)?;
+    // The rows go with the parent (ON DELETE CASCADE); their files are deleted first.
+    let path = model_path(parent);
+    let source = edits.read(&path)?.expect("the parent model was just created");
+    let purge = format!(
+        "\n/// Deletes the {name} of the {lower} `id`, rows and files in R2.\nasync fn purge_{name}(ctx: &Ctx, id: i64) -> Result<()> {{\n    for row in crate::models::{module}::query().eq(\"{column}\", id).all(&ctx.db()?).await? {{\n        crate::models::{module}::delete(ctx, row.id).await?;\n    }}\n    Ok(())\n}}\n"
+    );
+    let delete = "    before_delete(ctx, id).await?;\n";
+    let source = source.replacen(delete, &format!("{delete}    purge_{name}(ctx, id).await?;\n"), 1) + &purge;
+    edits.update(&path, source);
+    Ok(())
 }
 
 /// Adds `code` after the associations marker of the existing model `target`.

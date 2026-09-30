@@ -82,7 +82,7 @@ pub(super) const RESERVED: &[&str] = &[
     "values",
 ];
 
-pub(super) const TYPES: &str = "string, text, rich_text, integer (int, small_int, big_int), float (double), decimal, boolean (bool), date, time, datetime (date_time), uuid, references, attachment, json (jsonb), enum:<value>,<value>..., polymorphic:<model>,<model>...; `lock_version:integer` turns on optimistic locking";
+pub(super) const TYPES: &str = "string, text, rich_text, integer (int, small_int, big_int), float (double), decimal, boolean (bool), date, time, datetime (date_time), uuid, references, attachment, json (jsonb), enum:<value>,<value>..., polymorphic:<model>,<model>..., attachments (many files, `photos:attachments`); `lock_version:integer` turns on optimistic locking";
 
 /// Content types an attachment accepts until the app edits its `Rules`:
 /// common images, PDF and plain text, all safe to display inline.
@@ -513,6 +513,35 @@ pub(super) fn parse_fields(specs: &[String]) -> Result<Vec<Field>, CliError> {
         }
     }
     Ok(fields)
+}
+
+/// The fields of a model, and the names of its `photos:attachments` specs
+/// (many files each, stored as rows of a child model): `ocre g model`,
+/// `scaffold`, `api` and `resource` take them, other generators do not.
+pub(super) fn parse_model_fields(specs: &[String]) -> Result<(Vec<Field>, Vec<String>), CliError> {
+    let mut many = Vec::new();
+    let mut rest = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let Some((name, ty)) = spec.split_once(':').filter(|(_, ty)| ty.trim_end_matches(['?', '^']) == "attachments")
+        else {
+            rest.push(spec.clone());
+            continue;
+        };
+        if ty != "attachments" {
+            return Err(CliError::new(format!("`{name}:attachments` takes no `?` or `^`")).hint(format!(
+                "a record may have no {name}, and each file has its own key: write `{name}:attachments`"
+            )));
+        }
+        if !is_identifier(name) || crate::names::singularize(name).is_none() {
+            return Err(CliError::new(format!("invalid attachments name `{name}`"))
+                .hint("name the files in the plural, in snake_case, e.g. `photos:attachments`"));
+        }
+        if many.iter().any(|existing| existing == name) {
+            return Err(CliError::new(format!("field `{name}` is listed twice")).hint("names must differ"));
+        }
+        many.push(name.to_owned());
+    }
+    Ok((parse_fields(&rest)?, many))
 }
 
 #[cfg(test)]
