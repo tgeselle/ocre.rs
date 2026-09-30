@@ -4,7 +4,7 @@ Feature-level inventory of Rails 8.1 and Loco 1.2, with what Ocre has and how
 each part maps to Cloudflare's free plan. Collected from the official Rails
 guides and the Loco documentation source; every item links to its page.
 
-993 features: 703 done, 74 partial, 83 to do, 133 not applicable on Workers.
+993 features: 707 done, 72 partial, 81 to do, 133 not applicable on Workers.
 
 Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason given).
 (R) Rails, (L) Loco.
@@ -617,7 +617,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** Cloudflare Queues (decided): 10,000 operations/day on the free plan, about 3 per job, so about 3,300 jobs/day, 24 h retention, retries and dead-letter queues. Recurring work with Cron Triggers (5 per account on the free plan). Long jobs must split into steps: each invocation has the same CPU limit.
 
-41 features: 22 done, 3 partial, 1 to do, 15 not applicable.
+41 features: 23 done, 3 partial, 0 to do, 15 not applicable.
 
 ### Jobs
 
@@ -653,7 +653,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [x] **rescue_from in jobs** (R): `rescue_from` handles exceptions raised during job execution. *Ocre: handle a job's `Result` in its `perform` or its arm of the dispatch `match` (`.or_else(..)`), documented in guides/jobs.md.* [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
 - [x] **retry_on / discard_on** (R): Declaratively retry jobs on specific errors with wait/backoff and attempts, or discard them, with optional blocks. *Ocre: one policy in `consume`: 4xx errors (`NotFound`, `Invalid`...) are discarded, others retried with a doubling delay (30 s to 24 h) up to `maxRetries` per queue, then dead-lettered; per job by mapping errors in `perform`, per policy with a named queue.* [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
 - [x] **Missing record handling** (R): `ActiveJob::DeserializationError` is raised when a GlobalID argument record no longer exists and can be discarded or rescued. *Ocre: `find(..).or_404()?` in `perform` discards the job with a log line; a message that no longer decodes is dropped, never retried.* [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
-- [ ] **Job testing helpers** (R): Test helpers such as `assert_enqueued_with`, `assert_performed_jobs` and `perform_enqueued_jobs` verify job behavior. *Ocre: none; jobs are checked in `ocre dev` through the `[ocre jobs]` log lines.* [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
+- [x] **Job testing helpers** (R): Test helpers such as `assert_enqueued_with`, `assert_performed_jobs` and `perform_enqueued_jobs` verify job behavior. *Ocre: `ocre::testing::Client::jobs()` lists the jobs the app enqueued and those the local queue ran (`done`, `discarded`, `retried`), from the debug-only `GET /ocre/dev/jobs.json` the first `ocre g job` merges into `routes()`.* [active_job_basics](https://guides.rubyonrails.org/active_job_basics.html)
 - [-] **Redis queue backend** (L): Redis-backed job queue (worker_redis feature) with named priority queues (queue.queues, defaults default and mailer), num_workers, and dangerously_flush. *Not applicable: no Redis on Workers; Ocre uses Queues, KV and Durable Objects.* [loco/how-to/choose-queue-backend](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/choose-queue-backend.md)
 - [-] **Postgres queue backend** (L): Job queue stored in the pg_loco_queue table (created automatically) and dequeued with FOR UPDATE SKIP LOCKED, with pool, poll-interval and num_workers settings. *Not applicable: D1 is SQLite.* [loco/how-to/choose-queue-backend](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/choose-queue-backend.md)
 
@@ -670,7 +670,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** Receiving: Email Routing + Email Workers (free). Sending: Cloudflare Email Sending (free-plan terms not verified) or an HTTP provider such as Resend. Templates with askama.
 
-43 features: 33 done, 7 partial, 1 to do, 2 not applicable.
+43 features: 34 done, 7 partial, 0 to do, 2 not applicable.
 
 ### Mailer
 
@@ -718,7 +718,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [x] **Mailbox callbacks and bouncing** (R): `before_processing`/`after_processing`/`around_processing` callbacks and `bounce_with` to reject email with a reply. *Ocre: `email.reject(reason)` bounces, an `Err` bounces with a generic reason; callbacks are code around the `match` in `src/mailbox.rs`.* [action_mailbox_basics](https://guides.rubyonrails.org/action_mailbox_basics.html)
 - [~] **Inbound email status tracking** (R): InboundEmail records track status (pending, processing, delivered, failed, bounced) through processing. *Ocre: documented pattern, an `inbound_emails` table written by the mailbox; not generated.* [action_mailbox_basics](https://guides.rubyonrails.org/action_mailbox_basics.html)
 - [x] **Conductor for local development** (R): A local web UI at `/rails/conductor/action_mailbox/inbound_emails` lets developers compose and submit test inbound emails. *Ocre: the form at `/ocre/dev/mailbox` in `ocre dev`, posting to the dev server's local email endpoint.* [action_mailbox_basics](https://guides.rubyonrails.org/action_mailbox_basics.html)
-- [ ] **Mailbox testing helpers** (R): `receive_inbound_email_from_mail` and related helpers exercise mailboxes in tests. *Ocre: none; `InboundEmail` only exists in workerd, so mailboxes are tested through `ocre dev`.* [action_mailbox_basics](https://guides.rubyonrails.org/action_mailbox_basics.html)
+- [x] **Mailbox testing helpers** (R): `receive_inbound_email_from_mail` and related helpers exercise mailboxes in tests. *Ocre: `ocre::testing::Client::receive_email(from, to, subject, body)` posts a message to the local email endpoint, which runs the mailbox like Email Routing would.* [action_mailbox_basics](https://guides.rubyonrails.org/action_mailbox_basics.html)
 - [~] **InboundEmail incineration** (R): Processed inbound emails are automatically destroyed after a configurable `incinerate_after` period. *Ocre: documented pattern, a schedule that deletes old `inbound_emails` rows.* [action_mailbox_basics](https://guides.rubyonrails.org/action_mailbox_basics.html)
 
 ## File storage and rich text
@@ -1099,7 +1099,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** Native unit tests for pure code; request tests need workerd (`cf dev`/Miniflare), which is slow, so Ocre should offer a harness that starts one server for a whole test run.
 
-78 features: 50 done, 13 partial, 7 to do, 8 not applicable.
+78 features: 52 done, 11 partial, 7 to do, 8 not applicable.
 
 ### Testing
 
@@ -1165,9 +1165,9 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [x] **Email delivery/enqueue assertions** (R): assert_emails, assert_no_emails, assert_enqueued_emails and assert_enqueued_email_with check that mail was sent or enqueued. *Ocre: `Client::deliveries`.* [testing](https://guides.rubyonrails.org/testing.html)
 - [x] **Mailer testing in functional/system tests** (R): Controller and system tests can check that an action or user flow sends email. *Ocre: Request tests read `Client::deliveries`.* [testing](https://guides.rubyonrails.org/testing.html)
 - [x] **Job tests in isolation** (R): ActiveJob::TestCase runs jobs on their own with perform_now and provides assertion helpers. *Ocre: `perform` is a plain async function over `Ctx`; request tests run jobs through the test server's queue.* [testing](https://guides.rubyonrails.org/testing.html)
-- [~] **Job enqueue/perform assertions** (R): assert_enqueued_jobs, assert_enqueued_with, assert_performed_jobs, assert_performed_with and perform_enqueued_jobs check jobs triggered by other code. *Ocre: `eventually` waits for a job's effect; no enqueue assertion.* [testing](https://guides.rubyonrails.org/testing.html)
+- [x] **Job enqueue/perform assertions** (R): assert_enqueued_jobs, assert_enqueued_with, assert_performed_jobs, assert_performed_with and perform_enqueued_jobs check jobs triggered by other code. *Ocre: `client.jobs().enqueued` and `.performed` (with `eventually` for runs), read from `GET /ocre/dev/jobs.json` in `ocre dev` builds.* [testing](https://guides.rubyonrails.org/testing.html)
 - [x] **Test queue adapter** (R): The :test queue adapter records enqueued jobs instead of running them. *Ocre: The local queue of the test server (Miniflare).* [testing](https://guides.rubyonrails.org/testing.html)
-- [~] **Testing job exceptions** (R): assert_raises together with perform_enqueued_jobs checks the errors a job raises. *Ocre: Failures show in the test log (`Log::wait_for`).* [testing](https://guides.rubyonrails.org/testing.html)
+- [x] **Testing job exceptions** (R): assert_raises together with perform_enqueued_jobs checks the errors a job raises. *Ocre: a failing job shows as `outcome: "retried"` or `"discarded"` in `client.jobs().performed`, and its error in the test log (`Log::wait_for`).* [testing](https://guides.rubyonrails.org/testing.html)
 - [~] **Action Cable connection tests** (R): ActionCable::Connection::TestCase simulates a connection with cookies, headers and params, then checks for rejection or the connection identifiers. *Ocre: `Client::broadcasts` reads broadcasts; no WebSocket client helper.* [testing](https://guides.rubyonrails.org/testing.html)
 - [~] **Action Cable channel tests** (R): ActionCable::Channel::TestCase subscribes to a channel, performs actions and checks stream subscriptions and transmitted messages. *Ocre: See above.* [testing](https://guides.rubyonrails.org/testing.html)
 - [x] **Broadcast assertions** (R): assert_broadcasts, assert_broadcast_on and assert_no_broadcasts check broadcasts sent from models, jobs or controllers. *Ocre: `Client::broadcasts`.* [testing](https://guides.rubyonrails.org/testing.html)

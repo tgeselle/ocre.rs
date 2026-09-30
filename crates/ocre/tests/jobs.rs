@@ -151,3 +151,25 @@ fn retries_back_off_from_the_due_time() {
     assert_eq!(retry_delay(at + 50_000, at), 86_400);
     assert_eq!(retry_delay(i64::MAX, i64::MIN), 86_400);
 }
+
+#[test]
+fn dev_routes_list_recent_jobs_and_runs() {
+    use axum::http::Request;
+    use tower_service::Service;
+
+    for n in 0..55 {
+        record_enqueued("default", &Payload::Job(json!({"send_welcome": {"user_id": n}})));
+        record_performed("send_welcome", if n % 2 == 0 { "done" } else { "retried" });
+    }
+    let email = Email::new("ada@example.com", "Hi", "Hello");
+    record_enqueued("default", &Payload::Mail(Box::new(email)));
+    let mut app = dev_routes::<()>();
+    let request = Request::get("/ocre/dev/jobs.json").body(axum::body::Body::empty()).unwrap();
+    let response = crate::support::block_on(app.call(request)).unwrap();
+    let jobs: serde_json::Value = serde_json::from_str(&crate::support::body_text(response)).unwrap();
+    let (enqueued, performed) = (jobs["enqueued"].as_array().unwrap(), jobs["performed"].as_array().unwrap());
+    assert_eq!((enqueued.len(), performed.len()), (50, 50), "the last 50 of each; emails are not jobs");
+    assert_eq!(enqueued.last().unwrap()["job"], json!({"send_welcome": {"user_id": 54}}));
+    assert_eq!(enqueued.last().unwrap()["queue"], "default");
+    assert_eq!(performed.last().unwrap()["outcome"], "done");
+}

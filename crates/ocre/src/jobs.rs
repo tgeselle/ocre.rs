@@ -179,7 +179,7 @@ pub(crate) struct Envelope {
     pub payload: Payload,
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Payload {
     /// An app job, as serialized by the app (`{"send_welcome": {"user_id": 1}}`).
@@ -334,6 +334,117 @@ fn preview(text: &str) -> String {
     match text.char_indices().nth(200) {
         Some((end, _)) => format!("{}...", &text[..end]),
         None => text.to_owned(),
+    }
+}
+
+/// Development endpoint listing recent jobs, served by `ocre dev` only, for
+/// tests (Rails' `assert_enqueued_with` and `assert_performed_jobs`).
+///
+/// `GET /ocre/dev/jobs.json` answers the last 50 jobs this Worker instance
+/// enqueued and the last 50 it ran, oldest first:
+/// `{"enqueued": [{"id": 1, "queue": "JOBS", "job": {"send_welcome": {"user_id": 7}}}],
+/// "performed": [{"id": 2, "job": "send_welcome", "outcome": "done"}]}`. The
+/// outcome is `done`, `discarded` or `retried`, as [`consume`] logs it.
+/// `ocre::testing::Client::jobs` reads it.
+///
+/// Debug builds only (`ocre dev`); release builds (`ocre deploy`) get an
+/// empty router, so it is a 404 in production. The first `ocre g job`
+/// merges it into `routes()`. It uses no billed resource: the lists live
+/// in the Worker's memory.
+///
+/// # Examples
+///
+/// ```
+/// use axum::Router;
+/// use ocre::Ctx;
+///
+/// fn routes() -> Router<Ctx> {
+///     Router::new().merge(ocre::jobs::dev_routes())
+/// }
+/// # let _ = routes;
+/// ```
+pub fn dev_routes<S: Clone + Send + Sync + 'static>() -> axum::Router<S> {
+    #[cfg(not(debug_assertions))]
+    {
+        axum::Router::new()
+    }
+    #[cfg(debug_assertions)]
+    axum::Router::new().route("/ocre/dev/jobs.json", axum::routing::get(|| async { axum::Json(dev::snapshot()) }))
+}
+
+/// Remembers a job sent to the queue bound as `binding` (debug builds only; emails are listed by the mail pages).
+pub(crate) fn record_enqueued(binding: &str, payload: &Payload) {
+    #[cfg(debug_assertions)]
+    if let Payload::Job(job) = payload {
+        dev::enqueued(binding, job);
+    }
+    #[cfg(not(debug_assertions))]
+    let _ = (binding, payload);
+}
+
+/// Remembers how a job run ended: `done`, `discarded` or `retried` (debug builds only).
+pub(crate) fn record_performed(job: &str, outcome: &str) {
+    #[cfg(debug_assertions)]
+    dev::performed(job, outcome);
+    #[cfg(not(debug_assertions))]
+    let _ = (job, outcome);
+}
+
+#[cfg(debug_assertions)]
+mod dev {
+    use std::sync::{Mutex, PoisonError};
+
+    use serde::Serialize;
+    use serde_json::Value;
+
+    /// How many jobs each list keeps.
+    const KEEP: usize = 50;
+
+    #[derive(Debug, Clone, Serialize)]
+    pub(super) struct Enqueued {
+        id: u64,
+        queue: String,
+        job: Value,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    pub(super) struct Performed {
+        id: u64,
+        job: String,
+        outcome: String,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    pub(super) struct Snapshot {
+        enqueued: Vec<Enqueued>,
+        performed: Vec<Performed>,
+    }
+
+    static JOBS: Mutex<(u64, Snapshot)> = Mutex::new((1, Snapshot { enqueued: Vec::new(), performed: Vec::new() }));
+
+    fn keep<T>(list: &mut Vec<T>, item: T) {
+        list.push(item);
+        if list.len() > KEEP {
+            list.remove(0);
+        }
+    }
+
+    pub(super) fn enqueued(queue: &str, job: &Value) {
+        let mut jobs = JOBS.lock().unwrap_or_else(PoisonError::into_inner);
+        let id = jobs.0;
+        jobs.0 += 1;
+        keep(&mut jobs.1.enqueued, Enqueued { id, queue: queue.to_owned(), job: job.clone() });
+    }
+
+    pub(super) fn performed(job: &str, outcome: &str) {
+        let mut jobs = JOBS.lock().unwrap_or_else(PoisonError::into_inner);
+        let id = jobs.0;
+        jobs.0 += 1;
+        keep(&mut jobs.1.performed, Performed { id, job: job.to_owned(), outcome: outcome.to_owned() });
+    }
+
+    pub(super) fn snapshot() -> Snapshot {
+        JOBS.lock().unwrap_or_else(PoisonError::into_inner).1.clone()
     }
 }
 

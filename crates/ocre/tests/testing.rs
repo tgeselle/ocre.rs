@@ -200,6 +200,42 @@ fn deliveries_and_broadcasts_read_the_captures() {
 }
 
 #[test]
+fn jobs_read_the_capture_and_emails_reach_the_mailbox() {
+    let jobs = json!({"enqueued": [{"id": 1, "queue": "default", "job": {"send_welcome": {"user_id": 7}}},
+                                   {"id": 2, "queue": "default", "job": 3}, {"id": 4, "queue": "urgent", "job": "cleanup"}],
+                      "performed": [{"id": 3, "job": "send_welcome", "outcome": "done"}]});
+    let (base, requests) = serve(vec![response("200 OK", &[], &jobs.to_string()), response("200 OK", &[], "accepted")]);
+    let mut client = Client::with_base_url(&base);
+    let jobs = client.jobs();
+    assert!(requests.recv().unwrap().starts_with("GET /ocre/dev/jobs.json "));
+    assert_eq!(
+        jobs.enqueued.iter().map(EnqueuedJob::name).collect::<Vec<_>>(),
+        [Some("send_welcome"), None, Some("cleanup")]
+    );
+    assert_eq!(jobs.performed[0].outcome, "done");
+
+    client.receive_email("ada@example.com", "support@example.com", "Help", "Line 1\nLine 2").assert_success();
+    let request = requests.recv().unwrap();
+    assert!(
+        request.starts_with("POST /cdn-cgi/local/email?from=ada%40example.com&to=support%40example.com "),
+        "{request}"
+    );
+    assert!(request.contains("content-type: message/rfc822"), "{request}");
+    assert!(
+        request.contains("\r\n\r\nFrom: ada@example.com\r\nTo: support@example.com\r\nSubject: Help\r\n"),
+        "{request}"
+    );
+    assert!(request.ends_with("Content-Transfer-Encoding: 8bit\r\n\r\nLine 1\r\nLine 2"), "{request}");
+}
+
+#[test]
+fn raw_emails_encode_non_ascii_subjects() {
+    let raw = raw_email("a@x.test", "b@x.test", "Café", "Hi\r\nthere", 7);
+    assert!(raw.contains("Subject: =?UTF-8?B?Q2Fmw6k=?=\r\nMessage-ID: <7."), "{raw}");
+    assert!(raw.ends_with("\r\n\r\nHi\r\nthere"));
+}
+
+#[test]
 fn an_unreachable_server_panics_with_the_url() {
     let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     let message = panics(|| drop(Client::with_base_url(&format!("http://127.0.0.1:{port}")).get("/up")));

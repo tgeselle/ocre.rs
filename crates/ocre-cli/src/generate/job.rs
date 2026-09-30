@@ -7,7 +7,7 @@
 use std::fmt::Write as _;
 
 use super::{
-    Edits, MODULES_MARKER,
+    Edits, MODULES_MARKER, ROUTES_MARKER,
     fields::{RESERVED, parse_fields},
     insert_after_marker,
     mailer::pascal,
@@ -214,6 +214,11 @@ fn wire(edits: &mut Edits) -> Result<String, CliError> {
     let lib = insert_after_marker(&lib, MODULES_MARKER, "mod jobs;").ok_or_else(|| {
         CliError::new("src/lib.rs is missing the `// ocre:modules` marker")
             .hint("put `// ocre:modules` on its own line where `mod` declarations go")
+    })?;
+    // `GET /ocre/dev/jobs.json` for request tests (`Client::jobs`); a 404 in release builds.
+    let lib = insert_after_marker(&lib, ROUTES_MARKER, ".merge(ocre::jobs::dev_routes())").ok_or_else(|| {
+        CliError::new(format!("src/lib.rs is missing the `{ROUTES_MARKER}` marker"))
+            .hint(format!("put `{ROUTES_MARKER}` on its own line inside `routes()`, where `.route(...)` calls go"))
     })?;
     edits.update("src/lib.rs", lib + QUEUE_EVENT);
     edits.update("src/jobs/mod.rs", REGISTRY.to_owned());

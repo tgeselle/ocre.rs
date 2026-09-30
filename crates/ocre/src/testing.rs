@@ -481,6 +481,69 @@ impl Client {
         response.assert_status(200);
         response.json()
     }
+
+    /// Jobs the app enqueued and ran (Rails' `assert_enqueued_with`,
+    /// `assert_performed_jobs`): the last 50 of each, oldest first, kept by
+    /// the Worker instance. Reads `GET /ocre/dev/jobs.json`, which the first
+    /// `ocre g job` merges into `routes()` (`ocre::jobs::dev_routes()`).
+    /// Local queues deliver within a second or so: wait for a run with
+    /// [`eventually`].
+    ///
+    /// # Panics
+    ///
+    /// When the endpoint does not answer the expected JSON.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use ocre::testing::{Client, eventually};
+    ///
+    /// let mut client = Client::new();
+    /// client.post("/signups", &[("email", "ada@example.com")]);
+    /// let jobs = client.jobs();
+    /// assert_eq!(jobs.enqueued.last().unwrap().name(), Some("send_welcome"));
+    /// eventually(|| client.jobs().performed.iter().any(|run| run.job == "send_welcome" && run.outcome == "done").then_some(()));
+    /// ```
+    pub fn jobs(&mut self) -> Jobs {
+        let response = self.get("/ocre/dev/jobs.json");
+        response.assert_status(200);
+        response.json()
+    }
+
+    /// Delivers an email to the app's mailbox (`ocre g mailbox`), as
+    /// Cloudflare Email Routing would (Rails' `receive_inbound_email_from_mail`):
+    /// a plain-text message posted to the local server's email endpoint
+    /// (`POST /cdn-cgi/local/email?from=&to=`), which runs the Worker's
+    /// `email` event. The response says whether the mailbox accepted it.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// let mut client = ocre::testing::Client::new();
+    /// client.receive_email("ada@example.com", "support@example.com", "Help", "My order is late.").assert_success();
+    /// ```
+    pub fn receive_email(&mut self, from: &str, to: &str, subject: &str, body: &str) -> Response {
+        let query = serde_urlencoded::to_string([("from", from), ("to", to)]).expect("encoding two strings");
+        let raw = raw_email(from, to, subject, body, sequence());
+        self.request("POST", &format!("/cdn-cgi/local/email?{query}"), Some(("message/rfc822", raw.into_bytes())))
+    }
+}
+
+/// A plain-text RFC 5322 message; a non-ASCII subject is RFC 2047 encoded.
+fn raw_email(from: &str, to: &str, subject: &str, body: &str, n: u64) -> String {
+    let printable = subject.bytes().all(|byte| (0x20..0x7f).contains(&byte));
+    let subject = if printable {
+        subject.to_owned()
+    } else {
+        use base64::Engine as _;
+        format!("=?UTF-8?B?{}?=", base64::engine::general_purpose::STANDARD.encode(subject))
+    };
+    let body = body.replace("\r\n", "\n").replace('\n', "\r\n");
+    format!(
+        "From: {from}\r\nTo: {to}\r\nSubject: {subject}\r\nMessage-ID: <{n}.{}@ocre.test>\r\nMIME-Version: 1.0\r\n\
+         Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n{body}",
+        crate::now()
+    )
 }
 
 /// A message broadcast to a realtime channel, from [`Client::broadcasts`].
@@ -500,6 +563,68 @@ pub struct Broadcast {
     pub channel: String,
     /// The message: HTML or JSON text.
     pub message: String,
+}
+
+/// Jobs the app enqueued and ran, from [`Client::jobs`].
+///
+/// # Examples
+///
+/// ```
+/// let jobs: ocre::testing::Jobs = ocre::serde_json::from_str(
+///     r#"{"enqueued":[{"id":1,"queue":"default","job":{"send_welcome":{"user_id":7}}}],
+///         "performed":[{"id":2,"job":"send_welcome","outcome":"done"}]}"#,
+/// )
+/// .unwrap();
+/// assert_eq!(jobs.enqueued[0].name(), Some("send_welcome"));
+/// assert_eq!(jobs.performed[0].outcome, "done");
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+pub struct Jobs {
+    /// Jobs sent to a queue, oldest first.
+    pub enqueued: Vec<EnqueuedJob>,
+    /// Jobs the queue consumer ran, oldest first.
+    pub performed: Vec<PerformedJob>,
+}
+
+/// A job sent to a queue, from [`Client::jobs`].
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub struct EnqueuedJob {
+    /// Position in the capture, from 1 (shared with runs).
+    pub id: u64,
+    /// The queue: `default`, or the name given to `ocre::jobs::queue`.
+    pub queue: String,
+    /// The job as the app serialized it: `{"send_welcome": {"user_id": 7}}`.
+    pub job: Value,
+}
+
+impl EnqueuedJob {
+    /// The job's name: the key of its JSON object (`send_welcome`), as [`PerformedJob::job`] names it.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let job: ocre::testing::EnqueuedJob =
+    ///     ocre::serde_json::from_str(r#"{"id":1,"queue":"default","job":"cleanup"}"#).unwrap();
+    /// assert_eq!(job.name(), Some("cleanup"));
+    /// ```
+    pub fn name(&self) -> Option<&str> {
+        match &self.job {
+            Value::Object(map) => map.keys().next().map(String::as_str),
+            Value::String(name) => Some(name),
+            _ => None,
+        }
+    }
+}
+
+/// A job run by the queue consumer, from [`Client::jobs`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct PerformedJob {
+    /// Position in the capture, from 1 (shared with enqueued jobs).
+    pub id: u64,
+    /// The job's name (`send_welcome`), or `mail` for `deliver_later` emails.
+    pub job: String,
+    /// `done`, `discarded` (an error a retry cannot fix) or `retried`.
+    pub outcome: String,
 }
 
 /// Runs a future to completion on the test thread: `async` handlers,

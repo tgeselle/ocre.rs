@@ -268,10 +268,15 @@ pub(crate) fn send(
 ) -> impl Future<Output = Result<()>> + Send + use<> {
     SendFuture::new(async move {
         let delay = delay_seconds(delay)?;
-        let body = encode(payload?, now() + i64::from(delay))?;
+        let payload = payload?;
+        let recorded = cfg!(debug_assertions).then(|| payload.clone());
+        let body = encode(payload, now() + i64::from(delay))?;
         let queue = producer(&env, name)?;
         let message = MessageBuilder::new(body).content_type(QueueContentType::Text).delay_seconds(delay).build();
         queue.send(message).await?;
+        if let Some(payload) = recorded {
+            crate::jobs::record_enqueued(name, &payload);
+        }
         Ok(())
     })
 }
@@ -286,12 +291,16 @@ fn send_all(
             return Ok(());
         }
         let at = now();
-        let bodies = payloads.into_iter().map(|payload| encode(payload?, at)).collect::<Result<Vec<_>>>()?;
+        let payloads = payloads.into_iter().collect::<Result<Vec<_>>>()?;
+        let bodies = payloads.iter().map(|payload| encode(payload.clone(), at)).collect::<Result<Vec<_>>>()?;
         let queue = producer(&env, name)?;
         for batch in batches(bodies) {
             let messages =
                 batch.into_iter().map(|body| MessageBuilder::new(body).content_type(QueueContentType::Text).build());
             queue.send_batch(BatchMessageBuilder::new().messages(messages).build()).await?;
+        }
+        for payload in &payloads {
+            crate::jobs::record_enqueued(name, payload);
         }
         Ok(())
     })
@@ -391,6 +400,12 @@ where
                 }
             }
         };
+        let outcome = match &result {
+            Ok(()) => "done",
+            Err(err) if discards(err) => "discarded",
+            Err(_) => "retried",
+        };
+        crate::jobs::record_performed(&name, outcome);
         match result {
             Ok(()) => {
                 worker::console_log!("{LOG_PREFIX} {name} done");

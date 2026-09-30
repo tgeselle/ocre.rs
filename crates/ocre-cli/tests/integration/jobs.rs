@@ -286,6 +286,9 @@ fn job_errors_name_the_fix_and_write_nothing() {
     fs::write(root.join("src/lib.rs"), "fn main() {}\n").unwrap();
     let (report, _) = sandbox.json(&["g", "job", "Ping"], &root);
     assert_eq!(report["error"], "src/lib.rs is missing the `// ocre:modules` marker");
+    fs::write(root.join("src/lib.rs"), lib.replace("// ocre:routes", "")).unwrap();
+    let (report, _) = sandbox.json(&["g", "job", "Ping"], &root);
+    assert_eq!(report["error"], "src/lib.rs is missing the `// ocre:routes` marker");
     fs::write(root.join("src/lib.rs"), &lib).unwrap();
 
     // cloudflare.config.ts problems: named, nothing written.
