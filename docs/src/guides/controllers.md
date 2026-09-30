@@ -238,7 +238,7 @@ async fn page(Path(path): Path<String>) -> Response {
 | `.:format` segments | the `Accept` header with `ocre::Format` (below), or a `.json` route of its own |
 | `mount` a Rack app | `.merge(other_router)` or `.nest_service("/x", service)`; `ocre::graphql::routes` is one |
 | `draw` split route files | one `routes()` per module |
-| Unicode paths | write them percent-encoded (`.route("/caf%C3%A9", ..)`): axum matches the raw path, which browsers send encoded, so a `"/café"` route never matches; `Path` parameters arrive decoded (`café`) |
+| Unicode paths | wrap the path in `ocre::encode_path`: `.route(&ocre::encode_path("/café/{id}"), ..)`. axum matches the raw path, which browsers send percent-encoded (`/caf%C3%A9`), so a bare `"/café"` route never matches; `Path` parameters arrive decoded (`café`) |
 | Translated path segments | one route per language, pointing to the same handler (see [Translations](i18n.md)) |
 | `rails routes` | `ocre routes` |
 
@@ -252,6 +252,7 @@ A handler is an `async fn` whose arguments are axum extractors and whose return 
 | `Path(id): Path<i64>` | `{id}` in the path | the parsed value; a tuple or struct for several | 400 `Invalid URL: Cannot parse ...` |
 | `Query(q): Query<T>` | the query string, into a serde struct | `T` | 400 |
 | `Form(form): Form<T>` | a URL-encoded form body | `T` | 415 without `Content-Type: application/x-www-form-urlencoded`; 422 when it does not deserialize (e.g. `published=maybe` for a `bool`) |
+| `NestedForm(order): ocre::NestedForm<T>` | a URL-encoded form (or, on `GET`, the query string) with bracketed names: `order[name]`, `tag_ids[]`, `lines[0][qty]` | `T` with nested structs and `Vec`s (see [Views: lists and nested records](views.md#lists-and-nested-records-in-one-form)) | 400 naming the field |
 | `ocre::Json(body): ocre::Json<T>` | a JSON body | `T` | JSON 400 (see [JSON APIs](json-apis.md#errors)) |
 | `page: ocre::Page` | `?limit=&offset=` | `page.limit` (1-100, default 50), `page.offset` | JSON 400 `limit must be between 1 and 100` |
 | `session: ocre::Session` | the encrypted session cookie | `get`, `insert`, `remove`, `clear`, `flash` | its methods fail with a 500 (logged) when `SECRET_KEY_BASE` is missing |
@@ -342,6 +343,22 @@ curl -s http://localhost:8787/posts/1 -H 'Accept: application/json'
 
 A missing `Accept`, `*/*` and `text/html` are `Html`; browsers get HTML. Other representations (Rails' request variants, a phone layout) are another `match` arm or another view struct chosen from a header.
 
+`Format::Markdown` (`Accept: text/markdown`) pairs with the `ocre::Markdown` response (`text/markdown; charset=utf-8`), to offer a page to LLM clients and command-line readers as Markdown (Rails 8.1's `format.md` and `render markdown:`):
+
+```rust,check
+use axum::response::{Html, IntoResponse, Response};
+use ocre::{Format, Markdown};
+
+/// GET /about: HTML, or Markdown for `Accept: text/markdown`.
+async fn about(format: Format) -> Response {
+    let (title, body) = ("About", "We make ochre.");
+    match format {
+        Format::Markdown => Markdown(format!("# {title}\n\n{body}\n")).into_response(),
+        _ => Html(format!("<h1>{title}</h1><p>{body}</p>")).into_response(),
+    }
+}
+```
+
 ### Files and downloads
 
 `ocre::storage::send_data` sends bytes the handler built as a file (Rails' `send_data`), with the right `Content-Type`, `Content-Length` and a sanitized `Content-Disposition` file name:
@@ -364,7 +381,43 @@ async fn export(State(ctx): State<Ctx>) -> Result<Response> {
 
 Files stored in R2 go out with `ocre::storage::serve` (Rails' `send_file` and `Rack::Sendfile`): the Worker hands R2's stream to Cloudflare without copying it through WebAssembly, and answers `Range` and `If-None-Match` requests (see [File storage](files.md)). Generated data should stay small: the body is built in memory (128 MB per Worker) and within the 10 ms of CPU.
 
-Streaming a response as it is produced (Rails' `ActionController::Live`, Server-Sent Events) is not provided: a Worker holding a connection open counts wall time but also needs CPU per chunk. For pages that update live, use WebSockets on a Durable Object (see [Realtime](realtime.md)).
+### Streaming: Server-Sent Events
+
+`ocre::sse::stream(state, step)` streams events while they are produced (Rails' `ActionController::Live` with `SSE`): the handler returns at once, then Ocre calls `step` for each event and the Worker sends it to the client right away, until `step` returns `None`. Pace events with `ocre::sleep(duration)`, which waits without using CPU:
+
+```rust,check
+use std::time::Duration;
+
+use axum::{Router, extract::Path, response::IntoResponse, routing::get};
+use ocre::{Ctx, sse::{self, Event}};
+
+pub fn routes() -> Router<Ctx> {
+    Router::new().route("/imports/{id}/progress", get(progress))
+}
+
+/// `data: 25`, `data: 50`... one second apart, then `event: done`.
+async fn progress(Path(id): Path<i64>) -> impl IntoResponse {
+    sse::stream(Some(0u32), move |percent: Option<u32>| async move {
+        let percent = percent?;
+        ocre::sleep(Duration::from_secs(1)).await;
+        Some(match percent {
+            100 => (Event::default().event("done").data(format!("import {id} finished")), None),
+            p => (Event::default().data((p + 25).to_string()), Some(p + 25)),
+        })
+    })
+}
+```
+
+```html
+<progress id="bar" max="100"></progress>
+<script>
+  const source = new EventSource("/imports/1/progress");
+  source.onmessage = (event) => { document.getElementById("bar").value = event.data; };
+  source.addEventListener("done", () => source.close());
+</script>
+```
+
+On the free plan: only each `step`'s work counts toward the 10 ms of CPU, not the waits, and a response may stream as long as the client stays connected. The whole stream is one request, so its binding calls share the per-request limits (50 subrequests, D1 queries included): a stream cannot poll D1 every second for minutes. `EventSource` reconnects about 3 s after a stream ends, each time a new request, so send a last event on which the page calls `source.close()`. To push changes to many open pages (a new comment for everyone), use WebSockets on a Durable Object instead (see [Realtime](realtime.md)).
 
 ## Error pages
 
@@ -664,6 +717,24 @@ async fn maintenance(Extension(ctx): Extension<Ctx>, req: Request, next: Next) -
     next.run(req).await
 }
 ```
+
+To turn away outdated browsers (Rails' `allow_browser versions: :modern`), add `ocre::security::AllowBrowser` to the page routes. `modern()` allows Safari 17.2, Chrome and Edge 120, Firefox 121 and Opera 106 and later, and refuses Internet Explorer; older browsers get `406 Not Acceptable` and a short "please upgrade your browser" page. Requests without a `User-Agent`, or from clients that are not browsers (bots, `curl`, uptime checks), always pass. It reads one header: no binding call, microseconds of CPU.
+
+```rust,check
+use axum::{Router, routing::get};
+use ocre::{Ctx, security::{AllowBrowser, Browser}};
+
+pub fn routes() -> Router<Ctx> {
+    Router::new()
+        .route("/dashboard", get(|| async { "dashboard" }))
+        // Rails' `allow_browser versions: :modern`, with Safari 16.4 accepted too.
+        .route_layer(AllowBrowser::modern().minimum(Browser::Safari, 16, 4))
+        // Declared after the layer: API clients are never turned away.
+        .route("/api/status", get(|| async { "OK" }))
+}
+```
+
+Replace the page with `.page(html)` (an HTML string, e.g. a rendered template).
 
 Rate limiting per action uses the Workers Rate Limiting binding through `ocre::security::rate_limit` (see [Security](security.md)). Loco's and Rails' other middleware map to the platform:
 

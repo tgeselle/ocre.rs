@@ -34,6 +34,8 @@ The examples below were run with `ocre 0.1.0` on an app created by `ocre new blo
 | [`ocre g job`](#ocre-g-job) | A background job on Cloudflare Queues |
 | [`ocre g schedule`](#ocre-g-schedule) | A task run by a Cron Trigger |
 | [`ocre g cache`](#ocre-g-cache) | The `CACHE` Workers KV binding |
+| [`ocre g ci`](#ocre-g-ci) | The GitHub Actions workflow: `ocre ci`'s checks, then `ocre deploy` on main |
+| [`ocre g pwa`](#ocre-g-pwa) | Web app manifest, service worker and icon, linked from the layout |
 | [`ocre g locale`](#ocre-g-locale) | Translation files |
 | [`ocre g override`](#ocre-g-override) | Copies of generator templates in `.ocre/templates/`, which then replace the built-in ones |
 | [`ocre g generator`](#ocre-g-generator) | An app generator in `.ocre/generators/<name>/` |
@@ -880,6 +882,49 @@ Next:
 ```
 
 Error: ``cloudflare.config.ts already has the `CACHE` binding`` with the hint ``nothing to generate: call `ocre::cache::fetch(&ctx, key, ttl, || async { ... })` in a handler``. See [Caching](../guides/caching.md).
+
+## ocre g ci
+
+```text
+ocre g ci
+```
+
+No arguments. Writes `.github/workflows/ci.yml`, the app's GitHub Actions workflow (Rails' generated CI config):
+
+- a `check` job on every push and pull request: checkout, `rustup component add rustfmt clippy` (`rust-toolchain.toml` adds the wasm32 target), a Rust cache, then the steps of [`ocre ci`](cli.md#ocre-ci) in the same order (`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, `cargo check --target wasm32-unknown-unknown`), and `ocre i18n missing` when `locales/*.yml` exist (it installs the CLI first);
+- a `deploy` job after it, on pushes to `main` only, one at a time: Node.js 22, `npm ci` (the pinned cf and wrangler), `cargo install --git https://github.com/tgeselle/ocre.rs ocre-cli`, then `ocre deploy --json` with `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` from the repository secrets.
+
+The comment at the top of the file lists the two secrets to add (Settings > Secrets and variables > Actions) and the token's permissions: Account "Workers Scripts: Edit" and "D1: Edit", plus "Queues: Edit", "Workers KV Storage: Edit" and "Workers R2 Storage: Edit" when the app uses them, and "Workers Routes: Edit" on the zone of a [custom domain](cli.md#ocre-domains). Commit `package-lock.json` and the KV ids the first `ocre deploy` writes into `cloudflare.config.ts` (see [Deployment](../guides/deployment.md#ci)). Free plan: GitHub Actions minutes are free for public repositories; the deploy uses no paid Cloudflare feature.
+
+```text
+  create  .github/workflows/ci.yml
+
+Next:
+  add the repository secrets CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID (see the comment at the top of the workflow)
+  ocre ci (the same checks, locally)
+  git add .github package-lock.json && git commit, then push to main
+```
+
+Error: `.github/workflows/ci.yml already exists` (the shared hint; `--force` rewrites it).
+
+## ocre g pwa
+
+```text
+ocre g pwa
+```
+
+No arguments; full-stack apps. Makes the app a Progressive Web App, like the manifest and service worker of new Rails 8 apps. Static files in the assets directory (`public/`), which Cloudflare serves before the Worker runs (free, not Worker requests):
+
+| File | Contents |
+|---|---|
+| `public/manifest.webmanifest` | Name (the Worker's), `start_url`, `display: standalone`, colors and the icon, so browsers offer to install the app |
+| `public/service-worker.js` | Caches the home page at install and answers with it when a page cannot load offline; `push` and `notificationclick` handlers for web push, to fill in |
+| `public/pwa.js` | Registers the service worker (a file, so the default `script-src 'self'` Content-Security-Policy allows it) |
+| `public/icon.svg` | A placeholder icon with the app's initial |
+
+It also inserts the `<link rel="manifest">`, `theme-color`, icon and `pwa.js` tags before `</head>` in `templates/layout.html`; `ocre destroy pwa` takes them out.
+
+Errors: `a PWA needs HTML pages; this app is API-only`, `templates/layout.html not found`, `templates/layout.html has no </head>`, and ``templates/layout.html already links a web app manifest`` (hint: ``nothing to generate: edit manifest.webmanifest in the assets directory``).
 
 ## ocre g locale
 

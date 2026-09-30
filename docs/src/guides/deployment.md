@@ -172,6 +172,8 @@ The value is read from the file, so it never appears in your shell history or pr
 
 Without `MAIL_ADAPTER`, everything that sends email fails in production, including the sign-up, magic-link and password-reset pages of `ocre g auth`. Details and free-plan limits of each adapter: [Email](email.md); every variable: [Configuration](../reference/configuration.md).
 
+`ocre doctor` checks this setup before a deploy (Loco's production safety check): its `production config` check fails when a plain-text variable of `worker.env` is named like a secret (`..._TOKEN`, `..._API_KEY`, `..._PASSWORD`...) or when `.gitignore` lacks `.dev.vars`, and warns on development values left in `worker.env` (`MAIL_ADAPTER = "log"`, `CACHE_STORE = "null"`, `LOG_LEVEL = "debug"`). A missing secret is not a boot failure on Workers: the request that needs it answers 500 and Workers Logs names the secret (`[ocre]` line), and `ocre doctor`'s `production secrets` check lists the missing ones ahead of time. Your own checks go in `.ocre/doctor/` as executables (see [`ocre doctor`](../reference/cli.md#ocre-doctor)).
+
 ### Rotating SECRET_KEY_BASE
 
 `ocre deploy` never changes an existing `SECRET_KEY_BASE`. To rotate it without signing anyone out, upload the current value as `SECRET_KEY_BASE_PREVIOUS` together with a new one (Worker secrets cannot be read back, so use the value you saved). In `.prod.vars`:
@@ -251,7 +253,7 @@ worker: {
 },
 ```
 
-and run `ocre deploy`. Cloudflare creates the DNS record and the certificate ([Custom Domains](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/)). The `workers.dev` address keeps working unless you add `workersDev: false`; `ocre deploy` then reports no `url`. (`domains` and `workersDev` are keys of cf's config types; this page did not deploy one.)
+and run `ocre deploy`. `ocre domains add blog.example.com` writes that entry (and `ocre domains remove` takes one out; see [`ocre domains`](../reference/cli.md#ocre-domains)). Cloudflare creates the DNS record and the certificate ([Custom Domains](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/)). The `workers.dev` address keeps working unless you add `workersDev: false`; `ocre deploy` then reports no `url`. (`domains` and `workersDev` are keys of cf's config types, and cf's loader accepts the entry `ocre domains` writes; this page did not deploy one.)
 
 A custom domain changes a few things in an Ocre app:
 
@@ -273,6 +275,8 @@ With a custom domain, a [Cloudflare WAF rate limiting rule](https://developers.c
 
 Apps made by `ocre new` have `observability: { enabled: true }` in `cloudflare.config.ts`, which keeps every request and log line in Workers Logs, searchable in the dashboard (Workers & Pages > your Worker > Logs, with a live view); search for `[ocre` to see Ocre's own lines. The free plan keeps 200,000 events a day for 3 days (see [Configuration](../reference/configuration.md#top-level-and-worker-keys)). From a terminal, `npx cf observability telemetry query --help` queries the same logs (`npx cf cli search "query worker logs"` finds related commands).
 
+`ocre logs` streams the deployed Worker's logs live (`--status error`, `--search <text>`, `--format json`), and `ctx.log()` writes structured lines whose fields Workers Logs indexes; to send errors to Sentry, see [Errors, logging and debugging](debugging.md).
+
 Ocre never shows internal errors to users: a 500 page or JSON error says `Internal server error`, and the details go to the log with a prefix:
 
 | Prefix | Written by |
@@ -288,37 +292,18 @@ Ocre never shows internal errors to users: a 500 page or JSON error says `Intern
 
 `ocre deploy` never needs `ocre login` in CI: cf authenticates with the `CLOUDFLARE_API_TOKEN` environment variable instead of a browser login, and takes the account from `CLOUDFLARE_ACCOUNT_ID` when the token can see several accounts (cf checks the token before any login or profile). `ocre deploy` runs cf with the environment it was given, and the CLI's hints name both variables when a Cloudflare call fails.
 
-1. Create a token in the dashboard (My Profile > API Tokens) that can edit what `ocre deploy` touches: Workers scripts, D1, and the Queues, KV namespaces and R2 buckets the app uses.
-2. Store it (and your account id, if the token sees several accounts) as secrets of the CI system.
-3. Run the first deploy locally (or commit afterwards) so the KV `id` that `ocre deploy` writes into `cloudflare.config.ts` is committed. A CI deploy without it finds the namespace by title and links it again, in its own checkout.
-4. Commit `package.json` and `package-lock.json`; the job installs the pinned `cf` and `wrangler` with `npm ci`.
-
-A GitHub Actions workflow along these lines (not run by these docs; GitHub's `ubuntu-latest` image has rustup):
-
-```yaml
-# .github/workflows/deploy.yml
-name: deploy
-on:
-  push:
-    branches: [main]
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - run: npm ci
-      - run: cargo install --git https://github.com/tgeselle/ocre.rs ocre-cli
-      - run: ocre deploy --json
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CF_SEND_TELEMETRY: "false"   # optional: cf's anonymous telemetry is on by default
+```sh
+ocre g ci
 ```
 
-`rust-toolchain.toml` makes rustup install the `wasm32-unknown-unknown` target on the first `cargo` call. `ocre deploy --json` prints the report described in [JSON output](#json-output); read `url` from it, or fail the job on `"ok": false` (the exit code is 1 then).
+writes `.github/workflows/ci.yml` (see [`ocre g ci`](../reference/generators.md#ocre-g-ci)): a `check` job on every push and pull request runs the steps of `ocre ci` (`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, the wasm32 check, and `ocre i18n missing` when the app has locales), then a `deploy` job runs `ocre deploy --json` on pushes to `main`. `ocre ci` runs the same checks on your machine first (Rails 8.1's local CI; `ocre ci --signoff` then marks the commit green with `gh signoff`). To set it up:
+
+1. Create a token in the dashboard (My Profile > API Tokens) that can edit what `ocre deploy` touches: Account permissions "Workers Scripts: Edit" and "D1: Edit", plus "Queues: Edit", "Workers KV Storage: Edit" and "Workers R2 Storage: Edit" when the app uses them, and the zone permission "Workers Routes: Edit" for custom domains.
+2. Store it as the repository secret `CLOUDFLARE_API_TOKEN`, and your account id as `CLOUDFLARE_ACCOUNT_ID` (needed when the token sees several accounts) in Settings > Secrets and variables > Actions.
+3. Run the first deploy locally (or commit afterwards) so the KV `id` that `ocre deploy` writes into `cloudflare.config.ts` is committed. A CI deploy without it finds the namespace by title and links it again, in its own checkout.
+4. Commit `package.json` and `package-lock.json`; the deploy job installs the pinned `cf` and `wrangler` with `npm ci`.
+
+The workflow installs the CLI with `cargo install --git https://github.com/tgeselle/ocre.rs ocre-cli` and caches Rust builds with `Swatinem/rust-cache`. It is yours to edit; `--force` rewrites it from the generator.
 
 On a developer machine with several Cloudflare logins, a cf profile does the same job as the token: `npx cf auth activate <profile> .` binds one to the app directory.
 

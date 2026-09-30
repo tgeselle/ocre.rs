@@ -65,6 +65,8 @@ The `MAIL_ADAPTER` variable names how mail leaves the Worker. Nothing is guessed
 
 For sign-up, magic-link and password-reset mail to any address on the free plan, use Resend. The `cloudflare` adapter on the free plan suits mail to yourself (alerts, reports).
 
+One email can use the other provider with `.delivery_method("cloudflare")` or `.delivery_method("resend")` (Rails' `delivery_method` and `delivery_method_options` per message): for example customer mail through Resend and internal alerts through Cloudflare Email Service, each with its own configuration above. While `MAIL_ADAPTER` is `log`, such emails are still only logged; an unknown name is a 500 naming the fix.
+
 With `MAIL_ADAPTER` unset, `send` fails rather than dropping mail silently. With `MAIL_ADAPTER` removed from `.dev.vars`, a handler that sends answers 500 and `ocre dev` logs:
 
 ```text
@@ -210,6 +212,20 @@ The subject is the humanized action name ("Welcome", "Password reset"); change i
 
 Every generated template extends `templates/mailers/layout.html` or `layout.txt` (created by the first mailer), like Rails' `mailer.html.erb`: the HTML layout holds the document, the inline styles mail clients need, and `{% block content %}{% endblock %}` where each email goes. Put a header, a footer or a signature there once. A mailer that needs another layout extends another file (`{% extends "mailers/billing_layout.html" %}`); shared pieces go in partials with `{% include "mailers/_footer.html" %}`.
 
+### Mailer view helpers
+
+A mailer's templates see only the fields of their struct, so what Rails' mailer views get from helpers is data the function passes:
+
+| Rails, in a mailer view | Ocre |
+|---|---|
+| `message.subject`, `message.to` | pass them as fields (`subject`, `to`), the values the function gives `Email::new` |
+| `attachments.inline["logo.png"].url` | `<img src="cid:logo">` with `.inline("logo", ...)` on the email ([below](#attachments-and-inline-images)) |
+| `mailer.action_name`, `mailer_name` | the template's path: each action has its own templates |
+| `format_paragraph(text, 72)` | `{{ text\|word_wrap(72) }}` with `use ocre::filters;` in the mailer module; all of Ocre's [view helpers](views.md#view-helpers) work |
+| `helper :formatting`, `add_template_helper` | methods on the template struct, or the app's `filters` module |
+| `url_for`, `*_url`, `image_url` | `ocre::mail::url(ctx, path)` in the caller ([below](#add-data-to-an-email)) |
+| `cache` blocks (fragment caching) | the caller renders the costly part with `ocre::cache::fragment(&ctx, &key, ttl, ...)` and passes the cached HTML into the template (see [Caching HTML fragments](caching.md#caching-html-fragments)); a mailer function has no `Ctx` |
+
 ### Defaults and callbacks: src/mailers/mod.rs
 
 The first mailer creates `src/mailers/mod.rs`, which plays the part of Rails' `ApplicationMailer`:
@@ -276,7 +292,16 @@ pub fn welcome(to: &str, name: &str, account_url: &str) -> Result<Email> {
 }
 ```
 
-and use them in the templates (`Hello {{ name }},` and `{{ account_url }}`). Pass values (strings, numbers), not a database handle: a mailer only builds the email, the caller loads the data. Links and images need absolute URLs, since the email is read outside the site: in a handler, build them from the request (`crate::auth::origin(&uri)` after `ocre g auth`) and pass the result, which replaces Rails' `default_url_options` and `asset_host`; or embed images with [`inline`](#attachments-and-inline-images).
+and use them in the templates (`Hello {{ name }},` and `{{ account_url }}`). Pass values (strings, numbers), not a database handle: a mailer only builds the email, the caller loads the data. Links and images need absolute URLs, since the email is read outside the site. `ocre::mail::url(&ctx, "/account")` builds them from the `APP_URL` variable (Rails' `default_url_options[:host]` and `asset_host`), in handlers and in jobs alike: set `APP_URL: bindings.text("https://shop.example.com")` in worker.env of `cloudflare.config.ts` and `APP_URL=http://localhost:8787` in `.dev.vars`; unset, `url` is a 500 naming the fix. In a handler, `crate::auth::origin(&uri)` (after `ocre g auth`) gives the request's own origin instead. Images can also be embedded with [`inline`](#attachments-and-inline-images).
+
+```rust,check
+use ocre::{Ctx, Result};
+
+/// `https://shop.example.com/account` with `APP_URL = "https://shop.example.com"`.
+pub fn account_url(ctx: &Ctx) -> Result<String> {
+    ocre::mail::url(ctx, "/account")
+}
+```
 
 ### Send a mailer's email from a handler
 

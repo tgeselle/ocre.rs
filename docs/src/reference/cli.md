@@ -24,23 +24,26 @@ The examples below come from `ocre 0.1.0` on apps created by `ocre new ... --sta
 | [`ocre migrate`](#ocre-migrate) | Applies D1 migrations (local unless `--remote`); `--status` lists pending ones |
 | [`ocre db create`](#ocre-db-create) | Creates the local database, or with `--remote` the D1 database on Cloudflare |
 | [`ocre db prepare`](#ocre-db-prepare) | Local, safe to repeat: applies pending migrations, seeds a new database |
-| [`ocre db seed`](#ocre-db-seed) | Runs `db/seeds.sql` (local unless `--remote`); `--replant` empties the tables first |
-| [`ocre db reset`](#ocre-db-reset) | Local only: deletes the local database, applies every migration, runs the seeds |
+| [`ocre db seed`](#ocre-db-seed) | Loads `db/fixtures`, then runs `db/seeds.sql` (local unless `--remote`); `--replant` empties the tables first |
+| [`ocre db reset`](#ocre-db-reset) | Local only: deletes the local database, applies every migration, loads fixtures and seeds |
 | [`ocre db drop`](#ocre-db-drop) | Local only: deletes the local database |
 | [`ocre db truncate`](#ocre-db-truncate) | Local only: deletes every row, keeps tables and migrations |
 | [`ocre db version`](#ocre-db-version) | Prints the last applied migration |
 | [`ocre db schema`](#ocre-db-schema) | Writes the database's `CREATE` statements to `db/schema.sql` |
+| [`ocre db dump`](#ocre-db-dump) | Writes table rows to fixture files `db/fixtures/<table>.yml` |
 | [`ocre sql QUERY`](#ocre-sql) | Runs SQL on D1 and prints the rows |
 | [`ocre dev`](#ocre-dev) | Applies local migrations, then runs the app with `cf dev` |
 | [`ocre test`](#ocre-test) | Runs `cargo test`, the wasm32 check and, with `--e2e`, `tests/e2e.sh` against a local server |
 | [`ocre deploy`](#ocre-deploy) | Creates missing Cloudflare resources, applies remote migrations, then runs `cf deploy` |
 | [`ocre logs`](#ocre-logs) | Streams the deployed Worker's live logs (`wrangler tail`) |
 | [`ocre secret`](#ocre-secret) | Prints a new random value for `SECRET_KEY_BASE` |
-| [`ocre secrets list` / `push`](#ocre-secrets) | Lists secret names locally and on the Worker; uploads values from a git-ignored file |
+| [`ocre secrets list` / `push` / `fetch`](#ocre-secrets) | Lists secret names locally and on the Worker; uploads values from a git-ignored file; prints one local value |
+| [`ocre domains [add\|remove HOST]`](#ocre-domains) | The Worker's custom domains in `cloudflare.config.ts` |
 | [`ocre routes [FILTER]`](#ocre-routes) | Lists the app's HTTP routes, read from its source |
 | [`ocre schedules [run TASK]`](#ocre-schedules) | Lists the Cron Triggers and their tasks; `run` fires one on `ocre dev` |
 | [`ocre i18n missing`](#ocre-i18n-missing) | Checks the locale files; fails on missing keys or invalid files |
-| [`ocre doctor`](#ocre-doctor) | Checks the tools and the app's setup; fails when a check fails |
+| [`ocre doctor`](#ocre-doctor) | Checks the tools and the app's setup (production settings, `.ocre/doctor/` checks); fails when a check fails |
+| [`ocre ci`](#ocre-ci) | Runs the CI steps locally (fmt, clippy, tests, wasm32 check, translations); `--signoff` runs `gh signoff` |
 | [`ocre about`](#ocre-about), [`ocre version`](#ocre-version) | Versions and the app's configuration |
 | [`ocre stats [DIRS]`](#ocre-stats) | Lines of code per part of the app |
 | [`ocre notes`](#ocre-notes) | Lists TODO, FIXME and OPTIMIZE comments |
@@ -60,8 +63,8 @@ On success the object has `"ok": true`, `command`, and only the keys that apply 
 |---|---|---|---|
 | `ok` | boolean | every command | `true` |
 | `command` | string | every command | The command's name, e.g. `new`, `migrate`, `db seed`, `secrets list`, `schedules run`, `destroy`, `doctor`, or `generate <generator>` (`generate scaffold`; `generate custom` for app generators) |
-| `created` | string[] | `new`, generators | Files created, relative to the app root (to the current directory for `ocre new`, so they start with the app name) |
-| `updated` | string[] | generators, `destroy`, `template`, `db schema` | Existing files changed |
+| `created` | string[] | `new`, generators, `db dump` | Files created, relative to the app root (to the current directory for `ocre new`, so they start with the app name) |
+| `updated` | string[] | generators, `destroy`, `template`, `db schema`, `db dump --force` | Existing files changed |
 | `skipped` | string[] | generators (`--skip`), `destroy` | Existing files kept: by `--skip`, or left changed by `destroy` (Cargo.toml, cloudflare.config.ts, package.json, changed lines) |
 | `removed` | string[] | `destroy` | Files deleted, the generation record last |
 | `pretend` | `true` | generators, `destroy` | `--pretend`: nothing was written |
@@ -76,10 +79,10 @@ On success the object has `"ok": true`, `command`, and only the keys that apply 
 | `url` | string | `dev`, `deploy`, `new --deploy` | `http://localhost:<port>`, or the `https://....workers.dev` URL found in `cf deploy`'s output |
 | `email` | string | `login`, `new --login`, `new --deploy` | Email of the Cloudflare login |
 | `pending` | string[] | `migrate --status` | Migration files not applied yet |
-| `ran` | string[] | `new`, `db seed`, `db reset`, `i18n missing` | Steps performed, in order |
+| `ran` | string[] | `new`, `db seed`, `db reset`, `db dump`, `i18n missing` | Steps performed, in order |
 | `rows` | array | `sql` | D1's JSON: one object per statement, with `results` (the rows), `success` and `meta` |
 | `routes` | object[] | `routes` | `{"method", "path", "handler"}`, sorted by path then method |
-| `remote` | `true` | `migrate --status --remote`, `db seed --remote`, `sql --remote` | The command used the production database |
+| `remote` | `true` | `migrate --status --remote`, `db seed --remote`, `db dump --remote`, `sql --remote` | The command used the production database |
 | `secret` | string | `secret` | 128 lowercase hex characters |
 | `secret_created` | `true` | `deploy`, `new --deploy` | The deploy uploaded a new `SECRET_KEY_BASE` because the Worker had none |
 | `provisioned` | string[] | `deploy` | Cloudflare resources created because they were missing, e.g. `D1 database blog`, `queue blog-jobs` |
@@ -510,15 +513,18 @@ Errors: the shared ones, and `the D1 database blog does not exist on Cloudflare 
 ## ocre db seed
 
 ```text
-ocre db seed [--remote] [--replant] [--json]
+ocre db seed [--remote] [--replant] [--from <DIR>] [--json]
 ```
 
-Runs `db/seeds.sql`: locally with `wrangler d1 execute DB --file db/seeds.sql --local --yes` (the app's wrangler; `--yes` answers its "database unavailable during import" question), with `--remote` through `cf d1 query <id> --batch @.wrangler/ocre-batch.json` (a temporary file holding the SQL). The file is plain SQL, typically `INSERT` statements; it is not tracked, so running it twice inserts the rows twice.
+Loads the fixtures of `db/fixtures/` (see [Fixtures](../guides/models.md#fixtures)), then runs `db/seeds.sql`; either may be missing, not both. The fixtures become one SQL file, `.wrangler/ocre-fixtures.sql` (deleted afterwards), run with `wrangler d1 execute DB --local --file .wrangler/ocre-fixtures.sql --yes`: foreign keys deferred, each fixture table emptied, then one `INSERT` per row, so loading twice gives the same rows. Fixtures load into the local database only.
+
+`db/seeds.sql` runs locally with `wrangler d1 execute DB --file db/seeds.sql --local --yes` (the app's wrangler; `--yes` answers its "database unavailable during import" question), with `--remote` through `cf d1 query <id> --batch @.wrangler/ocre-batch.json` (a temporary file holding the SQL). The file is plain SQL, typically `INSERT` statements; it is not tracked, so running it twice inserts the rows twice.
 
 | Flag | Default | Effect |
 |---|---|---|
-| `--remote` | local | Seed the production database on Cloudflare |
-| `--replant` | off | Local only: first empty every app table like [`ocre db truncate`](#ocre-db-truncate), then load the seeds, so the data matches the file exactly |
+| `--remote` | local | Seed the production database on Cloudflare (`db/seeds.sql` only; refused when there are fixtures to load) |
+| `--replant` | off | Local only: first empty every app table like [`ocre db truncate`](#ocre-db-truncate), then load the fixtures and seeds, so the data matches the files exactly. Loco's `seed --reset` |
+| `--from <DIR>` | `db/fixtures` | Fixture directory, relative to the app root |
 
 ```sql
 -- db/seeds.sql
@@ -555,9 +561,9 @@ ocre db seed --json
 
 With `--remote`, `ran` is `["loaded db/seeds.sql (--remote)"]`, the JSON has `"remote": true` and the human output ends with `Target: remote D1 database on Cloudflare`.
 
-`ocre db seed --replant --json` reports both steps: `{"command":"db seed","ok":true,"ran":["emptied posts (--local)","loaded db/seeds.sql (--local)"]}`.
+`ocre db seed --replant --json` reports both steps: `{"command":"db seed","ok":true,"ran":["emptied posts (--local)","loaded db/seeds.sql (--local)"]}`. Fixtures add a step before the seeds: `"loaded db/fixtures: authors, posts (--local)"`.
 
-Errors: `db/seeds.sql not found in the app` (hint: ``create db/seeds.sql with INSERT statements, then run `ocre db seed` ``), ``` `ocre db seed --replant` only runs on the local database ``` for `--replant --remote` (hint: ``Ocre never deletes production data; use the Cloudflare dashboard or `cf d1 ...` for that on purpose``), and the shared ones.
+Errors: `db/seeds.sql not found in the app` when there is neither a fixture directory nor seeds (hint: ``create db/seeds.sql with INSERT statements or fixture files in db/fixtures/, then run `ocre db seed` ``), `<DIR> not found in the app` for a missing `--from` directory (hint: `pass the directory of the fixture files, relative to the app root`), `the fixtures of db/fixtures only load into the local database` with `--remote` (hint: `fixtures replace table rows: local only; use db/seeds.sql for remote data`), fixture file errors naming the file and label (e.g. ``db/fixtures/posts.yml: `hello`: no fixture labelled `ada` for `author` ``, hint: ``add a `ada:` row to a fixture file, or set `author_id` to an id``), ``` `ocre db seed --replant` only runs on the local database ``` for `--replant --remote` (hint: ``Ocre never deletes production data; use the Cloudflare dashboard or `cf d1 ...` for that on purpose``), and the shared ones.
 
 ## ocre db reset
 
@@ -565,7 +571,7 @@ Errors: `db/seeds.sql not found in the app` (hint: ``create db/seeds.sql with IN
 ocre db reset [--json]
 ```
 
-Local only. Deletes `.wrangler/state/v3/d1` (the local D1 databases) when it exists, applies every migration like `ocre migrate`, then loads `db/seeds.sql` when the file exists. It takes no `--remote`: production data is never reset.
+Local only. Deletes `.wrangler/state/v3/d1` (the local D1 databases) when it exists, applies every migration like `ocre migrate`, then loads the fixtures of `db/fixtures/` and `db/seeds.sql` when they exist. It takes no `--remote`: production data is never reset.
 
 ```sh
 ocre db reset
@@ -586,7 +592,7 @@ ocre db reset --json
 {"command":"db reset","ok":true,"ran":["deleted .wrangler/state/v3/d1","applied migrations (--local)","loaded db/seeds.sql (--local)"]}
 ```
 
-`ran` lists only the steps that happened: no `deleted ...` without a local database, no `loaded ...` without seeds.
+`ran` lists only the steps that happened: no `deleted ...` without a local database, no `loaded ...` without fixtures or seeds.
 
 ## ocre db create
 
@@ -608,7 +614,7 @@ Creates the app's database. Locally, it runs `SELECT 1` through the app's wrangl
 ocre db prepare [--json]
 ```
 
-Local, safe to run any time (Rails' `db:prepare`): applies pending migrations to the local database and, when that database did not exist yet, loads `db/seeds.sql` if present. A good first command after cloning an app.
+Local, safe to run any time (Rails' `db:prepare`): applies pending migrations to the local database and, when that database did not exist yet, loads the fixtures of `db/fixtures/` and `db/seeds.sql` if present. A good first command after cloning an app.
 
 ```json
 {"command":"db prepare","ok":true,"ran":["applied migrations (--local)","loaded db/seeds.sql (--local)"]}
@@ -701,6 +707,40 @@ CREATE TABLE posts (
 
 Later runs report `update  db/schema.sql` (`"updated": ["db/schema.sql"]`). Errors: the shared errors, and `unexpected D1 query output: ...`.
 
+## ocre db dump
+
+```text
+ocre db dump [--tables <TABLES>] [--dir <DIR>] [--force] [--remote] [--json]
+```
+
+Writes the rows of every app table (the tables of `ocre db schema`), or of `--tables posts,authors`, to fixture files `<DIR>/<table>.yml` that [`ocre db seed`](#ocre-db-seed) loads back. It reads the table names from `sqlite_master`, then runs one `SELECT * FROM "<table>";` per table in a single query (locally through the app's wrangler, with `--remote` through `cf d1 query`; each row returned is a D1 row read). Each row gets the label `<table>_<id>` and keeps its `id`; strings are double-quoted YAML.
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--tables <TABLES>` | every app table | Comma-separated table names |
+| `--dir <DIR>` | `db/fixtures` | Directory of the fixture files, relative to the app root |
+| `--force` | off | Overwrite existing fixture files |
+| `--remote` | local | Read the production database on Cloudflare (read-only) |
+
+```sh
+ocre db dump --tables posts
+```
+
+```yaml
+# db/fixtures/posts.yml
+# Rows of the local D1 database, written by `ocre db dump`; `ocre db seed` loads them.
+posts_1:
+  id: 1
+  title: "Hello"
+  published: 1
+```
+
+```json
+{"command":"db dump","created":["db/fixtures/posts.yml"],"ok":true}
+```
+
+With `--force`, rewritten files are in `updated`; with no tables, `ran` is `["no tables to dump"]`. Errors: `db/fixtures/posts.yml already exist` when a file exists (hint: `pass --force to overwrite them, or --dir <dir> to dump elsewhere`), `unexpected D1 query output: ...`, and the shared ones.
+
 ## ocre sql
 
 ```text
@@ -776,6 +816,7 @@ Runs the app locally, at `http://localhost:<PORT>`, until stopped (Ctrl-C).
 | Flag | Default | Effect |
 |---|---|---|
 | `--port <PORT>` | `8787` | Port of the local server |
+| `--no-cache` / `--cache` | neither | Turn `ocre::cache` off (`CACHE_STORE=null` in `.dev.vars`) or back on; kept for later runs |
 
 Steps:
 
@@ -815,6 +856,8 @@ The report is printed after `cf dev` exits successfully; with `--json` it is:
 ```
 
 and every line above goes to stderr. Errors: the shared ones (locale files, wasm target, npm packages, cf). `` `cf dev --port 8787` failed `` usually means the build failed: the compiler errors are in the output above it.
+
+`ocre dev --no-cache` turns `ocre::cache` off in development (Rails' `dev:cache`): it writes `CACHE_STORE=null` into `.dev.vars`, so every `ocre::cache::fetch` computes its value, and the choice stays for later runs; `ocre dev --cache` removes the line. The report's `ran` says which (`caching off: CACHE_STORE=null in .dev.vars`). `ocre secrets push` refuses to upload that development value.
 
 ## ocre test
 
@@ -1012,6 +1055,28 @@ Errors:
 
 Both commands need a Cloudflare login for the deployed side, and the shared errors apply.
 
+`ocre secrets fetch NAME [--file FILE]` prints one value of a local `NAME=value` file (default `.dev.vars`), like Rails' `credentials:fetch`, for scripts: `export STRIPE_KEY=$(ocre secrets fetch STRIPE_KEY --file .prod.vars)`. With `--json` the value is in `secret`. It never calls Cloudflare, which does not return deployed values. Error: `STRIPE_KEY is not set in .dev.vars` (hint: ``add `STRIPE_KEY=<value>` to .dev.vars; deployed values cannot be read back (Cloudflare only stores them)``).
+
+## ocre domains
+
+```text
+ocre domains [--json]
+ocre domains add <HOST> [--json]
+ocre domains remove <HOST> [--json]
+```
+
+The Worker's custom domains: the `domains` list of `worker` in `cloudflare.config.ts` (cf's config schema). `add` writes the list (after `name:` the first time) and `remove` takes a host out; the next `ocre deploy` publishes the Worker on them, and Cloudflare creates the DNS record and the certificate. The host's zone must be on the Worker's Cloudflare account (free plan zones work); the token of a CI deploy then also needs the Workers Routes permission of that zone. Without a subcommand, lists them.
+
+```sh
+ocre domains add www.example.com
+```
+
+```json
+{"command":"domains add","domains":["www.example.com"],"next":["ocre deploy (creates the DNS record and certificate; the zone must be on this Cloudflare account)"],"ok":true,"updated":["cloudflare.config.ts"]}
+```
+
+Errors: `` `https://x` is not a hostname Ocre can add as a custom domain `` (hint: a lowercase hostname without scheme, path or wildcard), `www.example.com is already a custom domain of the Worker`, `www.example.com is not a custom domain of the Worker`, and ``cloudflare.config.ts has a `domains` entry Ocre cannot read`` (hint: write it as a list of string literals). Routes with wildcards (`example.com/api/*`) stay hand-written `triggers.fetch({ pattern, zone })` entries.
+
 ## ocre routes
 
 ```text
@@ -1124,6 +1189,38 @@ An invalid file is reported with its line, e.g. ``locales/fr.yml:6: quote values
 
 `ocre dev` and `ocre deploy` run the loading part of this check (missing files, invalid files) but not the missing-keys part: at runtime, a missing key falls back to the default locale in release builds (see [Translations](../guides/i18n.md)).
 
+## ocre ci
+
+```text
+ocre ci [--signoff] [--json]
+```
+
+Runs the app's CI steps on your machine, in order, and stops at the first failure (Rails 8.1's `bin/ci`). They are the steps of the GitHub workflow that [`ocre g ci`](generators.md#ocre-g-ci) writes, so a green `ocre ci` means a green CI run:
+
+1. `cargo fmt --check` (hint on failure: ``run `cargo fmt`, then `ocre ci` again``);
+2. `cargo clippy --all-targets -- -D warnings` (hint: ``fix the warnings above (`rustup component add clippy` if cargo has no clippy command)``);
+3. `cargo test`;
+4. `cargo check --target wasm32-unknown-unknown` (after checking that rustc has the target);
+5. `ocre i18n missing`, when `src/lib.rs` declares locales.
+
+| Flag | Effect |
+|---|---|
+| `--signoff` | After a green run, runs `gh signoff`, the [basecamp/gh-signoff](https://github.com/basecamp/gh-signoff) extension of the GitHub CLI, which sets a passing status on the pushed commit (install it with `gh extension install basecamp/gh-signoff`; a branch protection rule can require it) |
+
+```text
+  cargo fmt --check: ok
+  cargo clippy --all-targets -- -D warnings: ok
+  cargo test: ok
+  cargo check --target wasm32-unknown-unknown: ok
+  ocre i18n missing: ok
+```
+
+```json
+{"command":"ci","ok":true,"ran":["cargo fmt --check: ok","cargo clippy --all-targets -- -D warnings: ok","cargo test: ok","cargo check --target wasm32-unknown-unknown: ok"]}
+```
+
+With `--json`, cargo's output goes to stderr. A failing step ends with, for example, `error: cargo test failed (exit status: 101)` (`"ok": false`, the steps that passed still in `ran`). Other errors: the missing wasm target, `could not run cargo: ...`, the `ocre i18n missing` problems, `gh not found` (hint: ``install the GitHub CLI (https://cli.github.com), then `gh extension install basecamp/gh-signoff` ``) and `gh signoff failed (<status>)`.
+
 ## ocre doctor
 
 ```text
@@ -1143,6 +1240,22 @@ Checks the tools and, inside an app, its setup, like `cargo loco doctor`. Each c
 | `migrations` | Warns: local migrations are pending (`wrangler d1 migrations list DB --local`, through the app's wrangler) |
 | `local secrets` | Fails: `.dev.vars` has no `SECRET_KEY_BASE` |
 | `production secrets` | When logged in. Warns: the deployed Worker lacks `SECRET_KEY_BASE` (or `RESEND_API_KEY` with `MAIL_ADAPTER = "resend"`); ok when the Worker is not deployed yet |
+| `production config` | Settings unsafe in production (Loco's production safety check). Fails: a plain-text variable of `worker.env` is named like a secret (`SECRET`, `TOKEN`, `PASSWORD`, `API_KEY`, `PRIVATE_KEY`: committed and readable; push it with `ocre secrets push`), or the app is a git repository whose `.gitignore` lacks `.dev.vars`. Warns: `MAIL_ADAPTER = "log"`, `CACHE_STORE = "null"`, `LOG_LEVEL = "debug"` or `"trace"` in `worker.env` (development values belong in `.dev.vars`) |
+| Each file of `.ocre/doctor/` | The app's own checks (Loco's initializer `check()`), run in name order from the app root with no input: exit 0 is `ok`, exit 2 `warn`, anything else `fail`; the first line of stdout is the detail, the first line of stderr the hint. A file that cannot run (not executable, no `#!` line) fails |
+
+An app check is any executable, for example `.ocre/doctor/stripe` (`chmod +x` it):
+
+```sh
+#!/bin/sh
+# Fails unless .prod.vars has the Stripe key the production Worker needs.
+if grep -q '^STRIPE_KEY=' .prod.vars 2>/dev/null; then
+  echo "STRIPE_KEY ready in .prod.vars"
+else
+  echo "STRIPE_KEY missing from .prod.vars"
+  echo "add STRIPE_KEY=... to .prod.vars, then ocre secrets push STRIPE_KEY --file .prod.vars" >&2
+  exit 1
+fi
+```
 
 ```text
   ok    rust                wasm32-unknown-unknown target installed
@@ -1154,6 +1267,7 @@ Checks the tools and, inside an app, its setup, like `cargo loco doctor`. Each c
   warn  migrations          pending locally: 0001_create_posts.sql
                             run `ocre migrate`
   ok    local secrets       SECRET_KEY_BASE set in .dev.vars
+  ok    production config   no secret in plain-text variables, no development-only setting
   ok    production secrets  not deployed yet
 ```
 
@@ -1227,6 +1341,13 @@ Code LOC: 4720    Test LOC: 0    Code to test ratio: 1:0.0
 ```
 
 With `--json`: `"stats": {"rows": [{"name", "files", "lines", "loc", "functions"}, ...], "code_loc", "test_loc"}`. Error: `lib is not a directory of the app` (hint: ``pass directories relative to the app root, e.g. `ocre stats lib` ``).
+
+Directories to count on every run (Rails' `CodeStatistics.register_directory`) go in `Cargo.toml`; each gets its own row, once, before those given on the command line:
+
+```toml
+[package.metadata.ocre]
+stats = ["lib", "benches"]
+```
 
 ## ocre notes
 

@@ -24,6 +24,8 @@ pub fn check_signup(name: &str, email: &str, age: i64) -> Result<()> {
 
 Each check records an error when it fails and returns `&mut Validator`, so checks chain. Nothing stops at the first failure: `finish()` returns `Ok(())` when every check passed, or `Err(Error::Invalid(errors))` with all of them. An error is an `ocre::FieldError { field, message }`: the message has no field name (`"can't be blank"`), and `full_message()` adds the humanized name (`"Name can't be blank"`; `post_id` becomes `Post`).
 
+Messages are English. Each check also records Rails' translation key (`error.key()`: `blank`, `too_long`...), so `i18n.full_message("post", &error)` and `i18n.error_message("post", &error)` give them in the visitor's language, from the app's locale files or the built-in French, German, Spanish, Italian, Portuguese and Dutch messages: see [Translations](i18n.md#validation-messages).
+
 ## Every check
 
 Messages are the exact strings Ocre adds (Rails' wording).
@@ -429,6 +431,24 @@ pub async fn check_comment_quota(ctx: &Ctx, post_id: i64) -> Result<()> {
 ```
 
 The separate `dates` validator tells whether both dates parsed (`is_valid()`), so a malformed date reports one error, not two; `merge` then adds its errors to `v`. Call such functions from the model's `validate()` (checks without the database) or `create`/`update` (database checks), before `finish()`.
+
+### Rails' validation options, the Ocre way
+
+Rails declares validations with options; in Ocre a rule is a line of Rust in `validate()`, so the options are ordinary code:
+
+| Rails | In Ocre |
+|---|---|
+| `on: :create` / `on: :update` | `New<Model>::validate()` runs for `create`, `<Model>Changes::validate()` for `update` |
+| custom contexts (`valid?(:publish)`, `on: :publish`) | another function: `fn validate_for_publish(&self) -> Validator`, called where that context applies |
+| `if:` / `unless:`, `with_options` | an `if` around the checks: `if self.paid { v.required("card_number", &self.card_number); }` |
+| `allow_nil:` / `allow_blank:` | optional fields are `Option`: checks run inside `if let Some(value)`; for blank text, `if !value.trim().is_empty()` |
+| `validates_each`, `validates_with`, `ActiveModel::Validator` / `EachValidator` classes | a function taking `&mut Validator` (`check_dates` above), reused from any model |
+| `validates_associated` | `v.merge(other.validate())` for a nested value |
+| `numericality` (`only_integer`, `in:`, `odd`, `even`) | `v.number::<i64>(..)` / `v.number::<f64>(..)` for form text, the comparison checks and `range`, and `v.check(field, n % 2 == 0, "must be odd")` |
+| `uniqueness` with `scope:`, `case_sensitive: false`, `conditions:` | the generated `db.exists(..)` check with the SQL you need: `WHERE lower(email) = lower(?1) AND account_id = ?2 AND deleted_at IS NULL`, plus a matching `UNIQUE` index (`CREATE UNIQUE INDEX ... ON users (account_id, lower(email))`) |
+| `strict: true` | return an error directly (`Err(Error::internal(..))` for a programmer error) instead of adding it to the validator |
+| `save(validate: false)`, `update_column(s)`, `update_all`, `insert_all` | `query().update_all(..)`, `db.execute(..)`, `db.batch(..)`: no validation runs |
+| `validators`, `validators_on(:attr)` | read `validate()`: rules are code, not declarations to list |
 
 ## See also
 

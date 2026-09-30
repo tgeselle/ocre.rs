@@ -145,7 +145,7 @@ If the Worker runs without the binding anyway (a hand-written `cf deploy` of ano
 
 ### env: plain-text variables
 
-`KEY: bindings.text("value"),` entries are plain-text Worker variables, deployed with the code on every `ocre deploy`. `ocre new` sets [`MAIL_FROM`](#mail_from) and leaves [`MAIL_ADAPTER`](#mail_adapter) commented out. Add [`ALLOWED_ORIGINS`](#allowed_origins) when another site calls the app, [`ALLOWED_HOSTS`](#allowed_hosts) to answer only on your own host names, and your own variables (read them with `ctx.env().var("NAME")`, see [Reading your own variables](#reading-your-own-variables)). Never put secrets here: the file is committed.
+`KEY: bindings.text("value"),` entries are plain-text Worker variables, deployed with the code on every `ocre deploy`. `ocre new` sets [`MAIL_FROM`](#mail_from) and leaves [`MAIL_ADAPTER`](#mail_adapter) commented out. Add [`ALLOWED_ORIGINS`](#allowed_origins) when another site calls the app, [`ALLOWED_HOSTS`](#allowed_hosts) to answer only on your own host names, and your own variables (read them with `ctx.env().var("NAME")`, see [Reading your own variables](#reading-your-own-settings)). Never put secrets here: the file is committed.
 
 ### env: EMAIL (send_email)
 
@@ -494,31 +494,102 @@ See [Email](../guides/email.md).
 - Errors (500, logged) when missing or blank: ``cannot send email: the RESEND_API_KEY secret is not set. Fix: create a key at https://resend.com/api-keys and run `ocre secrets push RESEND_API_KEY --file .prod.vars` (and put it in .dev.vars to send from `ocre dev`)``.
 - Free plan of Resend: 100 emails a day, 3,000 a month ([quotas](https://resend.com/docs/knowledge-base/account-quotas-and-limits), September 2026).
 
-### Reading your own variables
+### R2_ACCOUNT_ID, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY
 
-`ctx.env()` gives the raw Workers environment for any other variable or secret:
+- Kind: `R2_ACCOUNT_ID` and `R2_BUCKET` are variables (`bindings.text`); `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` are secrets. Required by presigned URLs and direct uploads (`storage::presign_get`, `presign_put`, `serve_redirect`, `direct_upload`, `attach_direct_upload`); nothing else reads them.
+- Values: the account ID (R2 overview page), the bucket name (`<app>-storage`), and the two keys of an R2 API token with "Object Read & Write" on that bucket (dashboard: R2 > Manage API tokens). The secret key also signs the keys handed out by `direct_upload`: replacing it invalidates uploads in progress.
+- Production: the variables in `worker.env`, the secrets with `ocre secrets push R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY --file .prod.vars`. Development: all four in `.dev.vars` (the URLs point to the real bucket, not `ocre dev`'s simulation).
+- Errors (500, logged) when one is missing or blank: ``presigned R2 URLs need R2_ACCOUNT_ID, R2_BUCKET (not set). Fix: add `R2_ACCOUNT_ID: bindings.text("<account id>"),` and ...``, naming every missing one. See [File storage](../guides/files.md#presigned-urls-and-redirect-serving).
+
+### STORAGE_PUBLIC_URL
+
+- Kind: variable. Optional; required by `storage::public_url`.
+- Value: the base URL of a public bucket, an `r2.dev` URL or a custom domain connected to it (dashboard: R2 > bucket > Settings > Public access), e.g. `https://files.example.com`.
+- Errors (500, logged) when missing: ``public file URLs need the STORAGE_PUBLIC_URL variable. Fix: ...``. See [File storage](../guides/files.md#public-files).
+
+### LOG_LEVEL
+
+- Kind: variable. Optional.
+- Value: `debug`, `info`, `warn`, `error` or `off` (`warning` and `fatal` are accepted): the lowest level `ctx.log()` and Ocre write. Default: `debug` in `ocre dev` (debug build), `info` after `ocre deploy` (release build). An unknown value is the default.
+- Read on every request, job batch and cron run. See [Errors, logging and debugging](../guides/debugging.md#levels-and-formats).
+
+### LOG_FORMAT
+
+- Kind: variable. Optional.
+- Value: `json` (one JavaScript object per line, whose fields Workers Logs indexes) or `text` (`INFO message key=value ...`). Default: `text` in `ocre dev`, `json` after `ocre deploy`.
+
+### SENTRY_DSN
+
+- Kind: secret. Optional; read only when the app registers `ocre::errors::Sentry` (see [Reporting errors](../guides/debugging.md#sending-reports-to-sentry)).
+- Value: the project's DSN, `https://<key>@<host>/<project id>`, from Sentry or a Sentry-compatible service.
+- When missing, reports are only logged. A value that is not a DSN is logged as ``[ocre] SENTRY_DSN is not a Sentry DSN (...)`` and nothing is sent. The optional `SENTRY_RELEASE` variable names the release in each event.
+
+### Reading your own settings
+
+Declare the app's own variables and secrets as a struct and read it with `ctx.config()` (Loco's `settings`, Rails' `config.x` and credentials). Each field reads the variable of the same name in upper case, or else the secret; values are converted to the field's type (numbers, `bool` as `true`/`false`/`1`/`0`, `Vec` from a comma-separated list, unit enums by name). `Option` and `#[serde(default)]` fields may be missing:
 
 ```rust,check
 // src/support.rs
 use axum::{Router, extract::State, routing::get};
 use ocre::{Ctx, Result};
+use serde::Deserialize;
+
+/// `SUPPORT_EMAIL: bindings.text(...)` in cloudflare.config.ts, `SUPPORT_HOURS`
+/// optional, `HELPDESK_TOKEN` a secret (`ocre secrets push`).
+#[derive(Deserialize)]
+pub struct Settings {
+    pub support_email: String,
+    pub support_hours: Option<String>,
+    #[serde(default)]
+    pub helpdesk_token: String,
+}
 
 pub fn routes() -> Router<Ctx> {
     Router::new().route("/support", get(support))
 }
 
-/// `SUPPORT_EMAIL: bindings.text(...)` in cloudflare.config.ts; a default when unset.
 async fn support(State(ctx): State<Ctx>) -> Result<String> {
-    let email = ctx
-        .env()
-        .var("SUPPORT_EMAIL")
-        .map(|value| value.to_string())
-        .unwrap_or_else(|_| "support@example.com".to_owned());
-    Ok(format!("Write to {email}"))
+    let settings: Settings = ctx.config()?;
+    let hours = settings.support_hours.unwrap_or_else(|| "9-17 UTC".to_owned());
+    Ok(format!("Write to {} ({hours})", settings.support_email))
 }
 ```
 
-Register the module in `src/lib.rs` (`mod support;` under `// ocre:modules`, `.merge(support::routes())` under `// ocre:routes`). For a secret, use `ctx.env().secret("NAME")` the same way.
+Register the module in `src/lib.rs` (`mod support;` under `// ocre:modules`, `.merge(support::routes())` under `// ocre:routes`). A missing required field answers 500 and logs the fix:
+
+```text
+[ocre] Worker variable or secret `SUPPORT_EMAIL` is missing. Fix: add `SUPPORT_EMAIL: bindings.text("..."),` to worker.env in cloudflare.config.ts, or for a secret run `ocre secrets push SUPPORT_EMAIL --file .prod.vars`; in `ocre dev`, add `SUPPORT_EMAIL=...` to .dev.vars
+```
+
+Reading costs one environment lookup per field, no binding call. Unit tests build the struct with `ocre::config::from_vars([("SUPPORT_EMAIL", "help@example.com")])`. `ctx.env()` stays available for bindings Ocre does not wrap (AI, Vectorize...).
+
+## Environments
+
+An Ocre app has two environments, chosen by the build, not by a variable (Rails' `RAILS_ENV`, Loco's `LOCO_ENV`):
+
+| | Development | Production |
+|---|---|---|
+| Build | debug: `ocre dev`, `cargo test`, `ocre test` | release: `ocre deploy` |
+| `ocre::config::Environment::current()` | `Development` | `Production` |
+| Settings | `.dev.vars` overrides `cloudflare.config.ts` | `cloudflare.config.ts` variables and secrets |
+| Logs | `debug`, text | `info`, JSON |
+| Errors | development error page, `Server-Timing` | generic error page; details in logs and reporters |
+| Database | local D1 in `.wrangler/state` | the remote D1 database |
+
+Rails' `test` environment is the development build run natively by `cargo test`. A staging copy is a second Worker: a copy of the app directory with another `worker.name` and database name in `cloudflare.config.ts`, deployed with `ocre deploy`. Ocre reads `cloudflare.config.ts` as literal values, so it does not use cf's `defineConfig((ctx) => ...)` form with `--mode`.
+
+## Initializers: the start function
+
+`ocre new` writes a `start` function in `src/lib.rs`, run once when a Worker instance starts, before its first request, job or cron run (Rails' `config/initializers`, Loco's `Hooks::before_run` and initializers):
+
+```rust
+#[event(start)]
+fn start() {
+    ocre::errors::subscribe(ocre::errors::Sentry);
+}
+```
+
+It has no environment (bindings and variables come with each request), so it registers things: error subscribers, `static` values built with `std::sync::LazyLock`. Its CPU time counts against the first request (10 ms on the free plan). Per-request setup belongs in axum middleware on `routes()`, which sees the `Ctx`.
 
 ## Environment variables of the ocre CLI
 
@@ -609,23 +680,6 @@ targets = ["wasm32-unknown-unknown"]
 ```
 
 rustup reads it in the app directory and installs the stable toolchain with the WebAssembly target on first use. A Rust installed without rustup (for example Homebrew's `rust`) ignores it and has no wasm target; `ocre dev`, `ocre deploy` and `ocre new --deploy` then stop with ``the wasm32-unknown-unknown target is not installed for rustc at <sysroot>`` and the hint ``use a rustup toolchain (Homebrew's `rust` has no wasm target) and run `rustup target add wasm32-unknown-unknown` ``. See [Installation](../getting-started/installation.md).
-
-### LOG_LEVEL
-
-- Kind: variable. Optional.
-- Value: `debug`, `info`, `warn`, `error` or `off` (`warning` and `fatal` are accepted): the lowest level `ctx.log()` and Ocre write. Default: `debug` in `ocre dev` (debug build), `info` after `ocre deploy` (release build). An unknown value is the default.
-- Read on every request, job batch and cron run. See [Errors, logging and debugging](../guides/debugging.md#levels-and-formats).
-
-### LOG_FORMAT
-
-- Kind: variable. Optional.
-- Value: `json` (one JavaScript object per line, whose fields Workers Logs indexes) or `text` (`INFO message key=value ...`). Default: `text` in `ocre dev`, `json` after `ocre deploy`.
-
-### SENTRY_DSN
-
-- Kind: secret. Optional; read only when the app registers `ocre::errors::Sentry` (see [Reporting errors](../guides/debugging.md#sending-reports-to-sentry)).
-- Value: the project's DSN, `https://<key>@<host>/<project id>`, from Sentry or a Sentry-compatible service.
-- When missing, reports are only logged. A value that is not a DSN is logged as ``[ocre] SENTRY_DSN is not a Sentry DSN (...)`` and nothing is sent. The optional `SENTRY_RELEASE` variable names the release in each event.
 
 ## See also
 

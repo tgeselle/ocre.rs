@@ -26,7 +26,7 @@ Next:
   cargo check --target wasm32-unknown-unknown
 ```
 
-Field types are `string`, `text`, `integer`, `float`, `decimal`, `boolean`, `date`, `time`, `datetime`, `uuid`, `references`, `attachment`, `json` and `enum:<value>,<value>...`; the suffix `?` makes a field optional (`NULL` allowed) and `^` unique. [Field types](../reference/field-types.md) lists the SQL and Rust type of each. `ocre g scaffold` and `ocre g api` create the model the same way when it does not exist yet (see [Generators](../reference/generators.md#ocre-g-model)). The suffixes change what a `references` field generates (see [Associations](#associations)): `author:references?` is an optional parent (`ON DELETE SET NULL`), `user:references^` a one-to-one link (has one).
+Field types are `string`, `text`, `rich_text`, `integer`, `float`, `decimal`, `boolean`, `date`, `time`, `datetime`, `uuid`, `references`, `attachment`, `json` and `enum:<value>,<value>...`; the suffix `?` makes a field optional (`NULL` allowed) and `^` unique, and a `lock_version:integer` field turns on [optimistic locking](#optimistic-locking). [Field types](../reference/field-types.md) lists the SQL and Rust type of each. `ocre g scaffold` and `ocre g api` create the model the same way when it does not exist yet (see [Generators](../reference/generators.md#ocre-g-model)). The suffixes change what a `references` field generates (see [Associations](#associations)): `author:references?` is an optional parent (`ON DELETE SET NULL`), `user:references^` a one-to-one link (has one).
 
 The migration:
 
@@ -92,6 +92,8 @@ pub struct AuthorChanges {
 ```
 
 `NewAuthor` is the input of `create`: every required field, optional fields as `Option`. `AuthorChanges` is the input of `update`: every field is `Option`, and `None` keeps the stored value. Optional columns are `Option<Option<T>>`: `None` keeps, `Some(None)` clears, `Some(Some(value))` sets. Both structs deserialize from JSON bodies, so the JSON API takes them directly; `ocre::optional` and `ocre::patch` also treat an empty string as "no value", which is what HTML forms send (see [JSON APIs](json-apis.md#optional-fields-and-partial-updates)).
+
+`AuthorChanges::changed()` lists the fields a change sets (`["name"]`), Rails' `changed` and `*_changed?`: a `before_update` callback can act only when a field changes (`if changes.changed().contains(&"email") { ... }`). The previous values are one `find(ctx, id)` away when a callback needs them (`*_was`). There is no other dirty tracking: records are plain values, and nothing saves them behind your back.
 
 ### validate()
 
@@ -198,6 +200,22 @@ async fn before_delete(ctx: &Ctx, id: i64) -> Result<()> {
 
 An `Err` from an `after_*` callback is returned to the caller, but the write it follows is already done: D1 keeps no transaction open between two queries. Writes that must succeed or fail together go into one [`db.batch`](#transactions). Bulk operations (`update_all`, `delete_all`, hand-written SQL) and `ON DELETE CASCADE` run no callback.
 
+The rest of Rails' callback API maps to plain code in these functions:
+
+| Rails | In Ocre |
+|---|---|
+| `before_validation`, `after_validation` | `before_create` / `before_update` run before `validate()`; code after `v.finish()?` in `create` / `update` runs after it |
+| `before_save`, `after_save` (create and update) | a private function both `before_create` and `before_update` (or both `after_*`) call; `around_*`: code before and after in the same function |
+| `after_commit`, `after_create_commit`, `after_update_commit`, `after_destroy_commit` | the `after_*` functions: each generated write is committed when it returns (D1 auto-commits every statement) |
+| `after_rollback` | the `Err` of the write or of `db.batch`: nothing was applied |
+| `if:` / `unless:` conditions, `on:` | an `if` in the function; `changes.changed()` tells which fields an update sets |
+| `throw :abort` | return an `Err` from a `before_*` function |
+| callback objects, shared callbacks | a function in a module of your own, called from several models' callbacks |
+| `dependent: :destroy` running the children's callbacks | in `before_delete`, delete the children through their model's `delete` (each runs its callbacks and deletes its files) instead of relying on `ON DELETE CASCADE` |
+| association callbacks (`before_add`, `after_remove`) | the join or child model's `before_create` / `after_delete` |
+| skipping callbacks (`update_column`, `update_all`, `delete`, `insert_all`) | `query().update_all(..)`, `delete_all`, `db.execute`, `db.batch`: they run no model code and no validation |
+| `after_initialize`, `after_find`, `after_touch`, `Model.suppress` | none: rows are plain values deserialized by serde (derive values in a method), and nothing saves implicitly |
+
 ### Associations
 
 A `references` field connects two models. With the blog starter:
@@ -247,6 +265,7 @@ The suffixes and the shape of the model choose the kind of association:
 | `user:references^` (in `ocre g model Profile bio:text user:references^`) | `NOT NULL ... ON DELETE CASCADE` plus a unique index | has one: `user.profile(ctx)` returns `Option<Profile>` instead of a list |
 | two references or more and no other field, e.g. `ocre g model Tagging post:references tag:references` | the references, plus a unique index on the pair | a join model: has many through, `post.tags(ctx, page)` and `tag.posts(ctx, page)` (a `JOIN` on `taggings`), and a "has already been taken" check on the pair in `create` |
 | `author:references:writer_id` (in `ocre g model Book title:string author:references:writer_id`) | `writer_id INTEGER NOT NULL REFERENCES authors(id) ON DELETE CASCADE`, index | belongs to named after the column, `book.writer(ctx)`; has many `author.books(ctx, page)` |
+| `employee:references:manager_id?` in `ocre g model Employee name:string employee:references:manager_id?` | `manager_id INTEGER REFERENCES employees(id) ON DELETE SET NULL`, index | a self join: belongs to `employee.manager(ctx)`, has many `employee.employees(ctx, page)` (rename it `reports` in the file if you like) |
 
 With `Tagging` from the command above, the blog starter's `Post` gets:
 
@@ -270,6 +289,42 @@ Each `references` field also writes two eager-loading functions in the model tha
 |---|---|---|
 | `preload_<parents>(ctx, &records)` | `comment::preload_posts(&ctx, &comments)` | `HashMap<i64, Post>`: the parent of every record, by id |
 | `for_<parents>(ctx, &parent_ids)` | `comment::for_posts(&ctx, &post_ids)` | `Vec<Comment>`: every child of these parents, newest first (not paginated: keep the id list short) |
+
+#### Association options, the Ocre way
+
+Rails configures associations with options; in Ocre each one is a line of code in the model, where you can read it:
+
+| Rails option | In Ocre |
+|---|---|
+| `dependent: :destroy / :nullify / :restrict_with_error` | `ON DELETE CASCADE` (required reference), `ON DELETE SET NULL` (optional), or an error from `before_delete` (see [Callbacks](#callbacks)) |
+| `class_name:`, `foreign_key:` | `author:references:writer_id` names the column; the target is the model before `:references` |
+| `counter_cache: true` | a `comments_count INTEGER NOT NULL DEFAULT 0` column on the parent, updated by the child's `after_create` / `after_delete` (below), or a `COUNT(*)` on the indexed foreign key when the list is short |
+| `touch: true` | `UPDATE posts SET updated_at = datetime('now') WHERE id = ?1` in the child's `after_create` / `after_update` / `after_delete` |
+| `inverse_of`, association caching, `reload_<name>` | not needed: an association is an `async` function returning plain values; call it again to reload |
+| `validate: true` (`validates_associated`) | call the other model's `validate()` and `v.merge(..)` it in `validate()` or `create` |
+| `autosave: true`, nested attributes | call the other model's `create`/`update` from the handler or a callback; several writes that must succeed together go into one [`db.batch`](#transactions) |
+| scopes on an association (`-> { where(...) }`) | `crate::models::comment::query().eq("post_id", post.id).eq("approved", true)`, or a scope function in the child model |
+| `polymorphic: true` | two columns, `commentable_type` (an `enum` of the parent tables) and `commentable_id` (`integer`), queried with `query().eq("commentable_type", Commentable::Post).eq("commentable_id", id)`; SQLite cannot enforce the reference, so check it in `create` |
+
+A counter cache and `touch`, in the child model (`src/models/comment.rs`, with `comments_count` added to `posts` by `ocre g migration add_comments_count_to_posts comments_count:integer`):
+
+```rust
+/// After the INSERT: count the comment on its post and touch the post.
+async fn after_create(ctx: &Ctx, comment: &Comment) -> Result<()> {
+    let sql = "UPDATE posts SET comments_count = comments_count + 1, updated_at = datetime('now') WHERE id = ?1";
+    ctx.db()?.execute(sql, params![comment.post_id]).await?;
+    Ok(())
+}
+
+/// After the DELETE, with the deleted row.
+async fn after_delete(ctx: &Ctx, comment: &Comment) -> Result<()> {
+    let sql = "UPDATE posts SET comments_count = comments_count - 1, updated_at = datetime('now') WHERE id = ?1";
+    ctx.db()?.execute(sql, params![comment.post_id]).await?;
+    Ok(())
+}
+```
+
+Each callback costs one row written. Bulk deletes (`delete_all`, `ON DELETE CASCADE`) skip it: recount with `UPDATE posts SET comments_count = (SELECT COUNT(*) FROM comments WHERE comments.post_id = posts.id)` when you use them.
 
 ### Enum fields
 
@@ -295,6 +350,22 @@ pub enum Status {
 `Status::ALL` lists the values in order (for select boxes), `as_str()` and `Display` give the stored text, `FromStr` parses it, and `IntoParam` binds it, so `task::query().eq("status", Status::Done)` is the scope Rails generates as `Task.done`. The first value is the `Default`. JSON bodies send the text (`"status": "done"`); an unknown value fails deserialization with a 400. HTML scaffold forms parse the text with `v.one_of("status", &form.status)`, which adds "is not included in the list" (see [Validations](validations.md#every-check)). Values must be distinct snake_case words; an enum cannot be unique (`^`), and `--graphql` does not support enum fields yet.
 
 Adding a value later means changing the `CHECK`, which SQLite cannot alter: add the variant, then rebuild the table with `ocre g migration rebuild_tasks` (see [Generate a migration](#generate-a-migration)).
+
+### Rich text fields
+
+`body:rich_text` is Action Text without its extra table: formatted text (bold, links, headings, lists, quotes, code) typed in the [Trix](https://trix-editor.org) editor, the one Rails uses, and kept as HTML in a `TEXT` column of the record.
+
+```sh
+ocre g scaffold Article title:string body:rich_text
+```
+
+- **Stored safe.** `create` and `update` run the HTML through `ocre::security::sanitize` before writing it: scripts, styles, event handlers and `javascript:` links are gone before the row exists, whatever the client sent (the JSON API included).
+- **Validated on its text.** A required rich text field checks `v.required("body", &ocre::security::strip_tags(body))`, so an empty editor (`<div><br></div>`) is "can't be blank".
+- **Forms.** The scaffold's `_form.html` loads Trix 2.1.19 from unpkg.com (allowed by the generated Content-Security-Policy: `script-src` and `style-src` list `https://unpkg.com`) and renders `<input type="hidden" id="article_body" name="body"><trix-editor input="article_body"></trix-editor>`; the editor fills the hidden input, which the form submits like any field. The toolbar's file button is hidden: files belong in an `attachment` field.
+- **Rendering.** `{{ article.body|rich_text }}` prints the HTML (sanitized again on the way out, a few microseconds of CPU); `{{ article.body|plain_text|truncate(80) }}` prints its text, as the index page does (Rails' `to_plain_text`). Both filters come from `ocre::filters` (`use ocre::filters;` in the controller, which the scaffold writes).
+- **Style.** Trix's stylesheet styles the editor; style the rendered HTML with your own CSS (`dd div`, `.content h1`...), the equivalent of Rails' `action_text/contents/_content` partial.
+
+Apps created before `rich_text` existed need `"https://unpkg.com"` added to `style_src` in `content_security_policy()` (`src/lib.rs`), or the editor shows without its styles.
 
 ## Migrations
 
@@ -500,7 +571,22 @@ CREATE UNIQUE INDEX index_authors_on_name ON authors (name);
 ...
 ```
 
-It is the quickest way for a person or an agent to see every table at once. Nothing loads it: a new database is always built by replaying `migrations/`. Commit it if you want schema changes visible in code review, and regenerate it after each `ocre migrate`.
+It is the quickest way for a person or an agent to see every table at once. Nothing loads it: a new database is always built by replaying `migrations/` (Rails' `schema.rb`/`structure.sql` in one SQL format). Commit it if you want schema changes visible in code review, and regenerate it after each `ocre migrate`.
+
+### Column options, constraints and comments
+
+Migrations are SQL, so Rails' column modifiers and table options are SQLite syntax in the file (edit a generated migration before applying it, or write one with a name the generator does not read):
+
+| Rails | SQLite, in the migration |
+|---|---|
+| `default:`, `null: false` | `views INTEGER NOT NULL DEFAULT 0`, `status TEXT NOT NULL DEFAULT 'draft'` |
+| `limit:`, `precision:`, `scale:` | a `CHECK (length(code) <= 8)`; SQLite ignores declared sizes (`VARCHAR(8)` is `TEXT`); exact numbers are the `decimal` field type |
+| `collation:` | `email TEXT NOT NULL COLLATE NOCASE` (case-insensitive comparisons and unique index) |
+| `add_check_constraint` | `CHECK (price >= 0)` on the column or the table; to add one to an existing table, rebuild it (below) |
+| `comment:` | an SQL comment inside `CREATE TABLE`: `price REAL NOT NULL, -- in euros`; SQLite keeps the statement's text, so `ocre db schema` shows it in `db/schema.sql` |
+| `if_not_exists:`, `force:`, `id: false`, `primary_key:` | `CREATE TABLE IF NOT EXISTS`, `DROP TABLE IF EXISTS` first, any primary key you declare (`PRIMARY KEY (a, b)`, `id TEXT PRIMARY KEY` for UUIDs); generated models expect an `INTEGER` `id`, so such tables get a hand-written model module |
+| `change_table` (several changes at once) | several `ALTER TABLE` statements in one migration file, applied together |
+| `change_column`, `change_column_null`, `change_column_default` | a table rebuild (below) |
 
 ### Change a column: rebuild the table
 
@@ -580,7 +666,7 @@ INSERT INTO authors (name, bio) VALUES ('Ada', 'Mathematician');
 
 ```sh
 ocre db seed            # local; --remote for production
-ocre db reset           # local only: delete .wrangler/state/v3/d1, apply every migration, run db/seeds.sql
+ocre db reset           # local only: delete .wrangler/state/v3/d1, apply every migration, load db/fixtures and db/seeds.sql
 ocre sql "SELECT id, title, published, slug FROM posts"
 ```
 
@@ -600,7 +686,70 @@ id | title | published | slug
 
 Seeds run every time you call `ocre db seed`: write them so a second run does no harm (`INSERT OR IGNORE`, or run them after `ocre db reset`). Queries from the CLI count toward the D1 quotas like any other. See [CLI commands](../reference/cli.md#ocre-migrate) for every flag.
 
-The other database commands: `ocre db create` (`--remote` creates the D1 database on Cloudflare when missing), `ocre db version` (the last applied migration; `--remote` too), and, on the local database only, `ocre db drop`, `ocre db truncate` (empties every app table, keeps the schema and `d1_migrations`), `ocre db seed --replant` (truncate, then seed) and `ocre db prepare` (applies pending migrations, and seeds a database it just created; safe to run any time). See [CLI commands](../reference/cli.md).
+The other database commands: `ocre db create` (`--remote` creates the D1 database on Cloudflare when missing), `ocre db version` (the last applied migration; `--remote` too), and, on the local database only, `ocre db drop`, `ocre db truncate` (empties every app table, keeps the schema and `d1_migrations`), `ocre db seed --replant` (truncate, then seed; Loco's `seed --reset`) and `ocre db prepare` (applies pending migrations, and seeds a database it just created; safe to run any time). See [CLI commands](../reference/cli.md).
+
+#### Fixtures
+
+Fixtures are Rails-style named rows, one YAML (or JSON) file per table in `db/fixtures/` (Loco's `src/fixtures`). `ocre db seed` loads them first, then runs `db/seeds.sql`; either may be missing. `ocre db reset` and a fresh `ocre db prepare` load both too.
+
+```yaml
+# db/fixtures/authors.yml
+ada:
+  name: Ada
+  bio: Mathematician
+
+# db/fixtures/posts.yml
+DEFAULTS: &defaults       # never inserted: values shared with `<<: *defaults`
+  published: true
+hello:
+  <<: *defaults
+  title: Hello from $LABEL # $LABEL is the row's label: "Hello from hello"
+  author: ada              # author_id = the id of the row labelled `ada`
+draft:
+  <<: *defaults
+  id: 42                   # explicit id
+  title: Draft
+  published: false
+  tags: [rust, d1]         # sequences and mappings are stored as JSON text
+```
+
+Each file's table is emptied first (`DELETE FROM`, foreign keys deferred), then gets one `INSERT` per row, so loading twice gives the same rows. A row without `id` gets Rails' stable id for its label (`crc32(label) % (2^30 - 1)`), so `author: ada` works without knowing ada's id. `author: ada` becomes `author_id` when the word `author_id` appears in `migrations/*.sql`; the label is looked up in the `authors` fixtures first, else in the only file that defines it. `--from <dir>` loads another directory, e.g. `ocre db seed --from test/fixtures`.
+
+Fixtures load into the local database only: they replace table rows, and Ocre never deletes production data. `ocre db seed --remote` refuses when there are fixtures to load; put production data in `db/seeds.sql`.
+
+`ocre db dump` writes the other way: each app table (or `--tables posts,authors`) to `db/fixtures/<table>.yml`, one row per label `<table>_<id>` with its explicit id, readable by `ocre db seed`. It never overwrites a file without `--force`; `--dir <dir>` writes elsewhere, `--remote` reads the production database (one `SELECT *` per table, a D1 row read per row). BLOB columns come back as JSON arrays of bytes, loaded as text.
+
+#### Static data
+
+Read-only data that never changes at runtime (countries, plans, a price list; Loco's `data/` loaders) belongs in the binary, not in D1: `include_str!("../data/countries.json")` compiles the file in, and a `LazyLock` parses it once per Worker instance. Reading it costs no D1 row and no request; the file adds its size to the WebAssembly binary (3 MB compressed on the free plan), and changing it is a deploy.
+
+```rust,check
+// src/models/countries.rs
+use std::sync::LazyLock;
+
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+pub struct Country {
+    pub code: String,
+    pub name: String,
+}
+
+/// In an app: `include_str!("../../data/countries.json")`.
+const COUNTRIES_JSON: &str = r#"[{"code": "FR", "name": "France"}, {"code": "JP", "name": "Japan"}]"#;
+
+/// Parsed on first use, then shared by every request of this Worker instance.
+static COUNTRIES: LazyLock<Vec<Country>> =
+    LazyLock::new(|| ocre::serde_json::from_str(COUNTRIES_JSON).expect("data/countries.json is valid"));
+
+pub fn country(code: &str) -> Option<&'static Country> {
+    COUNTRIES.iter().find(|country| country.code == code)
+}
+```
+
+#### Data migrations
+
+Migrations change the schema; changing existing rows (backfilling a new column, splitting a name) is a data migration. A single `UPDATE ... WHERE ...` in the SQL migration is fine for small tables. For large ones, write a [job](jobs.md) that walks the table with `query().batches(..)` a few batches per run and enqueues itself with the last id until `next` returns `None`: each run stays within the 50 queries and 10 ms of CPU of a free-plan invocation, and D1 never runs one statement over millions of rows.
 
 ## Update the model after a migration
 
@@ -766,6 +915,9 @@ Conditions combine with `AND`, in the order they are added. The column argument 
 | `any(\|q\| q.a(..).b(..))` | `(a OR b)` |
 | `not(\|q\| q.a(..).b(..))` | `NOT (a AND b)` |
 | `none()` | `WHERE 0`: no row, and no row read (Rails' `none`) |
+| `where_associated(table, fk)`, `where_missing(table, fk)` | `EXISTS (SELECT 1 FROM table WHERE table.fk = <this table>.id)`, or `NOT EXISTS`: rows with / without a child (Rails' `where.associated` / `where.missing` on a has-many side; for a belongs-to side, `is_not_null` / `is_null` on the column) |
+| `date_range(col, from, to)` | `col BETWEEN ? AND ?` with both bounds, `col > ?` or `col < ?` with one, nothing with none (Loco's `DateRangeBuilder`, for `?from=&to=` filters) |
+| `unscope_where()` | removes the conditions added so far (a model's default conditions, see below); chain new ones for Rails' `rewhere` |
 
 The builder numbers every placeholder `?1, ?2...` in the final SQL, including those of `where_sql` and `having`, so fragments mix freely with the other methods:
 
@@ -785,7 +937,9 @@ post::query()
 | `order_in(col, values)` | `ORDER BY CASE col WHEN ? THEN 0 ... ELSE n END` (Rails' `in_order_of`; unlisted values last) |
 | `order_sql(term)` | a raw term, e.g. `lower(title) ASC` |
 | `reorder()` | removes the order set so far (a scope's default order) |
+| `reverse_order()` | flips every `ASC`/`DESC` (Rails' `reverse_order`); `ORDER BY <table>.id DESC` when no order is set |
 | `limit(n)`, `offset(n)`, `page(page)` | `LIMIT ?`, `OFFSET ?`; `page` sets both from `?limit=&offset=` |
+| `unscope_limit()` | removes the limit and offset set so far |
 | `select::<U>(columns)` | `SELECT columns` instead of `*`; the rows become `U`, a struct whose fields match the column names (`AS` for expressions) |
 | `distinct()` | `SELECT DISTINCT` |
 | `join(clause)` | the clause as written: `JOIN ...` or `LEFT JOIN ...` |
@@ -806,10 +960,18 @@ Terminal methods take `&Db` (`&ctx.db()?`, or `&ctx.db_named("...")?` for anothe
 | `aggregate::<V>(&db, expr)` | `SELECT SUM(price) AS value ...`, without order or limits | `Option<V>`: `None` when SQL gives `NULL` (the `SUM` of no row) |
 | `update_all(&db, vec![(col, value.into_param())])` | `UPDATE table SET col = ? WHERE ...` | rows changed |
 | `delete_all(&db)` | `DELETE FROM table WHERE ...` | rows deleted |
+| `first_or_create(&db, \|\| async { .. })` | the query with `LIMIT 1`, then your `create` when nothing matched | `T` (Rails' `find_or_create_by`; two racing requests can both create) |
+| `create_or_first(&db, \|\| async { .. })` | your `create`, then the query when it failed with "has already been taken" or `UNIQUE constraint failed` | `T` (Rails' `create_or_find_by`: safe under races, needs a `UNIQUE` index) |
+| `batches(size, \|row\| row.id)`, then `next(&db)` | `WHERE id > <last id> ORDER BY id LIMIT size`, one query per call | `Option<Vec<T>>`, `None` when done (Rails' `find_in_batches`; loop over each batch for `find_each`) |
+| `explain(&db)` | `EXPLAIN QUERY PLAN SELECT ...` | `Vec<String>`, one line per step (Rails' `explain`) |
 
 `update_all` and `delete_all` ignore joins, order and limits, skip validations and callbacks, do not touch `updated_at` unless you list it, and, without any condition, change every row of the table. `delete_all` leaves the R2 files of attachment columns in place.
 
-For batches and custom calls, `to_statement()`, `count_statement()`, `exists_statement()`, `value_statement(expr)`, `aggregate_statement(expr)`, `update_statement(sets)` and `delete_statement()` return the `ocre::Statement` (SQL plus parameters) without running it: put several in one [transaction](#transactions), or check the SQL in a unit test.
+For batches and custom calls, `to_statement()`, `count_statement()`, `exists_statement()`, `value_statement(expr)`, `aggregate_statement(expr)`, `update_statement(sets)`, `delete_statement()` and `explain_statement()` return the `ocre::Statement` (SQL plus parameters) without running it: put several in one [transaction](#transactions), or check the SQL in a unit test.
+
+`batches` pages by id (keyset pagination), so the hundredth batch costs the same as the first, unlike `OFFSET`. A Worker invocation may run 50 queries on the free plan: walk a large table from a job or a scheduled task, a few batches per run, and store `batches.after()` (the last id) to resume the next run with `.resume_after(Some(id))`.
+
+A model's default scope (Rails' `default_scope`) is its `query()`: add the condition there (`Query::table("posts").is_null("deleted_at")` for soft-deleted rows) and every generated function, controller and API applies it; `Query::table("posts")` or `unscope_where()` is the unscoped query. Block-level scoping (`Post.where(..).scoping { }`) has no equivalent: pass the query or a scope function to the code that needs it.
 
 A few calculations, eager loads and bulk changes on the blog's tables:
 
@@ -883,13 +1045,42 @@ pub async fn unpublish(ctx: &Ctx, ids: &[i64]) -> Result<usize> {
 pub async fn purge_author(ctx: &Ctx, author: &str) -> Result<usize> {
     comment::query().eq("author", author).delete_all(&ctx.db()?).await
 }
+
+/// Posts nobody commented on yet (`NOT EXISTS`, one index lookup per post).
+pub async fn uncommented(ctx: &Ctx) -> Result<Vec<Post>> {
+    post::query().where_missing("comments", "post_id").order_desc("id").limit(20).all(&ctx.db()?).await
+}
+
+/// Walks every post, 100 at a time (a job or scheduled task: one query per batch).
+pub async fn count_words(ctx: &Ctx) -> Result<usize> {
+    let db = ctx.db()?;
+    let mut batches = post::query().batches(100, |post| post.id);
+    let mut words = 0;
+    while let Some(posts) = batches.next(&db).await? {
+        words += posts.iter().map(|post| post.body.split_whitespace().count()).sum::<usize>();
+    }
+    Ok(words)
+}
+
+/// The product with this name, created when missing. `name` has a UNIQUE
+/// index: when two requests race, the loser reads the winner's row.
+pub async fn product_named(ctx: &Ctx, name: &str) -> Result<product::Product> {
+    let db = ctx.db()?;
+    product::query()
+        .eq("name", name)
+        .create_or_first(&db, || async {
+            let sql = "INSERT INTO products (name, price) VALUES (?1, 0) RETURNING *";
+            db.first(sql, params![name]).await?.ok_or_else(|| ocre::Error::internal("no row returned"))
+        })
+        .await
+}
 ```
 
 `busiest_posts` sends `SELECT post_id, COUNT(*) AS comments FROM comments GROUP BY post_id HAVING (COUNT(*) >= ?1) ORDER BY comments DESC LIMIT ?2`, and `commented_by` sends `SELECT DISTINCT posts.* FROM posts JOIN comments ON comments.post_id = posts.id WHERE comments.author = ?1 ORDER BY posts.id DESC LIMIT ?2`.
 
 Rows read are what D1 bills: `count`, `aggregate` and `paginate`'s total read every matching row, `exists` and `first` stop early, and a filter or order on a column without an index scans the whole table. `references` and `^` columns are indexed; add others with `ocre g migration add_index_to_<table> <columns>`.
 
-SQLite tells whether a query uses an index. Paste the SQL (with a sample value in place of each `?N`) into `EXPLAIN QUERY PLAN` on the local database; `SEARCH ... USING INDEX` is good, `SCAN <table>` reads every row:
+SQLite tells whether a query uses an index (`query.explain(&db).await?` returns the same `detail` lines from code). Paste the SQL (with a sample value in place of each `?N`) into `EXPLAIN QUERY PLAN` on the local database; `SEARCH ... USING INDEX` is good, `SCAN <table>` reads every row:
 
 ```sh
 ocre sql "EXPLAIN QUERY PLAN SELECT * FROM comments WHERE post_id = 1"
@@ -1089,9 +1280,34 @@ What this means in practice:
 
 - Each generated `create`, `update` and `delete` writes with one statement, so it is atomic on its own. Their uniqueness and "must exist" checks are separate reads: keep the `UNIQUE` index and `REFERENCES` constraint as the real guarantee.
 - Writes to several rows or tables that must succeed together go into one `batch`: build the statements with `Statement::new(sql, params![..])` or the builder's `*_statement()` methods. Callbacks and validations do not run for them.
-- A decision based on a value ("only if enough stock is left", "only if still a draft") goes into the `WHERE` of the write, and the number of rows changed tells whether it happened. This also replaces Rails' optimistic locking: add `AND updated_at = ?` with the value the form was loaded with, and treat 0 rows changed as a conflict.
+- A decision based on a value ("only if enough stock is left", "only if still a draft") goes into the `WHERE` of the write, and the number of rows changed tells whether it happened. [Optimistic locking](#optimistic-locking) is the generated form of this rule.
 - A batch counts the rows read and written by each statement, as if each ran alone; it saves round trips, not quota.
 - Work that must happen after a write but may fail independently (an email, a call to another API) goes in a background job enqueued after the write, not in the batch.
+
+## Optimistic locking
+
+Two people open the same record, both save: without a check, the second save silently overwrites the first. A `lock_version:integer` field (Rails' magic column) makes `update` refuse the stale one:
+
+```sh
+ocre g scaffold Article title:string body:rich_text lock_version:integer
+# or on an existing table:
+ocre g migration add_lock_version_to_articles lock_version:integer
+```
+
+The column is `lock_version INTEGER NOT NULL DEFAULT 0`. The record has `pub lock_version: i64`; `NewArticle` has no such field (a new row starts at 0); `ArticleChanges` has `pub lock_version: Option<i64>`, the version the change was made from. `update` bumps and checks it in the same statement:
+
+```sql
+UPDATE articles SET ..., lock_version = lock_version + 1, updated_at = datetime('now')
+WHERE id = ?4 AND (?5 IS NULL OR lock_version = ?5) RETURNING *
+```
+
+When no row comes back although the id exists, `update` returns `Error::Conflict` (409, "This article was changed by someone else since you opened it: reload it and apply your changes again."), Rails' `StaleObjectError`. `lock_version: None` skips the check (code that updates without having read the row).
+
+- **HTML scaffolds** put `<input type="hidden" name="lock_version" value="{{ form.lock_version }}">` in the edit form; a stale submit shows the 409 error page.
+- **JSON APIs** return `lock_version` with every record; clients send it back in `PATCH` bodies (`{"title": "New", "lock_version": 3}`) and get a JSON 409 when someone else saved first. GraphQL patches take `lockVersion`.
+- **Cost:** nothing extra on success; one `SELECT 1` (one row read) to tell a conflict from a missing id.
+
+Pessimistic locking (`SELECT ... FOR UPDATE`, `with_lock`) has no D1 equivalent: D1 never holds a transaction open while Rust runs. For "check then write" on one row, put the check in the `WHERE` of the write, as in `take_stock` under [Transactions](#transactions).
 
 ## Encrypted columns
 
@@ -1239,6 +1455,58 @@ node_modules/.bin/wrangler d1 migrations apply ANALYTICS --local -c db/analytics
 
 Queries cannot join tables of two databases and a `batch` runs on one database: load ids from one, then `find_many`-style `is_in` queries on the other.
 
+## Form objects and plain structs
+
+Rails' Active Model makes a plain Ruby class behave like a model: attributes, validations, callbacks, naming, serialization. In Ocre any struct already does, with serde and `ocre::Validator`, so a form that is not a table (a contact form, a sign-up that writes two tables, a search) is a struct with a `validate()` function:
+
+```rust,check
+// src/models/contact_form.rs
+use ocre::{Result, Validator};
+use serde::{Deserialize, Serialize};
+
+/// The contact form: no table, but typed fields, defaults and validations.
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ContactForm {
+    pub name: String,
+    pub email: String,
+    pub message: String,
+    pub accept_terms: bool,
+    /// Never serialized back to a client (Rails' `except:`).
+    #[serde(skip_serializing)]
+    pub honeypot: String,
+}
+
+impl ContactForm {
+    /// Rails' `valid?` / `errors`: every failed check at once.
+    pub fn validate(&self) -> Validator {
+        let mut v = Validator::new();
+        v.required("name", &self.name).email("email", &self.email).min_length("message", &self.message, 10);
+        v.acceptance("accept_terms", self.accept_terms).absence("honeypot", &self.honeypot);
+        v
+    }
+
+    /// Rails' `validate!`: `Error::Invalid` (422) with every message.
+    pub fn validate_strict(&self) -> Result<()> {
+        self.validate().finish()
+    }
+}
+```
+
+A handler takes it with `Form(form): Form<ContactForm>` (or `Json`), calls `form.validate().finish()?`, then does the work: send the email, or call two models' `create` in turn. How each Active Model module maps:
+
+| Active Model | In Ocre |
+|---|---|
+| `API`, `Model`, `AttributeAssignment`, `Attributes` | a struct deriving `Deserialize` (mass assignment from a form, JSON or query string), with typed fields and `#[serde(default)]` defaults |
+| `Validations`, `validates_with`, `validates_each`, custom validators | `validate() -> Validator`; a reusable rule is a function `fn slug(v: &mut Validator, field: &str, value: &str)`; `v.merge(other.validate())` combines validators (see [Validations](validations.md)) |
+| `Callbacks`, `before_validation` | plain code before `validate()` (the generated `before_create` / `before_update` run before validation) |
+| `Conversion` (`to_param`, `to_key`), `Naming` (`model_name`, `route_key`) | the generated `paths` module of each controller (`paths::show(post.id)`) and the model file's name; no reflection |
+| `Dirty` | `<Model>Changes` and its `changed()` (see [New and Changes](#new-and-changes)) |
+| `Serialization`, `as_json(only:, except:, methods:, include:)` | serde: `#[serde(skip_serializing)]`, `rename`, `flatten`, or a view struct built from the record (`Paginated::map` for lists) holding exactly what the response shows |
+| `SecurePassword` (`has_secure_password`) | `ocre g auth`: `ocre::password` digests with a confirmation check and password resets (see [Authentication](authentication.md)) |
+| `Translation` (`human_attribute_name`) | `FieldError::full_message` humanizes field names; translated names come from locale files (see [I18n](i18n.md)) |
+| `Lint::Tests` | not needed: the compiler checks what a view or handler uses |
+
 ## What is not supported
 
 Ocre models are generated Rust over SQL, not an ORM, and D1 is SQLite behind an HTTP API. These Rails features have no equivalent; the second column is what to do instead:
@@ -1247,14 +1515,13 @@ Ocre models are generated Rust over SQL, not an ORM, and D1 is SQLite behind an 
 |---|---|
 | `down` migrations, `db:rollback`, `db:migrate:redo`, reversible `change` | D1 migrations are forward-only: a new migration, or D1 Time Travel (see [Undo a migration](#undo-a-migration)) |
 | `Model.transaction do ... end`, savepoints, `after_commit` | `db.batch` (see [Transactions](#transactions)); a job enqueued after the write |
-| Lazy loading, `includes`, `strict_loading` | associations are explicit `async` functions; `preload_<parents>`, `for_<parents>`, `find_many` |
-| Pessimistic locking (`lock`, `SELECT ... FOR UPDATE`) and `lock_version` | conditions in the `UPDATE`'s `WHERE`, checking the rows changed |
-| `find_each` / `in_batches` | keyset pages, `query().gt("id", last_id).order_asc("id").limit(100)`, one page per job run (50 queries per invocation) |
-| Composite primary keys, polymorphic associations, single-table inheritance, counter caches | a plain `id` key and a unique index; one reference column per parent; a `kind` enum column; `COUNT(*)` with an index, or a column you update in the same `batch` |
+| Lazy loading, `strict_loading` | associations are explicit `async` functions; `includes` / `preload` / `eager_load` are `preload_<parents>`, `for_<parents>`, `find_many`, or one `join` + `select` into a row struct |
+| Pessimistic locking (`lock`, `SELECT ... FOR UPDATE`) | conditions in the `UPDATE`'s `WHERE`, checking the rows changed; `lock_version` for [optimistic locking](#optimistic-locking) |
+| Composite primary keys, single-table inheritance, delegated types | a plain `id` key and a unique index on the pair; a `kind` enum column (one table) or one table per type with a shared reference |
 | Tables without `id`/`created_at`/`updated_at` from the generators | an empty migration with a name the generator does not read (`ocre g migration events_table`), your own `CREATE TABLE`, and a hand-written module |
-| Dirty tracking, `ActiveModel` attributes and callbacks on plain structs | `<Model>Changes` (only `Some` fields are written); `Validator` works on any struct |
-| Fixtures | `db/seeds.sql` with `ocre db seed` or `ocre db reset` |
-| `explain` | `ocre sql "EXPLAIN QUERY PLAN SELECT ..."` on the local database |
+| `ActiveModel` modules on plain structs | serde and `Validator` (see [Form objects and plain structs](#form-objects-and-plain-structs)) |
+| Fixtures' `created_at`/`updated_at` filled automatically, ERB in fixture files | write the values in `db/fixtures/*.yml`; YAML anchors and `<<` share them |
+| `readonly` records | records are plain values: nothing saves them except the model's `update` |
 | Enum fields with `--graphql` | a `string` field with `v.inclusion(..)` |
 | Joins across databases | two queries, one per database |
 

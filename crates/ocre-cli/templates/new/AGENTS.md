@@ -44,6 +44,10 @@ on stdout (`"ok": true|false`, plus `error` and `hint` on failure).
 | Scheduled task (Cron Trigger, UTC; English or cron) | `ocre g schedule nightly_cleanup "every day at 3am"` |
 | List scheduled tasks; run one now (`ocre dev` running) | `ocre schedules`, `ocre schedules run nightly_cleanup` |
 | Cache values in Workers KV (adds the `CACHE` binding) | `ocre g cache` |
+| Turn the cache off / back on in `ocre dev` (`CACHE_STORE=null` in `.dev.vars`) | `ocre dev --no-cache` / `ocre dev --cache` |
+| GitHub Actions: checks on every push, `ocre deploy` on main (needs `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` secrets) | `ocre g ci` |
+| Installable app: web manifest, service worker, icon | `ocre g pwa` |
+| Custom domain (then `ocre deploy`) | `ocre domains add www.example.com` (`ocre domains`, `ocre domains remove`) |
 | Translations: set up (first code = default), add a locale | `ocre g locale en fr`, then `ocre g locale de` |
 | Preview a generator without writing; overwrite / keep existing files | `ocre g scaffold Post title:string --pretend` (`--force`, `--skip`) |
 | Undo a generator run (from `.ocre/generated/`; commit that directory) | `ocre destroy scaffold Post` (`--pretend`, `--force`) |
@@ -53,8 +57,9 @@ on stdout (`"ok": true|false`, plus `error` and `hint` on failure).
 | Keys missing from a locale (fails if any) | `ocre i18n missing` |
 | Apply migrations locally | `ocre migrate` |
 | Pending migrations | `ocre migrate --status` |
-| Load seed data (`db/seeds.sql`); empty the tables first | `ocre db seed` (`ocre db seed --replant`) |
-| Recreate local database (migrations + seeds) | `ocre db reset` |
+| Load seed data (`db/fixtures/<table>.yml` named rows, local only, then `db/seeds.sql`); empty the tables first | `ocre db seed` (`ocre db seed --replant`, `--from test/fixtures`) |
+| Save table rows as fixture files (never overwrites without `--force`) | `ocre db dump` (`--tables posts,users`, `--dir <dir>`) |
+| Recreate local database (migrations + fixtures + seeds) | `ocre db reset` |
 | Set up or update the local database (safe to repeat) | `ocre db prepare` |
 | Empty every local table / delete the local database | `ocre db truncate` / `ocre db drop` |
 | Last applied migration | `ocre db version` |
@@ -64,8 +69,9 @@ on stdout (`"ok": true|false`, plus `error` and `hint` on failure).
 | List routes (method, path, handler) | `ocre routes` (or `ocre routes posts`) |
 | New secret value | `ocre secret` |
 | Live production logs | `ocre logs` (`--status error`, `--search text`) |
-| Secret names locally and deployed; upload production values | `ocre secrets list`, `ocre secrets push GITHUB_CLIENT_SECRET --file .prod.vars` |
-| Check tools, bindings, migrations, secrets (fails on a problem) | `ocre doctor` |
+| Secret names locally and deployed; upload production values; print one local value | `ocre secrets list`, `ocre secrets push GITHUB_CLIENT_SECRET --file .prod.vars`, `ocre secrets fetch NAME --file .prod.vars` |
+| Check tools, bindings, migrations, secrets, production settings, `.ocre/doctor/` scripts (fails on a problem) | `ocre doctor` |
+| Everything CI checks, locally, before pushing (fmt, clippy, tests, wasm32, translations) | `ocre ci` |
 | Versions and configuration; code size; TODO/FIXME comments | `ocre about`, `ocre stats`, `ocre notes` |
 | Cloudflare login (browser, `cf auth login`; once) | `ocre login` |
 | Deploy: creates missing resources, remote migrations, then `cf deploy` | `ocre deploy` |
@@ -74,7 +80,8 @@ on stdout (`"ok": true|false`, plus `error` and `hint` on failure).
 | Type-check | `cargo check --target wasm32-unknown-unknown` |
 | Unit tests + type-check (`--e2e`: also `tests/e2e.sh` against a local server, `$BASE_URL`) | `ocre test` |
 
-Field types: `string`, `text`, `integer`, `float`, `decimal` (exact, as
+Field types: `string`, `text`, `rich_text` (HTML from the Trix editor,
+sanitized on save; show it with `{{ x|rich_text }}`), `integer`, `float`, `decimal` (exact, as
 text), `boolean`, `date` (`YYYY-MM-DD`), `time`, `datetime`, `uuid`,
 `enum:draft,published` (a Rust enum in the model, stored as text with a
 `CHECK`; cannot be unique, not with `--graphql`), `references`
@@ -89,6 +96,8 @@ values with `ocre::serde_json::json!`; cannot be unique `^`). Suffix `?`
 makes a field optional (NULL allowed), `^` unique. Integers must stay within
 ±`ocre::MAX_SAFE_INTEGER` (2^53 - 1): D1 returns numbers as JavaScript
 numbers; generated validations already reject larger values.
+`lock_version:integer` turns on optimistic locking: `update` answers
+`Error::Conflict` (409) when `<Model>Changes.lock_version` is stale.
 
 ## Layout
 
@@ -188,7 +197,10 @@ package.json        pinned cf, wrangler, typescript (commit package-lock.json); 
   `create`/`update`.
 - Load associations for many rows at once: `comment::preload_posts(ctx, &comments)`
   (HashMap by id), `comment::for_posts(ctx, &post_ids)`, `find_many(ctx, &ids)`;
-  never an association or `find` in a loop.
+  never an association or `find` in a loop. Other query helpers:
+  `where_missing("comments", "post_id")`, `create_or_first(&db, || async { .. })`
+  with a UNIQUE index, `batches(100, |r| r.id)` + `next(&db)` for big tables
+  (from jobs: 50 queries per invocation), `explain(&db)`.
 - Migrations are forward-only (no down/rollback): fix mistakes with a new
   migration. Encrypted columns: `ocre::encryption::Encrypted` (or
   `Deterministic` to look up with `eq`) as the row field type. Another D1
@@ -204,6 +216,11 @@ package.json        pinned cf, wrangler, typescript (commit package-lock.json); 
   `{{ paths::show(post.id) }}` and elsewhere `crate::posts::paths::show(id)`.
   When you change a route, change `paths` too. Nested routes use
   `Path((post_id, id)): Path<(i64, i64)>`; namespaces `.nest("/admin", admin::routes())`.
+- Forms with lists or nested records (`tag_ids[]`, `lines[0][qty]`,
+  `order[note]`): extract `ocre::NestedForm<T>` instead of axum's `Form`.
+  Unicode route paths: `.route(&ocre::encode_path("/café"), ..)`. Streaming
+  (Server-Sent Events): return `ocre::sse::stream(state, step)`, pace with
+  `ocre::sleep`; links in emails: `ocre::mail::url(&ctx, path)` (`APP_URL`).
 - Errors render `templates/error.html` through `error_page` in src/lib.rs;
   keep `.fallback(not_found)` and `.layer(map_response(error_page))` last in
   `routes()` (before the i18n layer).
@@ -356,7 +373,18 @@ package.json        pinned cf, wrangler, typescript (commit package-lock.json); 
   - JSON: `PUT /api/<plural>/{id}/<name>` with `curl -X PUT -F <name>=@file`,
     `DELETE` removes it; JSON bodies cannot carry files.
   - Other code: `storage::store(&ctx, "prefix", upload)`, `store_bytes`,
-    `store_body` (raw body with Content-Length), `read`, `delete`.
+    `store_body` (raw body with Content-Length), `read`, `delete`;
+    `Upload::new(name, type, bytes)` for app-made files; `head`/`exists`
+    (class B), `list(prefix, cursor, limit)` (class A per page: never per request).
+  - Content check: `v.file_content("image", &upload)` refuses bytes that do not
+    match the declared type; `storage::analyze(&bytes)` gives type, width, height.
+  - Big files: `storage::direct_upload` (presigned PUT, needs `R2_ACCOUNT_ID`,
+    `R2_BUCKET` vars, `R2_ACCESS_KEY_ID`/`R2_SECRET_ACCESS_KEY` secrets and a
+    bucket CORS rule) then `attach_direct_upload(signed_key)`; purge abandoned
+    ones from a schedule with `purge_unattached`. `serve_redirect` sends a 302
+    to a presigned GET. Presigned URLs hit the real bucket, not `ocre dev`'s.
+  - Resized images: `Variant::new().width(300).path("/photos/1/image")`
+    (Cloudflare Image Transformations; custom domain only, not workers.dev).
   - Files of rows deleted by `ON DELETE CASCADE` stay in R2: delete them in
     the parent's `delete` if that matters.
 
@@ -374,7 +402,10 @@ package.json        pinned cf, wrangler, typescript (commit package-lock.json); 
     (take `CurrentUser`) and return `Err(Error::Forbidden)`; use one channel
     per user or record, never a shared channel for private data.
   - Messages are rendered HTML: use askama templates (escaping) as for pages.
-    Client messages are ignored; use forms/htmx requests to send data.
+    Client messages are ignored; use forms/htmx requests to send data. For
+    chat-like relays between JavaScript clients, `upgrade.identified_by(user.id.to_string()).rebroadcast()`
+    in `connect` sends what a client sends to the others as `{"from","data"}` JSON.
+  - Tests: in `ocre dev`, GET `/ocre/dev/realtime/sent.json` lists recent broadcasts.
   - Needs `features = ["realtime"]` on `ocre` in Cargo.toml and the
     `CHANNELS` binding + `OcreChannel` export in cloudflare.config.ts (the
     generator adds them; `ocre deploy` creates the namespace).
@@ -386,6 +417,12 @@ package.json        pinned cf, wrangler, typescript (commit package-lock.json); 
     its type changes. `ocre::cache::delete(&ctx, key).await?` after changing
     the data behind it; `read`/`write` for explicit use.
   - Never cache per-user data under a shared key; put the user id in the key.
+  - Costly HTML: `ocre::cache::fragment(&ctx, &ocre::cache::key(&[&"posts", &post.id, &post.updated_at, &"card-v1"]), ttl, || CardView { post: &post }).await?`
+    returns a `Fragment`; put it in the page's view struct and write `{{ card }}` (no `|safe`).
+    Lists: `ocre::cache::fragments(&ctx, &posts, ttl, |p| key.., |p| RowView { post: p })`.
+    Bump the key's version when the template changes; never cache HTML holding a CSRF token or nonce.
+  - Repeated identical SELECTs in one request are cached automatically (any write empties it);
+    `ctx.db()?.uncached()` bypasses it. `CACHE_STORE=null` in `.dev.vars` turns KV caching off.
   - TTL is at least 60 s. KV is eventually consistent (up to 60 s).
   - Pages: take `conditional: ocre::cache::Conditional` and return
     `conditional.fresh_when(ETag::of(&(&post, i18n.locale()))?, CacheControl::no_cache(), || render(&view))`:
@@ -406,6 +443,17 @@ package.json        pinned cf, wrangler, typescript (commit package-lock.json); 
   - Locale: `{locale}` path segment (`.nest("/{locale}", routes)`), else the
     `locale` cookie (`i18n.cookie()` is its `Set-Cookie` value), else
     `Accept-Language`, else the default (first code in `ocre::locales!`).
+  - Defaults: `i18n.t("key").or_key("other.key").or("Text")`. Scoped keys:
+    `i18n.scope("posts.index")` in the handler, then `{{ i18n.t(".title") }}`.
+    Markup in a translation: `{{ i18n.t("terms").arg("name", n).html() }}`
+    (text raw, values escaped); never `|safe`. Links keeping the locale:
+    `{{ i18n.path("/posts") }}` (routes under `.nest("/{locale}", ..)`).
+  - Localized formats: `i18n.l(date, "long")`, `i18n.number(n)`,
+    `i18n.currency(amount, "€")`, `i18n.time_ago_in_words(at)`. Names:
+    `i18n.model_name("post", n)` (`models.post.one/other`),
+    `i18n.attribute("post", "title")` (`attributes.post.title`). Validation
+    errors: `i18n.full_message("post", &error)` (keys `errors.messages.blank`...,
+    built in for en, fr, de, es, it, pt, nl).
   - After adding keys, run `ocre i18n missing` and translate what it lists.
     `ocre dev` shows `translation missing: fr.key` in pages; production falls
     back to the default locale.

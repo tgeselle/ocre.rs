@@ -159,6 +159,7 @@ async fn index(State(ctx): State<Ctx>, page: Page) -> Result<Html<String>> {
 | `{{ post.body\|highlight(q) }}` | the text with each match in `<mark>` | `highlight` |
 | `{{ post.body\|word_wrap(72) }}` | lines of at most 72 characters | `word_wrap` |
 | `{{ ocre::helpers::class_names([("active", current)]) }}` | `active` when `current` | `class_names` / `token_list` |
+| `{% if ocre::helpers::current_page(current, "/posts") %}` | `true` when `current` (the request's `Uri` as text, set by the handler) is `/posts`, whatever its query | `current_page?` |
 
 askama's own filters cover the rest: `truncate(n)`, `wordcount`, `linebreaks` / `linebreaksbr` / `paragraphbreaks` (`simple_format`), `pluralize` (`{{ n }} post{{ n|pluralize }}`), `filesizeformat`, `urlencode`, `upper`, `lower`, `title`, `capitalize`, `json`, `fmt` (`{{ ratio|fmt("{:.2}") }}`) and `format` (`{{ "{:?}"|format(value) }}`, Rails' `debug` inside a `<pre>`). Time filters read Unix seconds or the `TEXT` timestamps D1 stores (`2026-09-29 14:05:00`, UTC); number filters read any number. Other text passes through unchanged. They are English; translated text comes from [Translations](i18n.md).
 
@@ -299,13 +300,84 @@ Rails' form helpers map to HTML inputs:
 | `select`, `options_for_select`, `collection_select`, `grouped_options_for_select` | a `<select>` with a `{% for %}` over a slice or the records, `<optgroup>` for groups |
 | `date_select`, `time_select` (multi-parameter attributes) | `type="date"` / `type="time"` inputs; the browser's picker; `Validator::date` checks the text |
 | `file_field` | `<input type="file">` in a `enctype="multipart/form-data"` form; see [File storage](files.md) |
-| `fields_for`, nested attributes | several structs flattened into one form struct, saved in the handler (see [Models](models.md) for transactions with `batch`) |
+| `fields_for`, nested attributes | bracketed names read by `ocre::NestedForm`: `post[title]`, `comments[0][body]` (below), saved together with `batch` |
+| `time_zone_select` | a `<select name="time_zone">` filled in the browser from `Intl.supportedValuesOf("timeZone")`, with the visitor's zone (`Intl.DateTimeFormat().resolvedOptions().timeZone`) selected first; store the IANA name as text and show times in it with `Intl.DateTimeFormat` in the page. Ocre's own time helpers work in UTC |
 | `label`, `submit` | `<label>`, `<button type="submit">` |
 | Custom `FormBuilder` | askama macros, as `errors_for` above |
 | `_method` override for `PATCH`/`DELETE` | not used: HTML routes use `POST /posts/{id}` and `POST /posts/{id}/delete` (see [Controllers](controllers.md#routes)) |
 | `authenticity_token` | not needed: Ocre refuses cross-site form posts by origin (see [Security](security.md)) |
 
-axum's `Form` reads one value per name; fields named `tags[]` or `post[title]` are not grouped into arrays or nested structs. Give each field its own name, or post JSON from JavaScript to an `ocre::Json` handler when a form needs a list.
+axum's `Form` reads one value per name. For a list of values or of records in one form (Rails' `tag_ids[]`, `fields_for` and `accepts_nested_attributes_for`), use `ocre::NestedForm`, which reads Rails' bracketed names.
+
+### Lists and nested records in one form
+
+`ocre::NestedForm<T>` is axum's `Form` with Rails' naming rules: `order[note]` fills the field `note` of the struct in `order`, repeated `tag_ids[]` make a `Vec`, and `lines[0][qty]`, `lines[1][qty]` make a `Vec` of structs in index order. A name sent twice keeps the last value, so the hidden `0` before a checkbox works as in Rails, and numbers and booleans are parsed from the text (`1`, `true`, `on` are `true`; empty is `false`, or `None` for an `Option`). A body that does not fit `T` is a 400 naming the field.
+
+Nested attributes are plain code: the form sends each line with its `id` (empty for a new one) and a `_destroy` checkbox, and the handler turns them into statements that `batch` applies together, all or none:
+
+```rust,check
+use axum::{Router, extract::{Path, State}, response::Redirect, routing::post};
+use ocre::{Ctx, NestedForm, Result, Statement, Validator, params};
+use serde::Deserialize;
+
+pub fn routes() -> Router<Ctx> {
+    Router::new().route("/orders/{id}/lines", post(update_lines))
+}
+
+/// `<input name="lines[0][id]" type="hidden" value="7">`,
+/// `<input name="lines[0][product]">`, `<input name="lines[0][qty]" type="number">`,
+/// `<input name="lines[0][_destroy]" type="checkbox" value="1">`; then `lines[1][...]`...
+#[derive(Deserialize)]
+struct LinesForm {
+    #[serde(default)]
+    lines: Vec<LineFields>,
+}
+
+#[derive(Deserialize)]
+struct LineFields {
+    id: Option<i64>,
+    product: String,
+    qty: i64,
+    #[serde(default, rename = "_destroy")]
+    destroy: bool,
+}
+
+async fn update_lines(
+    State(ctx): State<Ctx>,
+    Path(order_id): Path<i64>,
+    NestedForm(form): NestedForm<LinesForm>,
+) -> Result<Redirect> {
+    let mut v = Validator::new();
+    let mut statements = Vec::new();
+    for line in form.lines {
+        match (line.id, line.destroy) {
+            (Some(id), true) => statements
+                .push(Statement::new("DELETE FROM lines WHERE id = ?1 AND order_id = ?2", params![id, order_id])),
+            // Rails' `reject_if: :all_blank`: an empty new line is ignored.
+            (None, _) if line.product.trim().is_empty() => {}
+            (id, _) => {
+                v.required("product", &line.product);
+                v.greater_than("qty", line.qty, 0);
+                statements.push(match id {
+                    Some(id) => Statement::new(
+                        "UPDATE lines SET product = ?1, qty = ?2 WHERE id = ?3 AND order_id = ?4",
+                        params![line.product, line.qty, id, order_id],
+                    ),
+                    None => Statement::new(
+                        "INSERT INTO lines (order_id, product, qty) VALUES (?1, ?2, ?3)",
+                        params![order_id, line.product, line.qty],
+                    ),
+                });
+            }
+        }
+    }
+    v.finish()?;
+    ctx.db()?.batch(statements).await?;
+    Ok(Redirect::to(&format!("/orders/{order_id}")))
+}
+```
+
+Every statement names the order, so a form cannot touch another order's lines. A search form with `filter[status]=open` in the query string uses the same rules: `NestedForm` reads the query on `GET`.
 
 ## Other formats
 

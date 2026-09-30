@@ -1,6 +1,6 @@
 # Caching
 
-Ocre has two opt-in caching tools chosen for the Workers free plan: `ocre::cache` keeps slow or costly results as JSON values in Workers KV, and `CacheControl`, `ETag` and `Conditional` let browsers reuse pages with `304 Not Modified` answers. This page shows both, the KV write budget that limits the first, and why Ocre does not wrap Cloudflare's own page caches.
+Ocre has opt-in caching tools chosen for the Workers free plan: `ocre::cache` keeps slow or costly results (JSON values or rendered HTML fragments) in Workers KV, every request remembers its own `SELECT` results and KV reads, and `CacheControl`, `ETag` and `Conditional` let browsers reuse pages with `304 Not Modified` answers. This page shows them, the KV write budget that limits the first, and why Ocre does not wrap Cloudflare's own page caches.
 
 ## Before you start
 
@@ -164,6 +164,87 @@ ocre::cache::write(ctx, "rates:v1", &rates, Duration::from_secs(6 * 3600)).await
 let rates: Option<Rates> = ocre::cache::read(&ctx, "rates:v1").await?;
 ```
 
+## Caching HTML fragments
+
+askama templates are compiled Rust and cannot wait for KV, so Rails' `<% cache post do %>` becomes a call in the handler: `ocre::cache::fragment(&ctx, &key, ttl, || template)` returns the fragment stored under `key`, or renders the template, stores the HTML and returns it. The result is an `ocre::cache::Fragment`, which the page template writes with `{{ card }}`: it was escaped when it was rendered, so it needs no `|safe`. `ocre::cache::fragments` does the same for a list, with one KV bulk read for all its items (Rails' `render collection:, cached: true`); only the missing items are rendered and written.
+
+```rust,check
+// src/cached_posts.rs
+use std::time::Duration;
+
+use askama::Template;
+use axum::{Router, extract::State, response::Html, routing::get};
+use ocre::{Ctx, Page, Result, cache::{self, Fragment}, render};
+
+use crate::models::post::{self, Post};
+
+/// One row; its HTML is cached per post and version.
+#[derive(Template)]
+#[template(source = r#"<li id="post_{{ post.id }}"><strong>{{ post.title }}</strong> {{ post.body }}</li>"#, ext = "html")]
+struct Row<'a> {
+    post: &'a Post,
+}
+
+#[derive(Template)]
+#[template(source = "<ul>{% for row in rows %}{{ row }}{% endfor %}</ul>", ext = "html")]
+struct Index {
+    rows: Vec<Fragment>,
+}
+
+pub fn routes() -> Router<Ctx> {
+    Router::new().route("/cached-posts", get(index))
+}
+
+/// One KV bulk read for the page; each post changed since its last view costs one render and one KV write.
+async fn index(State(ctx): State<Ctx>, page: Page) -> Result<Html<String>> {
+    let posts = post::all(&ctx, page).await?;
+    let rows = cache::fragments(
+        &ctx,
+        &posts,
+        Duration::from_secs(7 * 86_400),
+        // Bump `row-v1` when the Row template changes.
+        |post| cache::key(&[&"posts", &post.id, &post.updated_at, &"row-v1"]),
+        |post| Row { post },
+    )
+    .await?;
+    render(&Index { rows })
+}
+```
+
+### Keys
+
+`ocre::cache::key(&[&"posts", &post.id, &post.updated_at, &"row-v1"])` joins its parts with `/` (`posts/1/2026-09-29 14:05:00/row-v1`), like Rails' `cache_key_with_version`; keys longer than 256 bytes become `sha256/<hex>`. Fragments are stored under `views/<key>`.
+
+- **Records**: the id and `updated_at` of every record the fragment shows. Editing a record changes its key, so the old fragment is never read again and expires with its TTL: no `delete`, no extra write.
+- **Template version**: Rails adds a digest of the template and its partials to the key. Ocre keeps a version you write (`row-v1`) and bump when the template changes, so a deploy does not invalidate every fragment at once (each rewrite is a KV write out of 1,000 a day).
+- **Everything else the HTML depends on**: the locale (`i18n.locale()`) when the fragment is translated, the user's id for per-user HTML. Never cache HTML with a CSRF token or a CSP nonce in it.
+- **Nested fragments (Russian doll caching)**: the outer key includes the newest `updated_at` of the records inside, e.g. `cache::key(&[&"posts", &post.id, &post.updated_at, &newest_comment_at, &"card-v1"])` with `newest_comment_at` from `SELECT MAX(updated_at) FROM comments WHERE post_id = ?1`. Rails' `touch: true` does the same by updating the parent's `updated_at` when a child changes; do it in the child's save when the parent's key only uses `post.updated_at`.
+- **Formats**: a fragment is plain HTML under a free-form key, so the same fragment serves a page, an htmx swap, a realtime broadcast (`fragment.into_string()`) or an email; add the format to the key only when the HTML differs.
+
+### When to cache fragments
+
+Only when rendering costs noticeable CPU (long lists, Markdown, heavy formatting) and the records are read far more often than they change: a miss costs a KV read plus a write, a hit a KV read. To cache only sometimes (Rails' `cache_if`), put an `if` around the call and render the template directly otherwise. Failures behave like `fetch`: a KV error is logged and the template is rendered.
+
+## Per-request caches
+
+Two caches live in the `Ctx` of one request (or one queued job, or one cron run) and cost nothing:
+
+- **Query cache**: a `SELECT` run twice with the same parameters through `ctx.db()` (or `ctx.db_named(..)`) is answered from memory the second time, without a D1 round trip or rows read, like Rails' query cache. Any other statement (`execute`, `batch`, `INSERT ... RETURNING` through `first`) empties it, so a request always reads its own writes. It keeps up to 100 results. `ctx.db()?.uncached()` bypasses it for a query that must see changes made by other requests during this one.
+- **Local cache**: `fetch`, `read` and `fragment` read each KV key at most once per request, and remember what `write` and `delete` did (Rails' local cache).
+
+Nothing is shared between requests: Worker instances have no memory you can rely on.
+
+## Turning caching off
+
+The Worker variable `CACHE_STORE` selects the store without code changes (Rails' `config.cache_store`):
+
+| `CACHE_STORE` | Store |
+|---|---|
+| absent or `kv` | Workers KV, the `CACHE` namespace |
+| `null` | None: `fetch` and `fragment` always compute, `read` finds nothing, `write` and `delete` do nothing, no KV operation |
+
+To develop without the cache (Rails' `bin/rails dev:cache`), add `CACHE_STORE=null` to `.dev.vars` and restart `ocre dev`; remove the line to turn it back on. Any other value is a 500 naming the two valid ones. To empty the cache in production, bump the version in your keys: old entries expire with their TTL, which costs no write (deleting keys one by one would cost one write each).
+
 ## The write budget
 
 The free plan allows 1,000 KV writes a day (writes and deletes, to different keys; one write per second per key) and 100,000 reads ([KV limits](https://developers.cloudflare.com/kv/platform/limits/), September 2026). Every `fetch` is a read; every miss, `write` and `delete` is a write.
@@ -276,7 +357,7 @@ The same `If-None-Match` with `Accept-Language: fr` gets `200 OK` (the locale is
 
 ### Building the ETag
 
-- `ETag::of(&data)?` hashes the JSON of any serializable data: `ETag::of(&(&posts, i18n.locale()))?`. `ETag::new(version)` hashes a version string you build, cheaper for large data: `ETag::new(format!("{}-{}", post.id, post.updated_at))`. Both give a weak tag, `W/"<32 hex characters>"` (the first 128 bits of a SHA-256).
+- `ETag::of(&data)?` hashes the JSON of any serializable data: `ETag::of(&(&posts, i18n.locale()))?`. `ETag::new(version)` hashes a version string you build, cheaper for large data: `ETag::new(format!("{}-{}", post.id, post.updated_at))`. Both give a weak tag, `W/"<32 hex characters>"` (the first 128 bits of a SHA-256). `ETag::strong(version)` gives a strong one, `"<32 hex characters>"` (Rails' `strong_etag:`), which promises byte-identical bodies: use it for exact files or exports, not for pages with nonces or CSRF tokens.
 - Put everything the page shows in it: the records, the locale, the signed-in user's id, the flash messages (`flash.notice()`, `flash.alert()`). A page that shows something the tag does not cover can be served stale from the browser's copy.
 - Only GET and HEAD requests are considered; for other methods the client is never fresh. Comparison is weak (RFC 9110): `W/"x"` matches `"x"`, and `*` matches any tag.
 
@@ -302,6 +383,20 @@ Two Cloudflare caches can answer requests before the Worker runs. Ocre wraps nei
 - [Workers Cache](https://developers.cloudflare.com/workers/cache/) (`cache: { enabled: true }` in `worker` of `cloudflare.config.ts`) works on `workers.dev` too and serves `CacheControl::public(..)` responses from Cloudflare's tiered cache: hits use no CPU. But on the free plan every hit still counts toward the 100,000 requests a day, and turning it on also counts requests for static assets in `public/`, which are otherwise free ([pricing](https://developers.cloudflare.com/workers/cache/#pricing)). Its cache key ignores cookies and `Accept-Language`, so only mark responses `public` when they are the same for every visitor; responses with `Set-Cookie` are never stored.
 
 For most free-plan apps, `no_cache` pages with an `ETag` (cheap 304s) and KV values for the expensive parts are the better trade.
+
+## Coming from Rails
+
+| Rails | Ocre |
+|---|---|
+| `Rails.cache.fetch/read/write/delete` | `ocre::cache::fetch/read/write/delete` |
+| `cache` view helper, `cache_key_with_version` | `ocre::cache::fragment` in the handler, `ocre::cache::key` |
+| `render collection:, cached: true` | `ocre::cache::fragments` (KV bulk reads) |
+| Template digests | A version in the key, bumped by hand |
+| `touch: true` (Russian doll) | Children's newest `updated_at` in the parent's key |
+| Solid Cache, Redis, Memcached, file and memory stores | Workers KV, the one store; `CACHE_STORE=null` for none |
+| Query cache, local cache | Per-request caches in `Ctx` |
+| `fresh_when`, `stale?`, `http_cache_forever` | `Conditional::fresh_when`, `CacheControl::public(..)` |
+| `bin/rails dev:cache` | `CACHE_STORE=null` in `.dev.vars` |
 
 ## See also
 

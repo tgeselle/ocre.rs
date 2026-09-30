@@ -1,6 +1,6 @@
 # File storage
 
-Ocre stores uploaded files in Cloudflare R2 and describes each one with four columns of the record that owns it, like Active Storage without its extra tables. This page covers `attachment` fields, the code the generators write for them, the `ocre::storage` API for custom upload and download handlers, and what uploads cost on the free plan.
+Ocre stores uploaded files in Cloudflare R2 and describes each one with four columns of the record that owns it, like Active Storage without its extra tables. This page covers `attachment` fields, the code the generators write for them, the `ocre::storage` API for custom upload and download handlers, direct browser-to-R2 uploads and downloads through presigned URLs, file analysis, image variants, and what all of it costs on the free plan.
 
 ## Before you start
 
@@ -290,6 +290,17 @@ Everything the generated code uses is public, for handlers the generators do not
 | `Disposition::Inline` / `Disposition::Download` | Show safe types in the browser / always download |
 | `storage::columns(Some(&attachment))`, `storage::column_changes(..)` | Query parameters for the four columns in an `INSERT` / `UPDATE` |
 | `storage::human_size(bytes)`, `attachment.human_size()` | `512 bytes`, `2 KB`, `1.5 MB` |
+| `Upload::new(filename, content_type, bytes)` | An upload made by the app (Active Storage's `attach(io:)`), cleaned up like a browser's |
+| `storage::head(&ctx, key)`, `storage::exists(&ctx, key)` | A `StoredObject` (size, type, ETag, upload time) or `None`; one class B operation |
+| `storage::list(&ctx, prefix, cursor, limit)` | One page (up to 1,000) of `StoredObject`s plus the next cursor; one **class A** operation |
+| `storage::read_first(&ctx, key, length)` | The first bytes of an object, for `analyze` |
+| `storage::presign_get(&ctx, &attachment, disposition, expires_in)`, `storage::serve_redirect(..)` | A download URL straight from R2 / a 302 to it |
+| `storage::direct_upload(..)`, `storage::attach_direct_upload(..)` | Start and finish a direct browser-to-R2 upload |
+| `storage::purge_unattached(&ctx, prefix, table, column, max_age, cursor)` | Delete direct uploads no row adopted |
+| `storage::analyze(bytes)`, `Validator::file_content(field, &upload)` | Real type and image size from the bytes; refuse files whose bytes do not match their type |
+| `Variant::new().width(300).fit(Fit::Cover).path(src)` | A Cloudflare Image Transformations URL |
+| `storage::public_url(&ctx, key)` | The permanent URL of a file in a public bucket |
+| `S3Endpoint::r2(..)`, `endpoint.presign(..)` | SigV4 presigning for R2's S3 API or another S3-compatible store |
 
 The `Multipart` extractor rejects bad requests before the handler runs: 400 when the body is not `multipart/form-data` with a boundary or is malformed, 413 "The request is too large (maximum is ...)" when `Content-Length` announces more than `LIMIT` (before anything is read) or as soon as the body passes it. Browsers (`Accept: text/html`) get an HTML error page, other clients JSON.
 
@@ -371,7 +382,7 @@ To keep the file, save the returned `Attachment` in a row with `storage::columns
 
 ### Serving a file
 
-A route that only signed-in users may use and that always downloads the file under its original name. Any check you put before `serve` is the only protection of the file: R2 objects are never public.
+A route that only signed-in users may use and that always downloads the file under its original name. Any check you put before `serve` is the only protection of the file: R2 objects are never public unless you turn on [public access](#public-files).
 
 ```rust,check
 // src/downloads.rs
@@ -431,12 +442,351 @@ The generated `GET /photos/{id}/image` answers the same file with `Content-Dispo
 
 To restrict files to their owner, load the record filtered by `user.id` (`WHERE id = ?1 AND user_id = ?2`) and answer 404 otherwise, as for any other record (see [Authentication](authentication.md)).
 
+## Inspecting the bucket: head, exists, list
+
+`storage::head(&ctx, key)` describes an object without reading it (one class B operation): a [`StoredObject`](/api/ocre/storage/struct.StoredObject.html) with `size`, `content_type`, `etag`, `uploaded_at` (Unix seconds) and `filename` (recorded by `store`, `None` for direct uploads), or `None` when the key does not exist. `storage::exists(&ctx, key)` is the same call as a `bool`.
+
+`storage::list(&ctx, prefix, cursor, limit)` returns one page of the objects under a prefix, in key order, with the cursor of the next page (`None` on the last one). Each call is a **class A** operation, like an upload, and decoding 1,000 entries takes a few ms of the 10 ms CPU budget: list from scheduled tasks and admin pages, never on every request.
+
+```rust,check
+// src/storage_report.rs: total size of the photo images, 1,000 keys per class A operation.
+use ocre::{Ctx, Result, storage};
+
+pub async fn images_size(ctx: &Ctx) -> Result<u64> {
+    let (mut total, mut cursor) = (0, None);
+    loop {
+        let page = storage::list(ctx, "photos/image/", cursor.as_deref(), 1000).await?;
+        total += page.objects.iter().map(|object| object.size).sum::<u64>();
+        cursor = page.cursor;
+        if cursor.is_none() {
+            return Ok(total);
+        }
+    }
+}
+```
+
+## Presigned URLs and redirect serving
+
+R2 also speaks the S3 API at `https://<account_id>.r2.cloudflarestorage.com`. A presigned URL is an S3 request signed in advance (AWS Signature Version 4, region `auto`, path style `/<bucket>/<key>`): whoever holds it can perform that one request until it expires, without credentials and without the Worker. Ocre signs locally with HMAC-SHA256 (microseconds of CPU, no R2 operation); the browser's download is then a class B operation and an upload a class A one, as through the Worker.
+
+### Settings
+
+Create an R2 API token once in the dashboard (R2 > Manage API tokens > Create API token, permission "Object Read & Write", limited to the `<app>-storage` bucket). It shows an access key ID and a secret access key; keep them as secrets, and the account ID and bucket name as plain variables:
+
+| Name | Kind | Value |
+|---|---|---|
+| `R2_ACCESS_KEY_ID` | secret | The token's access key ID |
+| `R2_SECRET_ACCESS_KEY` | secret | The token's secret access key (also signs the keys of direct uploads) |
+| `R2_ACCOUNT_ID` | variable | The account ID shown on the R2 overview page |
+| `R2_BUCKET` | variable | `<app>-storage`, the `name` of the `STORAGE` binding |
+
+```ts
+// cloudflare.config.ts, in worker.env
+R2_ACCOUNT_ID: bindings.text("0123456789abcdef0123456789abcdef"),
+R2_BUCKET: bindings.text("docs-app-storage"),
+```
+
+```sh
+# .prod.vars (git-ignored): R2_ACCESS_KEY_ID=... and R2_SECRET_ACCESS_KEY=...
+ocre secrets push R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY --file .prod.vars
+```
+
+For `ocre dev`, put the four values in `.dev.vars`. A missing one makes every presigning call fail with a 500 whose log names the missing settings and these steps. Presigned URLs always point to the real bucket: `ocre dev`'s local R2 simulation has no S3 API, so a file uploaded through a presigned URL is not visible to `storage::head` or `storage::serve` in `ocre dev`. Try direct uploads on a deployed Worker.
+
+### Download URLs and redirects
+
+`storage::presign_get(&ctx, &attachment, disposition, expires_in)` returns a URL valid `expires_in` seconds (1 second to 7 days). It carries `response-content-type` and `response-content-disposition`, so R2 answers with the same safe headers as `storage::serve`: the original file name, `inline` only for safe types, HTML and SVG as `application/octet-stream`. The file is then served from R2's host, not the app's origin.
+
+`storage::serve_redirect(&ctx, &attachment, disposition, expires_in)` answers `302 Found` to such a URL (Active Storage's redirect mode), with `Cache-Control: private, max-age=<expires_in / 2>`. Use it for large or popular files: the Worker only signs a URL, and R2 serves `Range` requests itself.
+
+```rust,check
+// src/photo_redirects.rs
+use axum::{
+    Router,
+    extract::{Path, State},
+    response::Response,
+    routing::get,
+};
+use ocre::{
+    Ctx, OptionExt, Result,
+    storage::{self, Disposition},
+};
+
+use crate::{auth::CurrentUser, models::photo};
+
+pub fn routes() -> Router<Ctx> {
+    Router::new().route("/photos/{id}/image/direct", get(image))
+}
+
+/// Signed-in users get a 302 to R2, valid 5 minutes.
+async fn image(CurrentUser(_user): CurrentUser, State(ctx): State<Ctx>, Path(id): Path<i64>) -> Result<Response> {
+    let record = photo::find(&ctx, id).await?.or_404()?;
+    storage::serve_redirect(&ctx, &record.image(), Disposition::Inline, 300)
+}
+```
+
+Authorize before signing: anyone with the URL can use it until it expires, even after signing out, so keep lifetimes short.
+
+## Direct uploads
+
+A direct upload sends the file from the browser to R2 without passing through the Worker (Active Storage's direct uploads): no 100 MB request limit, no Worker memory, no CPU spent on the body. It takes three requests:
+
+1. The page asks the app to start an upload, with the file's name, type and size. `storage::direct_upload` checks them against the field's `Rules` (422 otherwise), picks a new key under a prefix of its own, and answers a presigned `PUT` URL, the headers to send with it and a `signed_key`.
+2. The browser `PUT`s the file to that URL. The URL signs `Content-Type` and `Content-Length`, so R2 refuses a file of another type or size than declared.
+3. The form is submitted with the `signed_key` (and the file name) instead of the file. `storage::attach_direct_upload` checks the signature (only keys this app issued are accepted, so nobody can claim another record's file), runs `head` on the object, checks its size and type against the `Rules` again (deleting a refused object) and returns its `Attachment`.
+
+The server side, for the `Photo` scaffold (`ocre g scaffold Photo title:string image:attachment notes:attachment?`):
+
+```rust,check
+// src/photo_uploads.rs
+use axum::{Router, extract::State, routing::post};
+use ocre::{
+    ApiResult, Created, Ctx, Error, Json, Validator, params,
+    storage::{self, DirectUpload, DirectUploadRequest},
+};
+use serde::Deserialize;
+
+use crate::models::photo::{self, Photo};
+
+/// Direct uploads of `image` live under their own prefix, so `purge_unattached` can find abandoned ones.
+pub const IMAGE_UPLOADS: &str = "uploads/photos/image";
+
+pub fn routes() -> Router<Ctx> {
+    Router::new().route("/api/photos/uploads", post(start)).route("/api/photos/direct", post(create))
+}
+
+/// Step 1: `{"filename": "beach.png", "content_type": "image/png", "size": 48213}`.
+async fn start(State(ctx): State<Ctx>, Json(request): Json<DirectUploadRequest>) -> ApiResult<Json<DirectUpload>> {
+    Ok(Json(storage::direct_upload(&ctx, IMAGE_UPLOADS, "image", &request, &photo::IMAGE)?))
+}
+
+#[derive(Deserialize)]
+struct NewDirectPhoto {
+    title: String,
+    image_signed_key: String,
+    image_filename: String,
+}
+
+/// Step 3: the form, with the signed key in place of the file.
+async fn create(State(ctx): State<Ctx>, Json(form): Json<NewDirectPhoto>) -> ApiResult<Created<Photo>> {
+    Validator::new().required("title", &form.title).finish()?;
+    // One class B operation (`head`); 422 when the key is forged, the file missing, or breaks the rules.
+    let image =
+        storage::attach_direct_upload(&ctx, "image", &form.image_signed_key, &form.image_filename, &photo::IMAGE)
+            .await?;
+    let mut values = params![form.title];
+    values.extend(storage::columns(Some(&image)));
+    let sql = "INSERT INTO photos (title, image_key, image_filename, image_content_type, image_size) \
+               VALUES (?1, ?2, ?3, ?4, ?5) RETURNING *";
+    let created: Result<Option<Photo>, Error> = ctx.db()?.first(sql, values).await;
+    if !matches!(created, Ok(Some(_))) {
+        storage::delete(&ctx, &image.key).await?; // no row points to it
+    }
+    Ok(Created(created?.ok_or_else(|| Error::internal("INSERT ... RETURNING returned no row"))?))
+}
+```
+
+The browser side, plain JavaScript without a build step. `XMLHttpRequest` stands in for Rails' `direct-upload:*` events: `upload.onprogress` is `direct-upload:progress`, `onload` is `direct-upload:end`, `onerror` is `direct-upload:error`:
+
+```html
+<form id="photo-form">
+  <input name="title" required>
+  <input type="file" name="image" accept="image/png,image/jpeg,image/gif,image/webp" required>
+  <progress value="0" max="100" hidden></progress>
+  <button>Save</button>
+  <p class="error" hidden></p>
+</form>
+<script type="module">
+  const form = document.getElementById("photo-form");
+  const progress = form.querySelector("progress");
+  const error = form.querySelector(".error");
+  const postJson = (url, body) =>
+    fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+
+  // PUT the file to R2 with the signed headers, reporting progress.
+  const put = (upload, file) =>
+    new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("PUT", upload.url);
+      for (const [name, value] of Object.entries(upload.headers)) xhr.setRequestHeader(name, value);
+      xhr.upload.onprogress = (e) => e.lengthComputable && (progress.value = (100 * e.loaded) / e.total);
+      xhr.onload = () => (xhr.status < 300 ? resolve() : reject(new Error(`R2 answered ${xhr.status}`)));
+      xhr.onerror = () => reject(new Error("upload failed (network, or the bucket's CORS rule)"));
+      xhr.send(file);
+    });
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const file = form.image.files[0];
+    try {
+      // 1. Start: the app checks the declared type and size, and signs a PUT.
+      const started = await postJson("/api/photos/uploads", {
+        filename: file.name,
+        content_type: file.type || "application/octet-stream",
+        size: file.size,
+      });
+      if (!started.ok) throw new Error((await started.json()).error.message);
+      const upload = await started.json();
+      // 2. Upload straight to R2.
+      progress.hidden = false;
+      await put(upload, file);
+      // 3. Submit the form with the signed key.
+      const created = await postJson("/api/photos/direct", {
+        title: form.title.value,
+        image_signed_key: upload.signed_key,
+        image_filename: file.name,
+      });
+      if (!created.ok) throw new Error((await created.json()).error.message);
+      window.location = `/photos/${(await created.json()).id}`;
+    } catch (e) {
+      error.textContent = e.message;
+      error.hidden = false;
+    }
+  });
+</script>
+```
+
+A 422 from step 1 or 3 carries the field messages (`{"error":{"fields":{"image":["is too large (maximum is 10 MB)"]},...}}`). The URL of step 1 must be used within 10 minutes; a `PUT` started in time may take longer.
+
+### Bucket CORS rule
+
+The browser `PUT`s to R2's host, a different origin, so the bucket needs a CORS rule allowing it. In the dashboard: R2 > `<app>-storage` > Settings > CORS policy > Add, with:
+
+```json
+[
+  {
+    "AllowedOrigins": ["https://docs-app.example.com"],
+    "AllowedMethods": ["PUT"],
+    "AllowedHeaders": ["content-type"],
+    "MaxAgeSeconds": 3600
+  }
+]
+```
+
+Ocre does not set it for you and this guide's authors have not run this step against a live bucket: check the dashboard's current wording, and that the preflight (`OPTIONS`) answers before debugging anything else when `onerror` fires.
+
+## Purging unattached uploads
+
+A direct upload whose form is never submitted (a closed tab, a failed validation) leaves an object no row points to. `storage::purge_unattached(&ctx, prefix, table, column, max_age, cursor)` lists one page (up to 1,000 keys) under the prefix, keeps the objects uploaded more than `max_age` seconds ago, looks them up in `table.column` (`SELECT column FROM table WHERE column IN (...)`, 100 keys per query) and deletes the ones no row references. It returns the deleted keys and the cursor of the next page.
+
+Run it from a scheduled task (`ocre g schedule purge_uploads "every day at 4am"`, see [Background jobs and schedules](jobs.md#schedules)):
+
+```rust,check
+// src/schedules/purge_uploads.rs
+use ocre::{Ctx, Result, storage};
+
+/// Direct uploads of photo images left unattached for a day. At most 5 pages (5 class A operations) per run.
+pub async fn run(ctx: &Ctx) -> Result<()> {
+    let mut cursor = None;
+    for _ in 0..5 {
+        let purged =
+            storage::purge_unattached(ctx, "uploads/photos/image", "photos", "image_key", 86_400, cursor.as_deref())
+                .await?;
+        println!("purge_uploads: {} unattached uploads deleted", purged.deleted.len());
+        cursor = purged.cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    Ok(())
+}
+```
+
+Costs and limits:
+
+- Each page is one **class A** operation (1M free per month), whether or not anything is deleted, and attached uploads are listed again on every run. A daily run over 5,000 keys is about 150 class A operations a month.
+- Each lookup is a D1 query; index the column (`CREATE UNIQUE INDEX photos_image_key ON photos(image_key);` in a migration) so it reads only the matching rows instead of the whole table.
+- Deletes are free. Decoding a page of 1,000 keys takes a few ms of the 10 ms of CPU a run gets: keep the page cap low, and give each attachment its own prefix so listings stay short.
+- Keep `max_age` well above the 10 minutes an upload URL lasts plus the time a form stays open; a day is safe.
+
+## File analysis
+
+The content type of an upload is whatever the browser claims. `storage::analyze(&bytes)` reads the file's signature instead (Active Storage's analyzers, without reading pixels): PNG, JPEG, GIF, WebP, AVIF, PDF, ZIP (and the Office and OpenDocument formats built on it), MP4, M4A and QuickTime. For PNG, GIF, WebP and JPEG it also reads the width and height from the header. Text formats (plain text, CSV, HTML, SVG) have no signature and give `None`. It reads the first 32 bytes, plus a JPEG's segment headers: microseconds of CPU whatever the file size.
+
+`Validator::file_content(field, &upload)` uses it to refuse "has content that does not match image/png": a declared type that `analyze` recognizes but the bytes do not carry, or bytes of a recognized type sent under another one. Chain it after `v.file(..)`:
+
+```rust,check
+// src/avatars.rs
+use axum::{Router, extract::State, routing::put};
+use ocre::{
+    ApiResult, Created, Ctx, Error, Validator,
+    storage::{self, Attachment, Multipart, Rules},
+};
+
+const AVATAR: Rules = Rules { max_bytes: 2 * 1024 * 1024, content_types: &["image/png", "image/jpeg", "image/webp"] };
+
+pub fn routes() -> Router<Ctx> {
+    Router::new().route("/api/avatars", put(create))
+}
+
+/// `curl -X PUT -F avatar=@me.png http://localhost:8787/api/avatars`
+async fn create(State(ctx): State<Ctx>, Multipart(mut form): Multipart<{ 3 * 1024 * 1024 }>) -> ApiResult<Created<Attachment>> {
+    let avatar = form.file("avatar").ok_or_else(|| Error::bad_request("Send the file as `avatar`"))?;
+    let analysis = storage::analyze(&avatar.bytes);
+    let mut v = Validator::new();
+    v.file("avatar", &avatar, &AVATAR).file_content("avatar", &avatar);
+    v.check("avatar", analysis.width.is_some_and(|width| width < 64), "must be at least 64 pixels wide");
+    v.finish()?;
+    Ok(Created(storage::store(&ctx, "avatars", avatar).await?))
+}
+```
+
+For a direct upload the bytes are in R2, not in the request: `storage::read_first(&ctx, key, 64 * 1024)` reads the start of the object (one class B operation; use 256 KB for JPEGs with large EXIF blocks) for `analyze`.
+
+## Image variants
+
+Resized versions of images come from [Cloudflare Image Transformations](https://developers.cloudflare.com/images/transform-images/), not from the Worker: a URL `/cdn-cgi/image/<options>/<source>` on the app's own domain makes Cloudflare's edge fetch the source image, resize it and cache the result. `ocre::storage::Variant` builds that URL:
+
+```rust,check
+// src/photo_variants.rs
+use ocre::storage::{Fit, Variant};
+
+/// Square thumbnails for the photo index; `format=auto` sends AVIF or WebP to browsers that accept them.
+pub const THUMB: Variant = Variant::new().width(300).height(300).fit(Fit::Cover).quality(80);
+
+/// `/cdn-cgi/image/width=300,height=300,fit=cover,quality=80,format=auto/photos/1/image`
+pub fn thumb_path(photo_id: i64) -> String {
+    THUMB.path(&format!("/photos/{photo_id}/image"))
+}
+```
+
+In a template: `<img src="{{ crate::photo_variants::thumb_path(photo.id) }}" alt="">`. `Fit` maps Active Storage's resize options: `ScaleDown` (`resize_to_limit`), `Contain` (`resize_to_fit`), `Cover` (`resize_to_fill`), `Crop`, `Pad` (`resize_and_pad`).
+
+- **Lazy by design**: a variant is made on its first request and then served from Cloudflare's cache (Rails' lazy variant loading); nothing is precomputed or stored in R2, and the Worker's CPU is not used. The first request of each variant fetches the source, which invokes the Worker once (one class B operation for `storage::serve`).
+- **Needs a custom domain**: the app must be served from a zone on Cloudflare with Transformations enabled for it (dashboard: Images > Transformations > enable for the zone). `*.workers.dev` hosts cannot use `/cdn-cgi/image/`; there the URL answers an error.
+- **Free quota**: the Images Free plan includes 5,000 unique transformations a month (unverified assumption at the time of writing; check [Images pricing](https://developers.cloudflare.com/images/pricing/)). Each distinct source and option set counts once a month; beyond it, new variants fail rather than being billed on the Free plan (also unverified).
+- **Source caching**: `storage::serve` sends `Cache-Control: private, no-cache`; for public images, serve the source with a public cache header (see the `CACHE_CONTROL` example in the rustdoc) so Cloudflare can cache it. Keep variants for images anyone may see: the transformation fetches the source on its own.
+
+## Public files
+
+A bucket can be made public (dashboard: R2 > `<app>-storage` > Settings > Public access): through an `r2.dev` subdomain (rate-limited, meant for development) or a custom domain connected to the bucket. Set its base URL as a variable, and `storage::public_url(&ctx, key)` returns `<base>/<key>` (each segment percent-encoded):
+
+```ts
+// cloudflare.config.ts, in worker.env
+STORAGE_PUBLIC_URL: bindings.text("https://files.docs-app.example.com"),
+```
+
+```rust,check
+// src/photo_links.rs
+use ocre::{Ctx, Result, storage};
+
+use crate::models::photo::Photo;
+
+/// The permanent link of a photo's image; no Worker, no signing, cached by Cloudflare.
+pub fn image_url(ctx: &Ctx, photo: &Photo) -> Result<String> {
+    storage::public_url(ctx, &photo.image().key)
+}
+```
+
+The trade-off is total: every object of the bucket is then readable forever by whoever has its key, with no authorization and no expiry, and the `Content-Type` is the stored one (the safe-type rules of `serve` do not apply; do not make a bucket public if it holds user-uploaded HTML or SVG). Use a separate public bucket for avatars and product images, never for private documents. A missing `STORAGE_PUBLIC_URL` is a 500 whose log says how to set it.
+
 ## Safety choices
 
 - **Keys** are random (128 bits), never derived from file names, so a name cannot overwrite or guess another file.
 - **File names** lose their directories (old Windows browsers send `C:\...`) and control characters, and are cut to 200 characters with the extension kept; `file` stands in when nothing is left. `Content-Disposition` carries them as ASCII `filename=` plus UTF-8 `filename*=` when needed (RFC 6266).
 - **Inline display** is limited to types that cannot run scripts: raster images (PNG, JPEG, GIF, WebP, AVIF, BMP, TIFF, icons), PDF, plain text, audio and video. HTML, SVG, XML and JavaScript are sent as `application/octet-stream` downloads even with `Disposition::Inline`, so an uploaded file never runs as part of the app (Rails' `content_types_allowed_inline` / `content_types_to_serve_as_binary`).
-- **Content types** come from the browser: the `Rules` allowlist limits them, nothing sniffs file contents. `X-Content-Type-Options: nosniff` (added to every response) stops browsers from guessing.
+- **Content types** come from the browser: the `Rules` allowlist limits them, and `v.file_content(..)` checks that the bytes match (see [File analysis](#file-analysis)). `X-Content-Type-Options: nosniff` (added to every response) stops browsers from guessing.
+- **Direct uploads** sign both the upload URL (type and size) and the key handed back to the form, and are checked again with `head` before they are attached.
 - **Validation before storage**: `v.file(..)` runs before `store`, so a refused file costs no R2 operation.
 - **Authorization**: file routes are as protected as the handler around them.
 
@@ -447,8 +797,8 @@ R2 is free every month within these amounts ([R2 pricing](https://developers.clo
 | Resource | Free every month | Ocre use |
 |---|---|---|
 | Storage | 10 GB-month | Every stored file; replaced and deleted files are removed by the generated models |
-| Class A operations | 1,000,000 | Each upload (`store`, `store_bytes`, `store_body`) is one |
-| Class B operations | 10,000,000 | Each `serve` (downloads and 304s alike) and each `read` is one |
+| Class A operations | 1,000,000 | Each upload (`store`, `store_bytes`, `store_body`, a direct upload's `PUT`) and each `list` page is one |
+| Class B operations | 10,000,000 | Each `serve` (downloads and 304s alike), `read`, `read_first`, `head`/`exists` and presigned download is one |
 | Deletes | free | `delete`, `delete_attachments` |
 | Egress | free | Downloads cost no bandwidth fee |
 
@@ -477,9 +827,8 @@ hint: enable R2 once in the Cloudflare dashboard (Storage & databases > R2; the 
 
 ## Not included
 
-- Presigned URLs and direct browser-to-R2 uploads (they need R2 S3 API credentials and SigV4 signing).
-- Public buckets and custom domains for R2 (served by Cloudflare without the Worker; set them up in the dashboard).
-- Image resizing and variants.
+- Storage services other than R2: `store`, `serve` and the other runtime functions use the `STORAGE` binding. `S3Endpoint` presigns URLs for any S3-compatible store (AWS S3, MinIO), but there is no S3 client in the Worker and no mirroring.
+- Image processing inside the Worker: variants come from Cloudflare Image Transformations.
 - Cleanup of files whose rows are removed by `ON DELETE CASCADE`: the database deletes the child rows without calling the child model's `delete`, so their files stay in R2. Delete them in the parent's `delete` if that matters.
 
 ## See also

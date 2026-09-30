@@ -19,7 +19,7 @@ POST /messages ──> create ──> ocre::realtime::broadcast(&ctx, "messages"
 - **One Durable Object per channel.** Ocre ships a Durable Object class, `OcreChannel`, bound as `CHANNELS`. Each channel name (`messages`, `post:12`) gets its own instance, which accepts the channel's WebSockets.
 - **Hibernation.** The object accepts sockets with the [WebSocket Hibernation API](https://developers.cloudflare.com/durable-objects/best-practices/websockets/): between broadcasts it is evicted from memory while browsers stay connected, and hibernated sockets cost no duration. It stores nothing.
 - **Broadcast.** `ocre::realtime::broadcast(&ctx, channel, message)` sends one request to the channel's object, which sends the text to every socket. It returns once the object has sent it.
-- **Clients only listen.** What a browser sends over the socket is ignored; the object only completes the closing handshakes browsers start. Use forms and htmx requests to send data.
+- **Clients listen.** What a browser sends over the socket is ignored, unless its `connect` enabled relaying (see [Identifying subscribers and relaying client messages](#identifying-subscribers-and-relaying-client-messages)); the object completes the closing handshakes browsers start. Use forms and htmx requests to send data.
 - **Client side**: htmx's [WebSocket extension](https://htmx.org/extensions/ws/) connects, reconnects with backoff, and swaps each message into the element with the same `id` ([`hx-swap-oob`](https://htmx.org/attributes/hx-swap-oob/)). No custom JavaScript.
 
 ## Generating a live resource
@@ -272,7 +272,7 @@ use ocre::{Ctx, Error, Result, realtime::WebSocketUpgrade};
 use crate::auth::OptionalUser;
 
 pub fn routes() -> Router<Ctx> {
-    Router::new().route("/realtime/{channel}", get(connect))
+    Router::new().route("/realtime/{channel}", get(connect)).merge(ocre::realtime::dev_routes())
 }
 
 /// Opens a WebSocket on `channel` for whoever may listen to it.
@@ -320,6 +320,57 @@ Rules for channels:
 - Names are 1 to 128 ASCII letters, digits, `_`, `-`, `.` or `:` (`posts`, `post:12`, `user:7`). `upgrade.connect` answers 400 for other names (a `connect` that lists its channels answers 404 first) and `broadcast` fails with a 500.
 - Private data goes on a channel per user or per record, checked in `connect`; never on a shared channel. Anyone who may open a channel receives everything broadcast to it.
 - A page subscribes to its private channel with the id from the session, e.g. `<div hx-ext="ws" ws-connect="/realtime/user:{{ user.id }}">`.
+- Channel parameters (Rails' `params` of a subscription) are the route's: the channel name in the path, plus any query string read with axum's `Query` extractor in `connect`.
+
+## Identifying subscribers and relaying client messages
+
+Two builder methods on `WebSocketUpgrade`, called in `connect` before `connect(..)`:
+
+- `upgrade.identified_by(id)` names the subscriber (Rails' `identified_by :current_user`), usually the user's id. The identity stays with the socket in the channel's object, even while it hibernates. At most 256 bytes.
+- `upgrade.rebroadcast()` lets this client publish: every text message it sends (up to 16 KB) goes to the channel's other sockets as JSON, `{"from": "<identity>", "data": <message>}`. `from` is set by the server (`null` without `identified_by`), so a client cannot pretend to be someone else; `data` is the message parsed as JSON, or a string. No app code runs for relayed messages and they are never HTML swaps, so a client cannot inject markup into other pages. Use it for typing indicators, cursors or ephemeral chat between JavaScript clients; send anything that must be validated or stored to an ordinary route, which saves it and calls `broadcast`.
+
+```rust,check
+// src/chat.rs
+use axum::{
+    Router,
+    extract::{Path, State},
+    response::Response,
+    routing::get,
+};
+use ocre::{Ctx, Error, Result, realtime::WebSocketUpgrade};
+
+use crate::auth::OptionalUser;
+
+pub fn routes() -> Router<Ctx> {
+    Router::new().route("/chat/{room}", get(join))
+}
+
+/// Signed-in users join `chat:<room>`; what each sends reaches the others as
+/// `{"from": "<user id>", "data": ...}`.
+async fn join(
+    State(ctx): State<Ctx>,
+    Path(room): Path<String>,
+    OptionalUser(user): OptionalUser,
+    upgrade: WebSocketUpgrade,
+) -> Result<Response> {
+    let user = user.ok_or(Error::Unauthorized)?;
+    upgrade.identified_by(user.id.to_string()).rebroadcast().connect(&ctx, &format!("chat:{room}")).await
+}
+```
+
+In the page, `const ws = new WebSocket("/chat/lobby"); ws.send(JSON.stringify({ typing: true }))` reaches every other member as `{"from":"1","data":{"typing":true}}`. Broadcasts sent with `ocre::realtime::broadcast` go to every socket, publishers included.
+
+Free plan: Cloudflare bills incoming WebSocket messages to a Durable Object at 20 messages per request; relaying them to the other sockets is free.
+
+## Testing broadcasts
+
+In `ocre dev`, `GET /ocre/dev/realtime/sent.json` lists the last 50 successful broadcasts of the Worker, oldest first, the way `/ocre/dev/mailers/sent.json` lists emails (Rails' `assert_broadcasts` and `assert_broadcast_on`):
+
+```json
+[{"id":1,"channel":"messages","message":"<tbody hx-swap-oob=\"afterbegin:#messages\">...</tbody>"}]
+```
+
+An end-to-end test creates a record, then checks that the list grew with the expected channel and HTML, without opening a WebSocket (see [Testing](testing.md)). The generated `src/realtime.rs` merges `ocre::realtime::dev_routes()`; deployed (release) builds answer 404 there. The message builders (`prepend`, `update`...) are pure functions, testable with plain unit tests.
 
 ## Broadcasting from a job
 
@@ -355,7 +406,7 @@ Limits of the Workers Free plan (September 2026):
 
 | Resource | Free plan | Realtime use |
 |---|---|---|
-| [Durable Object requests](https://developers.cloudflare.com/durable-objects/platform/pricing/) | 100,000 a day | 1 per connection (and reconnection), 1 per broadcast (even with no subscriber); incoming WebSocket messages count 1/20 (subscribers send none); messages to browsers are free |
+| [Durable Object requests](https://developers.cloudflare.com/durable-objects/platform/pricing/) | 100,000 a day | 1 per connection (and reconnection), 1 per broadcast (even with no subscriber); incoming WebSocket messages count 1/20 (only clients connected with `rebroadcast()` have a reason to send any); messages to browsers are free |
 | [Durable Object duration](https://developers.cloudflare.com/durable-objects/platform/pricing/) | 13,000 GB-s a day (128 MB objects: about 28 hours awake) | Only while handling a connection or a broadcast, a few milliseconds; hibernated sockets cost nothing |
 | [Worker requests](https://developers.cloudflare.com/workers/platform/pricing/) | 100,000 a day | 1 per connection; a broadcast is a subrequest of the request that sends it |
 | [Durable Object limits](https://developers.cloudflare.com/durable-objects/platform/limits/) | SQLite-backed classes only; 32,768 WebSockets per object | `new_sqlite_classes = ["OcreChannel"]`; one object per channel |
@@ -378,6 +429,23 @@ The scaffold only writes app code around three framework pieces, so any app, API
 4. Broadcast from handlers or jobs. Non-htmx clients usually want JSON: `realtime::broadcast(&ctx, "orders", &ocre::serde_json::json!({"id": 12, "status": "paid"}).to_string())`. `WebSocketUpgrade` rejects a request without `Upgrade: websocket` with a 400 rendered as JSON in API-only apps.
 
 A browser client without htmx is a plain `new WebSocket("wss://<host>/realtime/orders")` with an `onmessage` handler; clients do not need to send anything.
+
+## Coming from Rails
+
+| Action Cable | Ocre |
+|---|---|
+| `ApplicationCable::Connection`, `identified_by`, `reject_unauthorized_connection` | The `connect` handler: extractors, `identified_by`, `Err(Error::Forbidden)` |
+| Connection and channel callbacks, `rescue_from` | Code before `upgrade.connect(..)` and its `Result`; the channel object runs no app code |
+| Channel classes, `subscribed`, `stream_from`, `stream_for` | One channel name per stream (`post:12`), checked in `connect` |
+| Channel `params` | The route's path and query string |
+| Client actions (`perform`) | Ordinary routes (htmx `hx-post`) that `broadcast` |
+| Rebroadcasting client data | `upgrade.rebroadcast()` |
+| `ActionCable.server.broadcast`, `broadcast_to` | `ocre::realtime::broadcast(&ctx, channel, message)` |
+| Subscription adapters (async, Redis, PostgreSQL, Solid Cable) | One: the `OcreChannel` Durable Object, no pub/sub server |
+| Mount path, `action_cable_meta_tag`, allowed origins | The `connect` route's path, the `ws-connect` URL, the same-site check of `ocre::serve` |
+| Standalone cable server, worker pool | Each channel's own Durable Object, apart from the request Worker; nothing to size |
+| `assert_broadcasts`, `assert_broadcast_on` | `/ocre/dev/realtime/sent.json` in `ocre dev` |
+| `createConsumer`, `subscriptions.create` | htmx's `ws` extension, or `new WebSocket(url)` |
 
 ## See also
 

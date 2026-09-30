@@ -50,6 +50,8 @@ explanations, each page also as Markdown (`<page>.md`), with
 | `ocre g job <Name> [field:type...] [--queue <name>]` | `src/jobs/<name>.rs` (arguments + `perform`), added to the `Job` enum and `perform` match in `src/jobs/mod.rs`; the first job wires the `JOBS` queue and the `queue` event; `--queue urgent` sends it to its own queue `<app>-jobs-urgent` (see [Background jobs](#background-jobs-and-scheduled-tasks)) |
 | `ocre g schedule <name> "<when>"` | `src/schedules/<name>.rs`, run by a Cron Trigger added to `cloudflare.config.ts` (`triggers.scheduled`), dispatched by cron in `src/schedules/mod.rs`; `<when>` is plain English (`"every day at 3am"`, `"every 15 minutes"`) or a cron expression; the first one wires the `scheduled` event |
 | `ocre g cache` | Adds the `CACHE` Workers KV binding to `cloudflare.config.ts` for `ocre::cache::fetch` (see [Caching](#caching)) |
+| `ocre g ci` | `.github/workflows/ci.yml`: the checks of `ocre ci` on every push and pull request, then `ocre deploy` on pushes to main with the `CLOUDFLARE_API_TOKEN`/`CLOUDFLARE_ACCOUNT_ID` repository secrets |
+| `ocre g pwa` | Progressive Web App: `manifest.webmanifest`, `service-worker.js`, `pwa.js` and `icon.svg` in `public/`, linked from `templates/layout.html` |
 | `ocre g locale <code>...` | `locales/<code>.yml` per code, declared in `ocre::locales!(...)` in `src/lib.rs`; the first run makes its first code the default locale and adds the `I18n` layer to `routes()` (see [Translations](#translations)) |
 | `ocre g override [path...]` | Copies generator templates (`controller/view.html`, or all of `controller`) into `.ocre/templates/`, which replace the built-in ones until deleted; without paths, lists them |
 | `ocre g generator <name>` / `ocre g <name> <Name> [args...]` | An app generator in `.ocre/generators/<name>/` (templated files and marker insertions), then runs it |
@@ -64,7 +66,8 @@ explanations, each page also as Markdown (`<page>.md`), with
 | `ocre db drop` / `db truncate` | Local only: delete the local database / delete every row, keep tables and migrations |
 | `ocre db version [--remote]` / `db schema [--remote]` | Last applied migration / write the `CREATE` statements to `db/schema.sql` |
 | `ocre sql "<query>" [--remote]` | Run SQL and print the rows as a table; `--json` returns D1's results in `rows` |
-| `ocre dev [--port N]` | Checks locale files, applies local migrations, then `cf dev` |
+| `ocre dev [--port N] [--no-cache \| --cache]` | Checks locale files, applies local migrations, then `cf dev`; `--no-cache` writes `CACHE_STORE=null` into `.dev.vars` (`ocre::cache` computes every value), `--cache` removes it |
+| `ocre ci [--signoff]` | The CI steps locally, stopping at the first failure: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, the wasm32 check, `ocre i18n missing` when there are locales; `--signoff` then runs `gh signoff` |
 | `ocre test [--e2e] [-- args]` | `cargo test`, then the wasm32 check; `--e2e` also runs `tests/e2e.sh` against a `cf dev` started for the run (`BASE_URL`) |
 | `ocre deploy` | Creates what `cloudflare.config.ts` names and Cloudflare lacks (the D1 database, queues, KV namespaces without an `id`, whose id it then writes into the file, R2 buckets), uploads a new `SECRET_KEY_BASE` only when the Worker has none (an existing one is never rotated), applies remote migrations, then runs `cf deploy`. Refuses locale files the Worker could not load |
 | `ocre i18n missing` | Keys of the default locale missing from other locales (with the plural forms each language needs), undeclared or invalid locale files; fails when there is any |
@@ -72,10 +75,11 @@ explanations, each page also as Markdown (`<page>.md`), with
 | `ocre routes [filter]` | The app's routes (method, path, handler), read from `src/lib.rs` and the modules it merges; `--json` returns `routes` |
 | `ocre schedules` / `ocre schedules run <task> [--port N]` | The crons of `cloudflare.config.ts` and their tasks (`--json` returns `schedules`); `run` fires one task on the running `ocre dev` through the dev server's local scheduled endpoint |
 | `ocre secret` | New random `SECRET_KEY_BASE` value (128 hex characters), like `rails secret` |
-| `ocre secrets list` / `ocre secrets push NAME... [--file F]` | Secret names in `.dev.vars` and on the deployed Worker / upload values from a git-ignored file (`.prod.vars`) in one `cf workers secrets bulk` |
-| `ocre doctor` | Checks the wasm target, Node.js 22+, the pinned npm packages, the login, `cloudflare.config.ts` (cf's loader and `tsc`), bindings for what the code uses, pending migrations and secrets; fails on a failed check |
+| `ocre secrets list` / `ocre secrets push NAME... [--file F]` / `ocre secrets fetch NAME [--file F]` | Secret names in `.dev.vars` and on the deployed Worker / upload values from a git-ignored file (`.prod.vars`) in one `cf workers secrets bulk` / print one local value |
+| `ocre domains [add\|remove HOST]` | The Worker's custom domains (`worker.domains` of `cloudflare.config.ts`), published by `ocre deploy` |
+| `ocre doctor` | Checks the wasm target, Node.js 22+, the pinned npm packages, the login, `cloudflare.config.ts` (cf's loader and `tsc`), bindings for what the code uses, pending migrations, secrets, production settings (no secret in plain-text vars, no `MAIL_ADAPTER = "log"`), and runs the app's `.ocre/doctor/*` executables; fails on a failed check |
 | `ocre about` / `ocre version` | Versions, mode, bindings, variable names and Ocre features / CLI and app versions |
-| `ocre stats [dir...]` / `ocre notes [--annotations T,U]` | Lines of code per part of the app / TODO, FIXME, OPTIMIZE comments |
+| `ocre stats [dir...]` / `ocre notes [--annotations T,U]` | Lines of code per part of the app (plus `[package.metadata.ocre] stats = ["lib"]` directories) / TODO, FIXME, OPTIMIZE comments |
 
 `ocre new` flags:
 
@@ -601,7 +605,11 @@ connected. It stores nothing.
 Broadcasts wait for the channel object (one subrequest, little CPU). The
 generated controller treats them as best effort: a failure is logged
 (`[ocre realtime] broadcast to posts failed: ...`) and the request still
-succeeds. Clients only listen; what they send is ignored. API-only apps can
+succeeds. Clients only listen, unless `connect` calls
+`upgrade.identified_by(user_id).rebroadcast()`: then what they send reaches
+the channel's other sockets as `{"from": "<id>", "data": ...}` (never as HTML
+swaps). In `ocre dev`, `/ocre/dev/realtime/sent.json` lists recent broadcasts
+for tests. API-only apps can
 use the same pieces by hand: turn on the `realtime` feature, add the
 `cloudflare.config.ts` entries above and a `connect` route, and broadcast JSON.
 
@@ -637,6 +645,15 @@ version in the key (`stats:v1`) and change it when the type changes (an
 undecodable value is logged and recomputed). `fetch` never fails because of
 KV: past a daily limit it logs `[ocre cache] ... failed` and computes the
 value. `read`, `write` and `delete` are the explicit forms.
+
+Rendered HTML is cached the same way: `ocre::cache::fragment(&ctx, &key, ttl,
+|| RowView { post: &post })` returns a `Fragment` the page template writes
+as is, and `ocre::cache::fragments` does a whole list with KV bulk reads
+(Rails' collection caching). Keys come from `ocre::cache::key(&[&"posts",
+&post.id, &post.updated_at, &"row-v1"])`, so an edit makes a new key and no
+delete is needed. Each request also remembers its `SELECT` results (Rails'
+query cache, emptied by any write; `ctx.db()?.uncached()` skips it) and the
+KV keys it read. `CACHE_STORE=null` in `.dev.vars` turns KV caching off.
 
 For pages, `Conditional` answers `304` without rendering when the browser
 already has the current version, like Rails' `fresh_when`:
@@ -725,7 +742,17 @@ async fn index(i18n: I18n, session: Session) -> Result<Html<String>> {
   locale and fails if there is any; `ocre dev` and `ocre deploy` refuse files
   the Worker could not parse (with the line and the fix).
 - **Escaping**: askama escapes translations and interpolated values; never
-  mark them `|safe`.
+  mark them `|safe`. A translation containing markup ends with `.html()`:
+  its text is written as is, its `.arg(..)` values escaped.
+- **Beyond `t`**: `.or("text")`/`.or_key("other.key")` defaults,
+  `i18n.scope("posts.index").t(".title")`, `i18n.namespace("editor")`,
+  `i18n.path("/posts")` (`/fr/posts`), `i18n.l(date, "long")`,
+  `i18n.number(..)`, `i18n.currency(.., "€")`, `i18n.time_ago_in_words(..)`,
+  `i18n.model_name("post", n)`, `i18n.attribute("post", "title")` and
+  `i18n.full_message("post", &error)` for validation errors. Rails' framework
+  texts (validation messages, month names, date and number formats) are
+  built in for English, French, German, Spanish, Italian, Portuguese and
+  Dutch; locale files override them.
 - Generated scaffolds, auth pages and mailers still contain English strings.
   To translate one, move each string to `locales/en.yml`, add `i18n: I18n` to
   the handler and its template struct, and replace the text with
@@ -817,9 +844,13 @@ can reach private items while living apart from the code. Both crates set
 | `ocre::realtime::broadcast(&ctx, channel, message)` | Send HTML (or JSON text) to every WebSocket on `channel` (feature `realtime`) |
 | `realtime::prepend(target, html)` / `append` / `update` / `remove(id)` | htmx out-of-band swaps for broadcasts |
 | `upgrade: WebSocketUpgrade` then `upgrade.connect(&ctx, channel)` | Extractor for WebSocket handshakes (400 otherwise); connects to the channel's `OcreChannel` Durable Object |
+| `upgrade.identified_by(id).rebroadcast()` | Names the subscriber; relays what it sends to the channel's other sockets as JSON |
+| `ocre::realtime::dev_routes()` | `ocre dev` only: `/ocre/dev/realtime/sent.json`, the recent broadcasts (for tests) |
 | `ocre::cache::fetch(&ctx, key, ttl, \|\| async { .. })` | Read-through cache of a JSON value in the `CACHE` KV namespace; also `read`, `write`, `delete` |
+| `ocre::cache::fragment(&ctx, &key, ttl, \|\| view)` / `fragments(&ctx, &items, ttl, key_fn, view_fn)` | Cached rendered HTML (`Fragment`, written as is by templates); keys from `ocre::cache::key(&[..])` |
+| `ctx.db()?.uncached()` | Skip the per-request query cache |
 | `CacheControl::no_cache()` / `private(ttl)` / `public(ttl)` / `no_store()` | `Cache-Control` response part |
-| `ETag::new(version)` / `ETag::of(&data)?` | Weak `ETag` response part |
+| `ETag::new(version)` / `ETag::of(&data)?` / `ETag::strong(version)` | Weak (or strong) `ETag` response part |
 | `conditional: Conditional` then `conditional.fresh_when(etag, cache_control, \|\| render(..))` | `304 Not Modified` without rendering when the client's copy is current |
 | `static LOCALES: ocre::i18n::Locales = ocre::locales!("en", "fr")` | Translations from `locales/*.yml`; `.layer(ocre::i18n::layer(&LOCALES))` in `routes()` |
 | `i18n: I18n` then `i18n.t(key).arg(name, value).count(n)` | Extractor: the request's locale; translation with `%{name}` values and plural forms |

@@ -28,6 +28,7 @@ Field names are snake_case identifiers starting with a letter (`published_at`). 
 |---|---|---|---|---|---|---|
 | `string` | `TEXT` | `String` | `<input>` | string | `String` | "can't be blank" when required |
 | `text` | `TEXT` | `String` | `<textarea rows="5">` | string | `String` | "can't be blank" when required |
+| `rich_text` | `TEXT` | `String` (HTML) | the Trix editor: `<input type="hidden">` + `<trix-editor>` | string (HTML, sanitized when saved) | `String` | "can't be blank" on its text when required; cannot be unique |
 | `integer` | `INTEGER` | `i64` | `<input type="number" step="1">` | number | `Int` | within ±`ocre::MAX_SAFE_INTEGER` |
 | `float` | `REAL` | `f64` | `<input type="number" step="any">` | number | `Float` | none (forms: "is not a number") |
 | `boolean` | `INTEGER NOT NULL DEFAULT 0` | `bool` | `<input type="checkbox" value="true">` | `true` / `false` | `Boolean` | none; cannot be optional |
@@ -40,6 +41,7 @@ Field names are snake_case identifiers starting with a letter (`published_at`). 
 | `attachment` | four columns: `<name>_key`, `_filename`, `_content_type` (`TEXT`), `_size` (`INTEGER`) | `ocre::storage::Upload` in inputs; four columns plus an `Attachment` accessor in the record | `<input type="file" accept="...">` | the four columns | the four columns (read only) | size and content type (`v.file`); "can't be blank" when required |
 | `json` | `TEXT CHECK (json_valid(<name>))` | `ocre::serde_json::Value` | `<textarea rows="5" spellcheck="false" placeholder="{}">` | the JSON value itself | `JSON` scalar | forms: "is not valid JSON"; cannot be unique |
 | `enum:<a>,<b>...` | `TEXT CHECK (<name> IN ('a', 'b'))` | a generated Rust enum (`Status`) | `<select>` with one `<option>` per value | string, one of the values | not supported (`--graphql` refuses it) | forms: "is not included in the list"; cannot be unique |
+| `lock_version:integer` | `INTEGER NOT NULL DEFAULT 0` | `i64` in the record, `Option<i64>` in `Changes`, absent from `New` | `<input type="hidden">` | number | `Int` (patch only) | none; `update` answers 409 when stale |
 
 Without `?`, every column is `NOT NULL`. The sections below give the exact generated code for each type.
 
@@ -102,6 +104,28 @@ pub summary: Option<String>,
 ## text
 
 Same as `string` (column `TEXT`, Rust `String`, same validation), rendered as `<textarea name="body" rows="5">` in forms. The difference is only the input.
+
+## rich_text
+
+Formatted text edited with [Trix](https://trix-editor.org) (Action Text's editor), stored as HTML in a `TEXT` column.
+
+```sql
+body TEXT NOT NULL,
+summary TEXT,
+```
+
+```rust
+// create / update, before validation
+new.body = ocre::security::sanitize(&new.body);
+changes.summary = changes.summary.map(|summary| summary.as_deref().map(ocre::security::sanitize));
+// NewArticle::validate
+v.required("body", &ocre::security::strip_tags(&self.body));
+```
+
+- Rust `String` / `Option<String>`, holding HTML that `ocre::security::sanitize` cleaned before it was stored (from forms, JSON and GraphQL alike).
+- Form: `<input type="hidden" id="article_body" name="body" value="{{ form.body }}"><trix-editor input="article_body"></trix-editor>`; `_form.html` loads Trix 2.1.19 from unpkg.com and hides its file button.
+- Views: `{{ article.body|rich_text }}` on the show page, `{{ article.body|plain_text|truncate(80) }}` in lists (filters from `ocre::filters`, imported by the scaffold's controller).
+- Cannot be unique (``error: rich_text field `body` cannot be unique``). See [Models and migrations](../guides/models.md#rich-text-fields).
 
 ## integer
 
@@ -313,6 +337,26 @@ pub enum Status {
 - GraphQL: not supported yet: `ocre g api Ticket state:enum:open,closed --graphql` fails with ``error: enum `state` is not supported with --graphql yet`` and ``hint: use `state:string` checked with `v.inclusion(...)` in the model, or generate the JSON API without --graphql``.
 - Added to an existing table (`ocre g migration add_state_to_books state:enum:draft,live`), a required enum gets the first value as default: `ALTER TABLE books ADD COLUMN state TEXT NOT NULL CHECK (state IN ('draft', 'live')) DEFAULT 'draft';`.
 - Errors: `s:enum` gives ``enum `s` has no values`` (``hint: list them after the type, e.g. `s:enum:draft,published` ``); `s:enum:A,b` or `s:enum:a,a` give ``invalid values `A,b` for enum `s` `` (``hint: list distinct snake_case values after the type, e.g. `status:enum:draft,published` ``); `s:enum:a,b^` gives ``enum `s` cannot be unique`` (``hint: a few values cannot be unique across many rows; drop the `^` ``).
+
+## lock_version
+
+`lock_version:integer`, Rails' magic column, turns on optimistic locking; it is the only way to write this field name (`lock_version:string` or `lock_version:integer?` fail with ``error: `lock_version` must be `lock_version:integer` ``).
+
+```sql
+lock_version INTEGER NOT NULL DEFAULT 0,
+```
+
+```rust
+// Article (the record)
+/// Optimistic locking: bumped by every update; forms send it back unchanged.
+pub lock_version: i64,
+// ArticleChanges (NewArticle has no lock_version)
+pub lock_version: Option<i64>,
+```
+
+- `update` adds `lock_version = lock_version + 1` and `WHERE ... AND (?N IS NULL OR lock_version = ?N)`; a stale version is `Error::Conflict` (409), `None` skips the check.
+- Forms: a hidden input on the edit page. JSON: returned with the record, sent back in `PATCH` bodies. GraphQL: `lockVersion` in the patch input only.
+- On an existing table: `ocre g migration add_lock_version_to_<table> lock_version:integer`. See [Models and migrations](../guides/models.md#optimistic-locking).
 
 ## Modifiers
 
