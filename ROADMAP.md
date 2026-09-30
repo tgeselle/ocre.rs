@@ -4,7 +4,7 @@ Feature-level inventory of Rails 8.1 and Loco 1.2, with what Ocre has and how
 each part maps to Cloudflare's free plan. Collected from the official Rails
 guides and the Loco documentation source; every item links to its page.
 
-993 features: 732 done, 76 partial, 35 to do, 150 not applicable on Workers.
+993 features: 734 done, 75 partial, 34 to do, 150 not applicable on Workers.
 
 Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason given).
 (R) Rails, (L) Loco.
@@ -725,7 +725,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** R2 (10 GB free, no egress fees) through a binding; direct uploads with presigned URLs. Image variants through Cloudflare Images transformations (free quota not verified). Rich text needs a JS editor, HTML sanitizing and R2 for attachments.
 
-51 features: 27 done, 6 partial, 8 to do, 10 not applicable.
+51 features: 29 done, 5 partial, 7 to do, 10 not applicable.
 
 ### Storage
 
@@ -764,8 +764,8 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [x] **Image variants** (R): `variant` with transformations (resize_to_limit, etc.) via Vips or MiniMagick, including named variants and preprocessed ones. *Ocre: `Variant::new().width(..).fit(Fit::Cover)` builds Cloudflare Images `/cdn-cgi/image/` URLs (free quota; needs transformations on the zone).* [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [x] **Lazy vs immediate variant loading** (R): Variants are processed on first request or eagerly via `processed`/`preprocessed`. *Ocre: Variants are made on first request by Cloudflare and cached at the edge.* [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [-] **File previews** (R): `preview`/`representation` generate images from PDFs and videos using previewers. *Not applicable: no PDF or video renderer runs in a Worker; image variants cover pictures.* [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
-- [~] **Direct uploads** (R): `direct_upload: true` file fields upload straight from the browser to the storage service using the JS library. *Ocre: `storage::direct_upload` signs a PUT URL and `attach_direct_upload` checks the signed key; no bundled JavaScript yet.* [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
-- [ ] **Direct upload JavaScript events** (R): Events (`direct-upload:start/progress/error/end`, etc.) and `DirectUpload` class allow progress tracking, custom drag-and-drop and framework integration. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
+- [x] **Direct uploads** (R): `direct_upload: true` file fields upload straight from the browser to the storage service using the JS library. *Ocre: `storage::direct_upload` signs a PUT to R2, `ocre::storage::direct_upload_script()` serves the browser side (`<input type="file" data-direct-upload-url="...">`), and `attach_direct_upload` checks the signed key the form submits.* [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
+- [x] **Direct upload JavaScript events** (R): Events (`direct-upload:start/progress/error/end`, etc.) and `DirectUpload` class allow progress tracking, custom drag-and-drop and framework integration. *Ocre: `direct-uploads:start|end` on the form and `direct-upload:start|progress|error|end` per file, with Active Storage's names and details.* [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [ ] **Attachment fixtures and test cleanup** (R): Fixtures for blobs/attachments, a test storage service, and cleanup of files created during tests. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [-] **Custom storage services** (R): Implement `ActiveStorage::Service` subclasses to support other cloud providers. *Not applicable: R2 is the store; other services are reached with `worker::Fetch` from app code.* [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [x] **Purging unattached uploads** (R): Unattached blobs (e.g. abandoned direct uploads) can be found with `ActiveStorage::Blob.unattached` and purged. *Ocre: `storage::purge_unattached` deletes objects under a prefix that no row of the table references, one page per call (for a cron).* [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)

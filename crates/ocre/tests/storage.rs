@@ -333,3 +333,13 @@ fn referenced_keys_sql_binds_every_key_and_refuses_odd_identifiers() {
         assert!(message.contains("purge_unattached takes a table and a column name"), "{message}");
     }
 }
+
+#[test]
+fn the_direct_upload_script_is_served() {
+    use tower_service::Service;
+    let mut app = direct_upload_script::<()>();
+    let request = axum::http::Request::get("/ocre/direct-upload.js").body(Body::empty()).unwrap();
+    let response = crate::support::block_on(app.call(request)).unwrap();
+    assert_eq!(response.headers()["content-type"], "text/javascript; charset=utf-8");
+    assert!(crate::support::body_text(response).contains("data-direct-upload-url"));
+}

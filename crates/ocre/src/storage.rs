@@ -709,6 +709,41 @@ pub fn send_data(data: impl Into<Bytes>, filename: &str, content_type: &str, dis
     data_response(data.into(), filename, content_type, disposition)
 }
 
+/// The browser side of direct uploads (Active Storage's `activestorage.js`):
+/// a script that sends the files of `<input type="file"
+/// data-direct-upload-url="...">` to R2 before its form is submitted.
+///
+/// Each file is signed by a POST to the input's URL (a handler calling
+/// [`direct_upload`]), then `PUT` to R2 with progress events
+/// (`direct-upload:start|progress|error|end`); the form then submits
+/// `<name>_key` and `<name>_filename` for [`attach_direct_upload`] instead
+/// of the file. Serve it with [`direct_upload_script`].
+pub const DIRECT_UPLOAD_JS: &str = include_str!("storage/direct_upload.js");
+
+/// Serves [`DIRECT_UPLOAD_JS`] at `GET /ocre/direct-upload.js`: merge it into
+/// the routes, then load it in the layout with
+/// `<script src="/ocre/direct-upload.js" defer></script>`.
+///
+/// # Examples
+///
+/// ```
+/// use axum::Router;
+/// use ocre::Ctx;
+///
+/// fn routes() -> Router<Ctx> {
+///     Router::new().merge(ocre::storage::direct_upload_script())
+/// }
+/// # let _ = routes;
+/// ```
+pub fn direct_upload_script<S: Clone + Send + Sync + 'static>() -> axum::Router<S> {
+    let script = || async {
+        let headers =
+            [(header::CONTENT_TYPE, "text/javascript; charset=utf-8"), (header::CACHE_CONTROL, "public, max-age=3600")];
+        (headers, DIRECT_UPLOAD_JS)
+    };
+    axum::Router::new().route("/ocre/direct-upload.js", axum::routing::get(script))
+}
+
 fn data_response(data: Bytes, filename: &str, content_type: &str, disposition: Disposition) -> Response {
     let filename = sanitize_filename(filename);
     let content_type = essence(content_type);
