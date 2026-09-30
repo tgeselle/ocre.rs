@@ -4,7 +4,7 @@ Feature-level inventory of Rails 8.1 and Loco 1.2, with what Ocre has and how
 each part maps to Cloudflare's free plan. Collected from the official Rails
 guides and the Loco documentation source; every item links to its page.
 
-993 features: 710 done, 72 partial, 77 to do, 134 not applicable on Workers.
+993 features: 712 done, 70 partial, 77 to do, 134 not applicable on Workers.
 
 Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason given).
 (R) Rails, (L) Loco.
@@ -316,7 +316,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** axum handlers and routers, askama templates compiled into the binary, htmx instead of Turbo/Stimulus, Workers Static Assets for files (free, not counted as Worker requests). tower middlewares that do not need tokio compile to WebAssembly.
 
-202 features: 183 done, 3 partial, 5 to do, 11 not applicable.
+202 features: 185 done, 1 partial, 5 to do, 11 not applicable.
 
 ### Controllers
 
@@ -344,9 +344,9 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [x] **default_url_options** (R): Set default options (e.g. locale) merged into all generated URLs. *Ocre: `paths` functions are plain Rust; add parameters (e.g. a locale) to them.* [action_controller_overview](https://guides.rubyonrails.org/action_controller_overview.html)
 - [x] **Strong parameters** (R): params.expect, require/permit, permit! and nested/array permitting to guard mass assignment. *Ocre: the form or JSON struct lists exactly the accepted fields; serde ignores the rest.* [action_controller_overview](https://guides.rubyonrails.org/action_controller_overview.html)
 - [x] **Cookies** (R): Read/write cookies with options (expires, httponly, permanent) and delete them. *Ocre: read from `HeaderMap`, set with a `Set-Cookie` header (documented); signed values go in the `Session`.* [action_controller_overview](https://guides.rubyonrails.org/action_controller_overview.html)
-- [~] **Signed and encrypted cookies** (R): Tamper-proof (cookies.signed) and confidential (cookies.encrypted) cookie jars. [action_controller_overview](https://guides.rubyonrails.org/action_controller_overview.html)
+- [x] **Signed and encrypted cookies** (R): Tamper-proof (cookies.signed) and confidential (cookies.encrypted) cookie jars. *Ocre: the `Cookies` extractor: `get`/`set`, `signed`/`set_signed` (HMAC) and `encrypted`/`set_encrypted` (AES-GCM), keys from `SECRET_KEY_BASE` with `SECRET_KEY_BASE_PREVIOUS` still accepted.* [action_controller_overview](https://guides.rubyonrails.org/action_controller_overview.html)
 - [x] **Session** (R): Per-user session hash with reset_session. [action_controller_overview](https://guides.rubyonrails.org/action_controller_overview.html)
-- [~] **Flash messages** (R): One-request messages via flash, notice/alert on redirect, flash.now and flash.keep. [action_controller_overview](https://guides.rubyonrails.org/action_controller_overview.html)
+- [x] **Flash messages** (R): One-request messages via flash, notice/alert on redirect, flash.now and flash.keep. *Ocre: `session.flash(kind, msg)` for the next request, the `Flash` extractor (`notice()`, `alert()`), `Flash::now` for this response, `session.keep_flash(&flash)` to carry them one more request.* [action_controller_overview](https://guides.rubyonrails.org/action_controller_overview.html)
 - [~] **Session stores** (R): Pluggable session storage: CookieStore, CacheStore, ActiveRecord store, with key/domain/expiry options. [action_controller_overview](https://guides.rubyonrails.org/action_controller_overview.html)
 - [x] **Controller callbacks** (R): before_action, after_action, around_action with only/except, skip_*, blocks and callback classes. *Ocre: extractors (`CurrentUser` is a before_action) and `middleware::from_fn` layers with `route_layer`.* [action_controller_overview](https://guides.rubyonrails.org/action_controller_overview.html)
 - [x] **Request object** (R): Access host, method, format, headers, remote_ip, url and query/request/path parameters. *Ocre: extractors `HeaderMap`, `OriginalUri`, `Method`, `ocre::RemoteIp`, `ocre::RequestId`, `ocre::Format`.* [action_controller_overview](https://guides.rubyonrails.org/action_controller_overview.html)

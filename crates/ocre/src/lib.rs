@@ -38,7 +38,7 @@
 //!
 //! | Module | Contents |
 //! |---|---|
-//! | crate root | [`serve`], [`Ctx`], [`Db`], [`params!`] and [`Query`] / [`Paginated`] (D1), [`Error`] / [`Result`], [`Json`] / [`ApiError`] / [`Page`] (JSON APIs), [`Session`] / [`Flash`], [`Validator`], [`NestedForm`] (bracketed form names), request helpers ([`Format`], [`RemoteIp`], [`RequestId`], [`redirect_back`]), `render` / `error_page` / `Htmx` / `HxRedirect` (feature `html`), serde helpers ([`optional`], [`patch`], [`bool_from_sql`], ...) |
+//! | crate root | [`serve`], [`Ctx`], [`Db`], [`params!`] and [`Query`] / [`Paginated`] (D1), [`Error`] / [`Result`], [`Json`] / [`ApiError`] / [`Page`] (JSON APIs), [`Session`] / [`Flash`] / [`Cookies`], [`Validator`], [`NestedForm`] (bracketed form names), request helpers ([`Format`], [`RemoteIp`], [`RequestId`], [`redirect_back`]), `render` / `error_page` / `Htmx` / `HxRedirect` (feature `html`), serde helpers ([`optional`], [`patch`], [`bool_from_sql`], ...) |
 //! | [`cache`] | Read-through values in Workers KV, `Cache-Control`, `ETag` and `304 Not Modified` |
 //! | [`config`] | Typed app settings from Worker variables and secrets (`ctx.config::<Settings>()`), the environment (development or production) |
 //! | [`encryption`] | Encrypted model columns (AES-256-GCM keyed from `SECRET_KEY_BASE`), deterministic for lookups |
@@ -139,6 +139,7 @@ mod api;
 pub mod cache;
 mod clock;
 pub mod config;
+mod cookies;
 pub mod encryption;
 mod error;
 pub mod errors;
@@ -189,6 +190,7 @@ mod view;
 
 pub use api::{ApiError, ApiResult, Created, Json, Page, PageLinks};
 pub use clock::now;
+pub use cookies::Cookies;
 pub use error::{Error, OptionExt, Result};
 pub use fields::{optional, patch, patch_json};
 pub use form::NestedForm;

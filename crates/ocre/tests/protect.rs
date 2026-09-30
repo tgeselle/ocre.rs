@@ -22,7 +22,14 @@ fn app(key: std::result::Result<Keys, String>, origins: &str) -> Router {
                 Ok::<_, crate::Error>("in")
             }),
         )
-        .route("/framed", get(|| async { ([(header::X_FRAME_OPTIONS, "DENY")], "custom") }));
+        .route("/framed", get(|| async { ([(header::X_FRAME_OPTIONS, "DENY")], "custom") }))
+        .route(
+            "/theme",
+            get(|cookies: crate::Cookies| async move {
+                cookies.set("theme", "dark", None)?;
+                Ok::<_, crate::Error>("set")
+            }),
+        );
     wrap(router, Config { keys: key, allowed_origins: parse_origins(Some(origins.to_owned())), allowed_hosts: vec![] })
 }
 
@@ -193,4 +200,10 @@ fn cors_only_for_allowed_origins() {
         request("POST", "https://x.dev/login", &[("origin", "https://app.example"), ("sec-fetch-site", "cross-site")]),
     );
     assert_eq!(response.status(), StatusCode::OK, "allowed origins pass the CSRF check");
+}
+
+#[test]
+fn cookies_set_by_handlers_go_out_with_the_response() {
+    let response = send(&mut app(key(), ""), request("GET", "/theme", &[]));
+    assert_eq!(response.headers()[header::SET_COOKIE], "theme=dark; HttpOnly; SameSite=Lax; Path=/");
 }

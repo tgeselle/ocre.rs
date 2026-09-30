@@ -166,6 +166,23 @@ fn flash_shows_once_on_the_next_request() {
 }
 
 #[test]
+fn kept_flash_shows_on_the_request_after() {
+    let set = round_trip("", |s| s.flash("notice", "Saved.").unwrap()).unwrap();
+    let session = Session::from_headers(&headers(&cookie_pair(&set)), key(), true);
+    let flash = session.flashes().unwrap();
+    session.keep_flash(&flash).unwrap();
+    let next = session.set_cookie().unwrap().unwrap();
+    let session = Session::from_headers(&headers(&cookie_pair(&next)), key(), true);
+    assert_eq!(session.flashes().unwrap().notice(), Some("Saved."));
+}
+
+#[test]
+fn flash_now_adds_or_replaces_a_message_for_this_response() {
+    let flash = Flash::default().now("alert", "One.").now("notice", "Two.").now("alert", "Three.");
+    assert_eq!(flash.iter().collect::<Vec<_>>(), [("alert", "Three."), ("notice", "Two.")]);
+}
+
+#[test]
 fn clear_keeps_pending_flash() {
     let set = round_trip("", |s| {
         s.insert("user_id", 1).unwrap();

@@ -172,9 +172,14 @@ pub(crate) fn wrap(router: Router, config: Config) -> Router {
 
 async fn session(keys: Result<Keys, String>, mut req: Request, next: Next) -> Response {
     let secure = req.uri().scheme_str() == Some("https");
+    let cookies = crate::cookies::Cookies::from_headers(req.headers(), keys.clone(), secure);
     let session = Session::from_headers(req.headers(), keys, secure);
     req.extensions_mut().insert(session.clone());
+    req.extensions_mut().insert(cookies.clone());
     let mut response = next.run(req).await;
+    for cookie in cookies.set_cookies() {
+        response.headers_mut().append(header::SET_COOKIE, cookie);
+    }
     match session.set_cookie() {
         Ok(Some(cookie)) => {
             response.headers_mut().append(header::SET_COOKIE, cookie);

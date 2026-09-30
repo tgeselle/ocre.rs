@@ -539,6 +539,33 @@ impl Session {
         Ok(Flash(state.flash.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_owned()))).collect()))
     }
 
+    /// Keeps `flash` for the next request too (Rails' `flash.keep`), e.g.
+    /// when a page read the messages but redirects again before showing them.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Internal`] when [`SECRET_KEY_BASE`] is missing or shorter
+    /// than 64 characters.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use axum::response::Redirect;
+    /// use ocre::{Flash, Result, Session};
+    ///
+    /// async fn old_dashboard(session: Session, flash: Flash) -> Result<Redirect> {
+    ///     session.keep_flash(&flash)?;
+    ///     Ok(Redirect::to("/dashboard"))
+    /// }
+    /// # let _ = old_dashboard;
+    /// ```
+    pub fn keep_flash(&self, flash: &Flash) -> Result<()> {
+        for (kind, message) in flash.iter() {
+            self.flash_message(kind, message.to_owned())?;
+        }
+        Ok(())
+    }
+
     /// `Set-Cookie` value when the session changed during the request.
     pub(crate) fn set_cookie(&self) -> Result<Option<HeaderValue>> {
         let state = self.state();
@@ -664,6 +691,30 @@ impl Flash {
     /// ```
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    /// These messages plus `message` of `kind`, for this response only
+    /// (Rails' `flash.now`): render a page with a message without
+    /// storing it in the session, e.g. a form shown again with an alert.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let flash = ocre::Flash::default().now("alert", "Check the highlighted fields.");
+    /// assert_eq!(flash.alert(), Some("Check the highlighted fields."));
+    /// assert_eq!(flash.clone().now("alert", "Again.").alert(), Some("Again."), "a kind has one message");
+    /// ```
+    #[must_use]
+    pub fn now(self, kind: &str, message: impl Into<String>) -> Self {
+        self.with_message(kind, message.into())
+    }
+
+    fn with_message(mut self, kind: &str, message: String) -> Self {
+        match self.0.iter_mut().find(|(existing, _)| existing == kind) {
+            Some(entry) => entry.1 = message,
+            None => self.0.push((kind.to_owned(), message)),
+        }
+        self
     }
 }
 

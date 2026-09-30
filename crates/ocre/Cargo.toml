@@ -27,7 +27,7 @@ tower-service = "0.3.3"
 # `ocre::security::ContentSecurityPolicy` and `PermissionsPolicy` are tower layers.
 tower-layer = "0.3.3"
 # Encrypted session cookies (AES-256-GCM, key derived with HKDF).
-cookie = { version = "0.18.2", features = ["private", "key-expansion", "percent-encode"] }
+cookie = { version = "0.18.2", features = ["private", "signed", "key-expansion", "percent-encode"] }
 tower-http = { version = "0.7.1", default-features = false, features = ["cors"] }
 # `custom-error-conversion` lets Ocre map its errors so internal details never reach clients.
 async-graphql = { version = "7.2.1", default-features = false, features = ["graphiql", "custom-error-conversion"], optional = true }
