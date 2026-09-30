@@ -4,7 +4,7 @@ Feature-level inventory of Rails 8.1 and Loco 1.2, with what Ocre has and how
 each part maps to Cloudflare's free plan. Collected from the official Rails
 guides and the Loco documentation source; every item links to its page.
 
-993 features: 527 done, 104 partial, 270 to do, 92 not applicable on Workers.
+993 features: 532 done, 104 partial, 265 to do and 92 not applicable on Workers.
 
 Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason given).
 (R) Rails, (L) Loco.
@@ -725,7 +725,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** R2 (10 GB free, no egress fees) through a binding; direct uploads with presigned URLs. Image variants through Cloudflare Images transformations (free quota not verified). Rich text needs a JS editor, HTML sanitizing and R2 for attachments.
 
-51 features: 7 done, 3 partial, 41 to do, 0 not applicable.
+51 features: 12 done, 3 partial, 36 to do, 0 not applicable.
 
 ### Storage
 
@@ -772,17 +772,17 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 ### Rich text
 
-- [ ] **Action Text installation** (R): `action_text:install` adds rich text tables, Trix editor JS/CSS and Active Storage setup. [action_text_overview](https://guides.rubyonrails.org/action_text_overview.html)
-- [ ] **has_rich_text** (R): Declares a rich-text attribute on a model stored in a separate ActionText::RichText record. [action_text_overview](https://guides.rubyonrails.org/action_text_overview.html)
-- [ ] **rich_textarea form helper** (R): `form.rich_textarea` renders the Trix WYSIWYG editor bound to a rich-text attribute. [action_text_overview](https://guides.rubyonrails.org/action_text_overview.html)
-- [ ] **Rendering rich text** (R): Outputting the rich text attribute renders sanitized HTML inside a customizable content layout, with `to_plain_text` available. [action_text_overview](https://guides.rubyonrails.org/action_text_overview.html)
+- [x] **Action Text installation** (R): `action_text:install` adds rich text tables, Trix editor JS/CSS and Active Storage setup. *Ocre: No install step: a `body:rich_text` field adds a TEXT column, and the scaffold form loads Trix.* [action_text_overview](https://guides.rubyonrails.org/action_text_overview.html)
+- [x] **has_rich_text** (R): Declares a rich-text attribute on a model stored in a separate ActionText::RichText record. *Ocre: The `rich_text` field type, stored in the model's own column (no separate table, so no extra query).* [action_text_overview](https://guides.rubyonrails.org/action_text_overview.html)
+- [x] **rich_textarea form helper** (R): `form.rich_textarea` renders the Trix WYSIWYG editor bound to a rich-text attribute. *Ocre: Scaffolded forms render `<trix-editor>` bound to a hidden input.* [action_text_overview](https://guides.rubyonrails.org/action_text_overview.html)
+- [x] **Rendering rich text** (R): Outputting the rich text attribute renders sanitized HTML inside a customizable content layout, with `to_plain_text` available. *Ocre: The model sanitizes the HTML on `create`/`update`; views use `|rich_text` and `|plain_text` (`ocre::filters`).* [action_text_overview](https://guides.rubyonrails.org/action_text_overview.html)
 - [ ] **Editor styling and container customization** (R): Trix styles and the `action_text/contents/_content` container partial can be customized or removed. [action_text_overview](https://guides.rubyonrails.org/action_text_overview.html)
 - [ ] **Embedded blob HTML customization** (R): The `active_storage/blobs/_blob` partial controls HTML for embedded images and file attachments. [action_text_overview](https://guides.rubyonrails.org/action_text_overview.html)
 - [ ] **Active Storage-backed attachments** (R): Files dropped into the editor are uploaded via Active Storage direct uploads, with JS events for upload progress. [action_text_overview](https://guides.rubyonrails.org/action_text_overview.html)
 - [ ] **Attachable models via Signed GlobalID** (R): Including `ActionText::Attachable` lets any model be embedded as an attachment referenced by signed GlobalID. [action_text_overview](https://guides.rubyonrails.org/action_text_overview.html)
 - [ ] **Custom attachment partials** (R): `to_attachable_partial_path`, `to_trix_content_attachment_partial_path` and `to_missing_attachable_partial_path` control rendering of embedded and missing attachments. [action_text_overview](https://guides.rubyonrails.org/action_text_overview.html)
 - [ ] **Attachable via API** (R): Attachments can be inserted programmatically/by JSON using the attachable's `attachable_sgid` and content. [action_text_overview](https://guides.rubyonrails.org/action_text_overview.html)
-- [ ] **Rich text eager loading** (R): `with_rich_text_<name>` and `with_rich_text_<name>_and_embeds` scopes avoid N+1 queries. [action_text_overview](https://guides.rubyonrails.org/action_text_overview.html)
+- [x] **Rich text eager loading** (R): `with_rich_text_<name>` and `with_rich_text_<name>_and_embeds` scopes avoid N+1 queries. *Ocre: The content lives in the model's row, so there is no N+1 to avoid.* [action_text_overview](https://guides.rubyonrails.org/action_text_overview.html)
 
 ## Realtime
 
