@@ -96,12 +96,14 @@ struct FactoryField<'a> {
 }
 
 impl<'a> FactoryField<'a> {
-    /// `None` for attachments, which the factory leaves out.
+    /// `None` for columns the factory leaves to the database (lock versions) and attachments.
     fn new(field: &'a Field) -> Option<Self> {
         let name = &field.name;
         let (ty, default) = match field.ty {
-            FieldType::Attachment => return None,
-            FieldType::String | FieldType::Text => ("String", format!("format!(\"{} {{n}}\")", humanize(name))),
+            FieldType::Attachment | FieldType::LockVersion => return None,
+            FieldType::String | FieldType::Text | FieldType::RichText => {
+                ("String", format!("format!(\"{} {{n}}\")", humanize(name)))
+            }
             FieldType::Integer => ("i64", "n as i64".to_owned()),
             FieldType::Float => ("f64", "n as f64".to_owned()),
             FieldType::Decimal => ("String", "format!(\"{n}.99\")".to_owned()),

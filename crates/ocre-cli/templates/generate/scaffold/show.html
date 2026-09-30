@@ -8,7 +8,7 @@
 {% if let Some(alert) = flash.alert() %}<p class="alert">{{ alert }}</p>{% endif %}
 
 <dl>
-<% for field in fields %>
+<% for field in fields if not field.hidden %>
   <dt><%= field.label %></dt><dd><%= field.show %></dd>
 <% endfor %>
   <dt>Created at</dt><dd>{{ <%= singular %>.created_at }}</dd>

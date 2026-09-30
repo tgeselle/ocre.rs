@@ -109,3 +109,13 @@ fn enums_list_their_values() {
     assert_eq!(error("status:enum:a,b^"), "enum `status` cannot be unique");
     assert!(error("title:string:x").starts_with("type `string` of `title` takes no `:x`"));
 }
+
+#[test]
+fn lock_version_and_rich_text_rules() {
+    assert_eq!(Field::parse("lock_version:integer").unwrap().ty, FieldType::LockVersion);
+    for spec in ["lock_version:integer?", "lock_version:integer^", "lock_version:string"] {
+        assert_eq!(Field::parse(spec).unwrap_err().message, "`lock_version` must be `lock_version:integer`", "{spec}");
+    }
+    assert_eq!(Field::parse("body:rich_text").unwrap().ty, FieldType::RichText);
+    assert_eq!(Field::parse("body:rich_text^").unwrap_err().message, "rich_text field `body` cannot be unique");
+}

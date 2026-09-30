@@ -144,6 +144,111 @@ fn cookie_remembers_the_locale() {
     assert_eq!(LOCALES.locale("fr").cookie(), "locale=fr; Path=/; Max-Age=31536000; SameSite=Lax");
 }
 
+#[test]
+fn scoped_keys_resolve_relative_to_the_scope() {
+    let en = LOCALES.locale("en").scope("posts.buttons");
+    assert_eq!(en.t(".save").to_string(), "Save");
+    assert_eq!(en.t(".one").to_string(), "First", "not a plural: a sibling is not a category");
+    assert_eq!(en.t("only_en").to_string(), "English only", "absolute without a dot");
+    assert_eq!(en.in_locale("fr").t(".save").to_string(), "translation missing: fr.posts.buttons.save");
+    assert_eq!(LOCALES.locale("en").t(".only_en").to_string(), "English only", "no scope: the dot is dropped");
+}
+
+#[test]
+fn defaults_replace_missing_translations() {
+    let fr = LOCALES.locale("fr");
+    assert_eq!(fr.t("nowhere").or("Salut %{name}").arg("name", "Ada").to_string(), "Salut Ada");
+    assert_eq!(fr.t("only_en").or(String::from("Seulement")).to_string(), "Seulement", "debug builds");
+    assert_eq!(Release(fr.t("only_en").or("Seulement")).to_string(), "English only", "release falls back first");
+    assert_eq!(fr.t("nowhere").or_key("elsewhere").or_key("hello").arg("name", "Ada").to_string(), "Bonjour Ada");
+    assert_eq!(fr.scope("posts").t("nowhere").or_key(".count").count(2).to_string(), "2 articles");
+    assert_eq!(fr.t("nowhere").or_key("elsewhere").to_string(), "translation missing: fr.nowhere");
+}
+
+#[test]
+fn built_in_translations_follow_the_app_files() {
+    let fr = LOCALES.locale("fr");
+    assert_eq!(fr.t("errors.messages.blank").to_string(), "doit être rempli(e)");
+    assert_eq!(LOCALES.locale("ru").t("errors.messages.blank").to_string(), "can't be blank", "English last");
+    assert!(fr.exists("only_en"), "the default locale counts");
+    assert!(fr.exists("date.formats.short"));
+    assert!(!fr.exists("nowhere"));
+    assert!(fr.scope("posts").exists(".count"));
+}
+
+#[test]
+fn namespaces_list_the_keys_under_a_prefix() {
+    let fr = LOCALES.locale("fr");
+    let pairs = |texts: BTreeMap<&'static str, &'static str>| texts.into_iter().collect::<Vec<_>>();
+    assert_eq!(pairs(fr.namespace_in("posts", true)), [("count", "%{count} articles")]);
+    assert_eq!(
+        pairs(fr.namespace_in("posts", false)),
+        [("buttons.one", "First"), ("buttons.save", "Save"), ("count", "%{count} articles")],
+        "release builds add the default locale's keys"
+    );
+    assert_eq!(pairs(LOCALES.locale("en").scope("posts").namespace(".buttons")), [("one", "First"), ("save", "Save")]);
+    assert!(fr.namespace("hello").is_empty(), "a text is not a namespace");
+}
+
+#[test]
+fn paths_carry_the_locale() {
+    let fr = LOCALES.locale("fr");
+    assert_eq!(fr.path("/posts?page=2"), "/fr/posts?page=2");
+    assert_eq!(fr.path("posts"), "/fr/posts");
+    assert_eq!(LOCALES.locale("pt-br").path(""), "/pt-BR");
+}
+
+#[cfg(feature = "html")]
+#[test]
+fn html_translations_escape_values_only() {
+    use askama::Template;
+
+    static HTML: Locales = LazyLock::new(|| {
+        Catalog::load(&[("en", "en:\n  terms: \"I accept the <a href=\\\"/terms\\\">terms</a>, %{name}\"\n")])
+    });
+
+    #[derive(Template)]
+    #[template(
+        source = r#"{{ i18n.t("terms").arg("name", name).html() }}|{{ i18n.t("terms").arg("name", name) }}"#,
+        ext = "html"
+    )]
+    struct Terms {
+        i18n: I18n,
+        name: &'static str,
+    }
+
+    let page = Terms { i18n: HTML.locale("en"), name: "<b>Ada & 'Bo'\"</b>" }.render().unwrap();
+    let (html, text) = page.split_once('|').unwrap();
+    assert_eq!(html, "I accept the <a href=\"/terms\">terms</a>, &lt;b&gt;Ada &amp; &#39;Bo&#39;&quot;&lt;/b&gt;");
+    assert!(!text.contains('<'), "plain translations stay escaped: {text}");
+    assert_eq!(HTML.locale("en").t("nope").html().to_string(), "translation missing: en.nope");
+}
+
+#[cfg(feature = "html")]
+#[test]
+fn templates_call_the_localized_helpers() {
+    use askama::Template;
+
+    #[derive(Template)]
+    #[template(
+        source = r#"{% for error in errors %}{{ i18n.full_message("post", error) }};{% endfor %}{{ i18n.currency(price, "€") }};{{ i18n.l(on, "long") }};{{ i18n.model_name("post", count) }}"#,
+        ext = "html"
+    )]
+    struct Page {
+        i18n: I18n,
+        errors: Vec<crate::FieldError>,
+        price: f64,
+        on: String,
+        count: usize,
+    }
+
+    let mut v = crate::Validator::new();
+    v.required("title", "");
+    let page =
+        Page { i18n: LOCALES.locale("fr"), errors: v.errors().to_vec(), price: 9.5, on: "2026-09-29".into(), count: 2 };
+    assert_eq!(page.render().unwrap(), "Title doit être rempli(e);9,50\u{a0}€;29 septembre 2026;Post");
+}
+
 async fn hello(i18n: I18n) -> String {
     i18n.t("hello").arg("name", "Ada").to_string()
 }

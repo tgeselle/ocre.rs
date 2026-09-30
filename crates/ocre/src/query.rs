@@ -499,6 +499,137 @@ impl<T> Query<T> {
         self
     }
 
+    /// Keeps rows with at least one row in `table` pointing to them through
+    /// `foreign_key` (Rails' `where.associated` on a has-many side).
+    ///
+    /// Writes `EXISTS (SELECT 1 FROM <table> WHERE <table>.<foreign_key> = <this table>.id)`,
+    /// which stops at the first child: with an index on the foreign key
+    /// (generated for every `references` field) it reads one child row per
+    /// parent. For the belongs-to side, test the column itself:
+    /// `is_not_null("author_id")`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let stmt = ocre::Query::<()>::table("posts").where_associated("comments", "post_id").to_statement();
+    /// assert_eq!(
+    ///     stmt.sql,
+    ///     "SELECT * FROM posts WHERE EXISTS (SELECT 1 FROM comments WHERE comments.post_id = posts.id)"
+    /// );
+    /// ```
+    pub fn where_associated(mut self, table: &'static str, foreign_key: &'static str) -> Self {
+        let condition = self.parts.child_exists(table, foreign_key);
+        self.parts.push_condition(condition, vec![]);
+        self
+    }
+
+    /// Keeps rows that no row of `table` points to through `foreign_key`
+    /// (Rails' `where.missing` on a has-many side): posts without comments.
+    ///
+    /// The belongs-to side is `is_null("author_id")`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let stmt = ocre::Query::<()>::table("posts").where_missing("comments", "post_id").to_statement();
+    /// assert_eq!(
+    ///     stmt.sql,
+    ///     "SELECT * FROM posts WHERE NOT EXISTS (SELECT 1 FROM comments WHERE comments.post_id = posts.id)"
+    /// );
+    /// ```
+    pub fn where_missing(mut self, table: &'static str, foreign_key: &'static str) -> Self {
+        let condition = format!("NOT {}", self.parts.child_exists(table, foreign_key));
+        self.parts.push_condition(condition, vec![]);
+        self
+    }
+
+    /// Filters `column` between two optional bounds, like Loco's `DateRangeBuilder`.
+    ///
+    /// Both bounds: `BETWEEN from AND to` (inclusive). One bound: strictly
+    /// after `from` (`>`) or strictly before `to` (`<`). No bound: no
+    /// condition. Made for `?from=&to=` filters, whose values arrive as
+    /// `Option`s; works on any comparable column (dates stored as ISO text
+    /// compare correctly).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ocre::{Query, params};
+    ///
+    /// let both = Query::<()>::table("posts").date_range("created_at", Some("2026-01-01"), Some("2026-01-31"));
+    /// assert_eq!(both.to_statement().sql, "SELECT * FROM posts WHERE created_at BETWEEN ?1 AND ?2");
+    /// let from = Query::<()>::table("posts").date_range("created_at", Some("2026-01-01"), None);
+    /// assert_eq!(from.to_statement().sql, "SELECT * FROM posts WHERE created_at > ?1");
+    /// let to = Query::<()>::table("posts").date_range("created_at", None, Some("2026-01-31"));
+    /// assert_eq!(to.to_statement().sql, "SELECT * FROM posts WHERE created_at < ?1");
+    /// let none = Query::<()>::table("posts").date_range::<&str>("created_at", None, None);
+    /// assert_eq!(none.to_statement().sql, "SELECT * FROM posts");
+    /// ```
+    pub fn date_range<V: IntoParam>(self, column: &'static str, from: Option<V>, to: Option<V>) -> Self {
+        match (from, to) {
+            (Some(from), Some(to)) => self.between(column, from, to),
+            (Some(from), None) => self.gt(column, from),
+            (None, Some(to)) => self.lt(column, to),
+            (None, None) => self,
+        }
+    }
+
+    /// Removes every condition added so far (Rails' `unscope(:where)`);
+    /// chain new ones after it for Rails' `rewhere`.
+    ///
+    /// Useful to reuse a scoped query (a model's `query()` that hides
+    /// soft-deleted rows, say) without its conditions. Joins, order and
+    /// limits stay.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let visible = ocre::Query::<()>::table("posts").is_null("deleted_at").order_desc("id");
+    /// let stmt = visible.unscope_where().eq("author_id", 3).to_statement();
+    /// assert_eq!(stmt.sql, "SELECT * FROM posts WHERE author_id = ?1 ORDER BY id DESC");
+    /// ```
+    pub fn unscope_where(mut self) -> Self {
+        self.parts.conditions.clear();
+        self.parts.params.clear();
+        self
+    }
+
+    /// Removes the limit and offset set so far (Rails' `unscope(:limit, :offset)`).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let stmt = ocre::Query::<()>::table("posts").limit(10).offset(20).unscope_limit().to_statement();
+    /// assert_eq!(stmt.sql, "SELECT * FROM posts");
+    /// ```
+    pub fn unscope_limit(mut self) -> Self {
+        self.parts.limit = None;
+        self.parts.offset = None;
+        self
+    }
+
+    /// Reverses the order (Rails' `reverse_order`): `ASC` terms become
+    /// `DESC` and back; terms without a direction ([`order_in`](Self::order_in),
+    /// a bare [`order_sql`](Self::order_sql)) get `DESC`. Without any order,
+    /// sorts by `<table>.id DESC`.
+    ///
+    /// Write raw terms with `NULLS FIRST/LAST` in full instead: they cannot
+    /// be flipped by appending a direction.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ocre::Query;
+    ///
+    /// let stmt = Query::<()>::table("posts").order_asc("title").order_desc("id").reverse_order().to_statement();
+    /// assert_eq!(stmt.sql, "SELECT * FROM posts ORDER BY title DESC, id ASC");
+    /// assert_eq!(Query::<()>::table("posts").reverse_order().to_statement().sql, "SELECT * FROM posts ORDER BY posts.id DESC");
+    /// ```
+    pub fn reverse_order(mut self) -> Self {
+        self.parts.reverse_order();
+        self
+    }
+
     /// Matches rows meeting at least one of the conditions `f` adds: `(a OR b ...)`.
     ///
     /// `f` receives an empty query to add conditions to; its table, order and
@@ -721,6 +852,67 @@ impl<T> Query<T> {
     /// ```
     pub fn page(self, page: Page) -> Self {
         self.limit(page.limit).offset(page.offset)
+    }
+
+    /// `EXPLAIN QUERY PLAN` of the `SELECT` (Rails' `explain`): how SQLite
+    /// finds the rows, e.g. `SEARCH posts USING INDEX index_posts_on_author_id (author_id=?)`
+    /// or a full `SCAN posts`.
+    ///
+    /// Run it with [`explain`](Self::explain), or print the SQL and run it with
+    /// `ocre sql "EXPLAIN QUERY PLAN ..."` on the local database.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let stmt = ocre::Query::<()>::table("posts").eq("author_id", 3).explain_statement();
+    /// assert_eq!(stmt.sql, "EXPLAIN QUERY PLAN SELECT * FROM posts WHERE author_id = ?1");
+    /// ```
+    pub fn explain_statement(&self) -> Statement {
+        let stmt = self.parts.select_statement();
+        Statement { sql: format!("EXPLAIN QUERY PLAN {}", stmt.sql), params: stmt.params }
+    }
+
+    /// Walks the matching rows in batches of `size`, ordered by id (Rails'
+    /// `find_in_batches` / `in_batches`, and `find_each` with a loop over each batch).
+    ///
+    /// `id` reads a row's primary key (`|post| post.id`): each batch starts
+    /// after the last id of the previous one (keyset pagination: `WHERE id >
+    /// last ORDER BY id LIMIT size`), so batches stay cheap however far they
+    /// go, unlike `OFFSET`. The query's own order and limits are replaced;
+    /// for Rails' `start:` / `finish:` add `gte("id", start)` / `lte("id", finish)`.
+    /// [`Batches::next`] runs one batch.
+    ///
+    /// # Free plan
+    ///
+    /// Each batch is one query reading `size` rows. A Worker invocation may
+    /// run 50 D1 queries on the free plan and has 10 ms of CPU: walk large
+    /// tables from a job or scheduled task, a few batches per invocation
+    /// (keep [`Batches::after`] to resume in the next one).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ocre::Query;
+    ///
+    /// #[derive(serde::Deserialize)]
+    /// struct Post {
+    ///     id: i64,
+    /// }
+    ///
+    /// let mut batches = Query::<Post>::table("posts").eq("published", true).batches(500, |post| post.id);
+    /// assert_eq!(
+    ///     batches.statement().sql,
+    ///     "SELECT * FROM posts WHERE published = ?1 ORDER BY posts.id ASC LIMIT ?2"
+    /// );
+    /// batches.advance(&[Post { id: 7 }, Post { id: 9 }]);
+    /// assert_eq!(batches.after(), Some(9));
+    /// assert_eq!(
+    ///     batches.statement().sql,
+    ///     "SELECT * FROM posts WHERE published = ?1 AND posts.id > ?2 ORDER BY posts.id ASC LIMIT ?3"
+    /// );
+    /// ```
+    pub fn batches(self, size: i64, id: fn(&T) -> i64) -> Batches<T> {
+        Batches { query: self, size: size.max(1), id, after: None, done: false }
     }
 
     /// The `SELECT` statement, with placeholders numbered `?1, ?2...`.
@@ -1005,6 +1197,39 @@ impl Parts {
         self.where_clause(&mut sql, &mut params);
         numbered(sql, params)
     }
+
+    /// `EXISTS (SELECT 1 FROM <table> WHERE <table>.<fk> = <self.table>.id)`.
+    fn child_exists(&self, table: &str, foreign_key: &str) -> String {
+        format!("EXISTS (SELECT 1 FROM {table} WHERE {table}.{foreign_key} = {}.id)", self.table)
+    }
+
+    fn reverse_order(&mut self) {
+        if self.order.is_empty() {
+            self.order.push(format!("{}.id DESC", self.table));
+            return;
+        }
+        for term in &mut self.order {
+            if let Some(column) = term.strip_suffix(" ASC") {
+                *term = format!("{column} DESC");
+            } else if let Some(column) = term.strip_suffix(" DESC") {
+                *term = format!("{column} ASC");
+            } else {
+                term.push_str(" DESC");
+            }
+        }
+    }
+
+    /// The next batch of [`Batches`]: after `after` by `<table>.id`, in id order.
+    fn batch(&mut self, after: Option<i64>, size: i64) {
+        let id = format!("{}.id", self.table);
+        if let Some(after) = after {
+            self.compare(&id, ">", after.into_param());
+        }
+        self.order = vec![format!("{id} ASC")];
+        self.order_params.clear();
+        self.limit = Some(size);
+        self.offset = None;
+    }
 }
 
 /// Numbers the bare `?` placeholders of `sql` as `?1, ?2...`, skipping
@@ -1182,6 +1407,125 @@ impl<T> Paginated<T> {
             limit: self.limit,
             offset: self.offset,
         }
+    }
+}
+
+/// Batches of rows by increasing id, from [`Query::batches`]: Rails'
+/// `find_in_batches` without holding a cursor open.
+///
+/// [`next`](Self::next) runs one query and returns the next batch, or
+/// `None` when every row was read. [`after`](Self::after) is the last id
+/// seen: store it (in a job's arguments, in KV) to resume later with
+/// [`resume_after`](Self::resume_after).
+///
+/// # Examples
+///
+/// ```no_run
+/// use ocre::{Ctx, Query, Result};
+///
+/// #[derive(serde::Deserialize)]
+/// struct User {
+///     id: i64,
+///     email: String,
+/// }
+///
+/// // A scheduled task: at most 4 batches (4 queries) per run.
+/// async fn send_digests(ctx: &Ctx, resume: Option<i64>) -> Result<Option<i64>> {
+///     let db = ctx.db()?;
+///     let mut batches = Query::<User>::table("users").batches(100, |user| user.id).resume_after(resume);
+///     for _ in 0..4 {
+///         let Some(users) = batches.next(&db).await? else { return Ok(None) };
+///         for user in users {
+///             // find_each: one row at a time.
+///             let _ = user.email;
+///         }
+///     }
+///     Ok(batches.after())
+/// }
+/// ```
+pub struct Batches<T> {
+    query: Query<T>,
+    size: i64,
+    id: fn(&T) -> i64,
+    after: Option<i64>,
+    done: bool,
+}
+
+impl<T> Batches<T> {
+    /// Starts after `id` (Rails' `start:`, exclusive), or from the first row with `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[derive(serde::Deserialize)] struct Post { id: i64 }
+    /// let batches = ocre::Query::<Post>::table("posts").batches(100, |p| p.id).resume_after(Some(41));
+    /// assert_eq!(batches.after(), Some(41));
+    /// assert!(batches.statement().sql.contains("posts.id > ?1"));
+    /// ```
+    pub fn resume_after(mut self, id: Option<i64>) -> Self {
+        self.after = id;
+        self
+    }
+
+    /// The last id read so far (`None` before the first batch).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[derive(serde::Deserialize)] struct Post { id: i64 }
+    /// assert_eq!(ocre::Query::<Post>::table("posts").batches(10, |p| p.id).after(), None);
+    /// ```
+    pub fn after(&self) -> Option<i64> {
+        self.after
+    }
+
+    /// Whether the last batch was shorter than the batch size: no row is left.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[derive(serde::Deserialize)] struct Post { id: i64 }
+    /// let mut batches = ocre::Query::<Post>::table("posts").batches(2, |p| p.id);
+    /// batches.advance(&[Post { id: 1 }]);
+    /// assert!(batches.is_done());
+    /// ```
+    pub fn is_done(&self) -> bool {
+        self.done
+    }
+
+    /// The `SELECT` of the next batch.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[derive(serde::Deserialize)] struct Post { id: i64 }
+    /// let batches = ocre::Query::<Post>::table("posts").limit(3).batches(10, |p| p.id);
+    /// assert_eq!(batches.statement().sql, "SELECT * FROM posts ORDER BY posts.id ASC LIMIT ?1");
+    /// ```
+    pub fn statement(&self) -> Statement {
+        let mut parts = self.query.parts.clone();
+        parts.batch(self.after, self.size);
+        parts.select_statement()
+    }
+
+    /// Records a batch just read: its last id, and whether it was the last batch.
+    ///
+    /// [`next`](Self::next) calls it; call it yourself after running
+    /// [`statement`](Self::statement) through [`Db::all`](crate::Db::all).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[derive(serde::Deserialize)] struct Post { id: i64 }
+    /// let mut batches = ocre::Query::<Post>::table("posts").batches(2, |p| p.id);
+    /// batches.advance(&[Post { id: 3 }, Post { id: 5 }]);
+    /// assert_eq!((batches.after(), batches.is_done()), (Some(5), false));
+    /// ```
+    pub fn advance(&mut self, rows: &[T]) {
+        if let Some(last) = rows.last() {
+            self.after = Some((self.id)(last));
+        }
+        self.done = (rows.len() as i64) < self.size;
     }
 }
 

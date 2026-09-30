@@ -1,1 +1,1 @@
-<tr id="<%= singular %>_{{ <%= singular %>.id }}"><% for field in fields %><td><%= field.display %></td><% endfor %><td><a href="{{ paths::show(<%= singular %>.id) }}">Show</a> <a href="{{ paths::edit(<%= singular %>.id) }}">Edit</a></td></tr>
+<tr id="<%= singular %>_{{ <%= singular %>.id }}"><% for field in fields if not field.hidden %><td><%= field.display %></td><% endfor %><td><a href="{{ paths::show(<%= singular %>.id) }}">Show</a> <a href="{{ paths::edit(<%= singular %>.id) }}">Edit</a></td></tr>

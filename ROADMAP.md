@@ -4,7 +4,7 @@ Feature-level inventory of Rails 8.1 and Loco 1.2, with what Ocre has and how
 each part maps to Cloudflare's free plan. Collected from the official Rails
 guides and the Loco documentation source; every item links to its page.
 
-993 features: 503 done, 105 partial, 294 to do, 91 not applicable on Workers.
+993 features: 527 done, 104 partial, 270 to do, 92 not applicable on Workers.
 
 Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason given).
 (R) Rails, (L) Loco.
@@ -31,7 +31,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** D1 (SQLite): 5 GB and daily row read/write quotas on the free plan, so batch queries and avoid N+1. Migrations are forward-only SQL files applied by `ocre migrate` (the app's wrangler locally, `cf d1 migrations apply` in production); rollbacks need hand-written reverse SQL (D1 Time Travel restores a point in time). Several databases are several D1 bindings. Encryption uses WebCrypto AES-GCM. Everything here is Rust code over D1: feasible.
 
-246 features: 67 done, 33 partial, 135 to do, 11 not applicable.
+246 features: 77 done, 35 partial, 123 to do, 11 not applicable.
 
 ### Active Record
 
@@ -109,11 +109,11 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [x] **Method chaining / Relation** (R): Lazy, chainable query relations across tables. *Ocre: `ocre::Query<T>` (the model's `query()`), built step by step and run by a terminal method; one table plus `join` clauses.* [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
 - [x] **find_by_sql / select_all** (R): Run raw SQL returning models or raw result sets. *Ocre: `db.all::<T>(sql, params)` / `db.first::<T>` into any serde struct.* [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
 - [x] **pluck / pick / ids** (R): Fetch column values directly without instantiating models. *Ocre: `Query::pluck(&db, "id")`; `.limit(1)` for pick.* [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
-- [ ] **find_or_create_by(!) / find_or_initialize_by** (R): Find a matching record or create/build one. [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
-- [ ] **create_or_find_by(!)** (R): Insert relying on unique constraint, falling back to find on conflict. [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
+- [x] **find_or_create_by(!) / find_or_initialize_by** (R): Find a matching record or create/build one. *Ocre: `Query::first_or_create` returns the first matching row or creates it.* [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
+- [x] **create_or_find_by(!)** (R): Insert relying on unique constraint, falling back to find on conflict. *Ocre: `Query::create_or_first` inserts, and on a unique conflict returns the existing row.* [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
 - [~] **exists? / any? / many? / none? / one?** (R): Existence checks via efficient queries. [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
-- [ ] **find_each** (R): Iterate records in batches with batch_size, start, finish, error_on_ignore, order options. [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
-- [ ] **find_in_batches / in_batches** (R): Yield arrays or relations of records in batches. [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
+- [x] **find_each** (R): Iterate records in batches with batch_size, start, finish, error_on_ignore, order options. *Ocre: `Query::batches` pages through rows by id (`resume_after`), bounded per batch.* [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
+- [x] **find_in_batches / in_batches** (R): Yield arrays or relations of records in batches. *Ocre: `Query::batches` yields `Vec` batches.* [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
 - [x] **where (string/array/placeholder conditions)** (R): Filter with SQL fragments, positional ? and named placeholders safely. *Ocre: `Query::where_sql(fragment, params![..])`, bare `?` renumbered.* [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
 - [x] **LIKE sanitization** (R): sanitize_sql_like escapes wildcards in LIKE conditions. *Ocre: `ocre::escape_like`, used by `contains`/`starts_with`/`ends_with`.* [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
 - [x] **Hash conditions (equality/range/subset)** (R): where(attr: value/range/array), including association keys and tuple syntax. *Ocre: `eq`, `between`, `is_in` on `Query`.* [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
@@ -124,12 +124,12 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [~] **Overriding clauses** (R): unscope, only, except, reselect, reorder, reverse_order, rewhere, regroup replace or remove parts of a query. *Ocre: `Query::reorder()` only.* [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
 - [x] **none (null relation)** (R): Chainable relation returning no records without querying. *Ocre: `Query::none()` (`WHERE 0`, reads no row).* [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
 - [ ] **readonly** (R): Mark loaded records read-only, raising on save. [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
-- [ ] **Optimistic locking** (R): lock_version column raises StaleObjectError on conflicting updates; locking_column customizes it. [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
+- [x] **Optimistic locking** (R): lock_version column raises StaleObjectError on conflicting updates; locking_column customizes it. *Ocre: A `lock_version:integer` field: `update` checks and bumps it, a stale version is `Error::Conflict` (409).* [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
 - [ ] **Pessimistic locking** (R): lock / lock! / with_lock issue SELECT ... FOR UPDATE (or custom lock clause) within transactions. [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
 - [~] **joins** (R): INNER JOIN via SQL strings or named (nested) associations, with conditions on joined tables. *Ocre: `Query::join("JOIN ... ON ...")` with SQL strings and conditions on qualified columns; no named associations.* [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
 - [~] **left_outer_joins** (R): LEFT OUTER JOIN on associations. *Ocre: `Query::join("LEFT JOIN ...")`, written as SQL.* [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
-- [ ] **where.associated / where.missing** (R): Filter records with or without an associated record. [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
-- [ ] **includes** (R): Eager load associations (multiple/nested) to avoid N+1, choosing preload or join automatically. [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
+- [x] **where.associated / where.missing** (R): Filter records with or without an associated record. *Ocre: `Query::where_associated` / `where_missing`.* [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
+- [~] **includes** (R): Eager load associations (multiple/nested) to avoid N+1, choosing preload or join automatically. *Ocre: Generated `preload_<assoc>` loads associations in one query; no automatic choice.* [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
 - [x] **preload** (R): Eager load associations with separate queries. *Ocre: generated `preload_<targets>(ctx, &records)` and `for_<targets>(ctx, &ids)` per reference, plus `find_many`.* [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
 - [ ] **eager_load** (R): Eager load associations using a LEFT OUTER JOIN. [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
 - [-] **strict_loading / strict_loading!** (R): Raise or log on lazy loading for a relation, record, model, or app-wide (with :n_plus_one_only mode). *Not applicable: nothing loads lazily; associations are explicit calls, and lists use the generated `preload_<x>`/`for_<x>`.* [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
@@ -137,7 +137,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [ ] **default_scope** (R): Apply a scope to all queries of a model (optionally all_queries: true). [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
 - [x] **merge** (R): Combine scopes/relations, including from other models. *Ocre: `scope(f)` applies any function on a `Query`.* [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
 - [ ] **Block-level scoping** (R): Model.where(...).scoping { } applies a relation to all queries in the block (all_queries: true option). [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
-- [ ] **unscoped** (R): Remove all scoping including default_scope. [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
+- [~] **unscoped** (R): Remove all scoping including default_scope. *Ocre: `Query::unscope_where` / `unscope_limit`; no default scopes to remove.* [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
 - [x] **Enums** (R): enum maps integer/string columns to named values with predicates, bang setters, scopes, not-scopes, prefix/suffix, defaults, validation. *Ocre: `status:enum:draft,published` generates a Rust enum (serde, `ALL`, `as_str`, `FromStr`, `IntoParam`, default first value) stored as TEXT with a `CHECK`; scopes are `query().eq("status", Status::Draft)`. Not with `--graphql` yet.* [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
 - [x] **Calculations** (R): count, average, minimum, maximum, sum (grouped or not). *Ocre: `Query::count`, `aggregate(&db, "AVG(stars)")`, grouped via `select`+`group_by`.* [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
 - [~] **explain** (R): Show the DB query plan, with adapter options like :analyze and :verbose. *Ocre: `ocre sql "EXPLAIN QUERY PLAN ..."` on the local database; no `Query::explain`.* [active_record_querying](https://guides.rubyonrails.org/active_record_querying.html)
@@ -243,7 +243,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [ ] **Per-environment migration runs** (R): RAILS_ENV selects which database environment migrations run against. [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
 - [ ] **Migration output control** (R): suppress_messages, say, and say_with_time customize migration console output. [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
 - [x] **Migration version tracking** (R): schema_migrations table records applied versions; db:migrate:status shows state. [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
-- [ ] **Schema dump (schema.rb)** (R): Database-agnostic Ruby schema file authoritative for loading the DB via db:schema:load. [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
+- [x] **Schema dump (schema.rb)** (R): Database-agnostic Ruby schema file authoritative for loading the DB via db:schema:load. *Ocre: `ocre db schema` writes db/schema.sql from sqlite_master.* [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
 - [x] **SQL schema dump (structure.sql)** (R): schema_format = :sql dumps native SQL to preserve triggers, views, and DB-specific features. *Ocre: `ocre db schema [--remote]` writes db/schema.sql from sqlite_master.* [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
 - [x] **Seed data (db:seed)** (R): db/seeds.rb populates initial data, run via bin/rails db:seed. [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
 - [ ] **Old migration squashing** (R): Obsolete migration files can be deleted while schema file stays authoritative, with nonexistent-migration status reporting. [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
@@ -295,7 +295,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [~] **Sea-ORM entities plus model extension files** (L): Generated entities live in src/models/_entities (rewritten by db entities), and your own model methods go in src/models/<name>.rs. [loco/how-to/add-model](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/add-model.md)
 - [ ] **ConditionBuilder query DSL** (L): A fluent, chainable filter builder (query::condition()...build()) that produces a Sea-ORM Condition, with every operator also available as a free function. [loco/reference/query-pagination](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/query-pagination.md)
 - [x] **Query operators** (L): eq, ne, gt, gte, lt, lte, between, not_between, like, not_like, starts_with, ends_with, contains, is_null, is_not_null, is_in and is_not_in. *Ocre: same names on `ocre::Query` (`not_in`; `not(|q| q.between(..))`).* [loco/reference/query-pagination](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/query-pagination.md)
-- [ ] **Date-range filtering (DateRangeBuilder)** (L): Filters by date with optional from/to bounds: a single bound is exclusive, and two bounds form an inclusive BETWEEN. [loco/reference/query-pagination](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/query-pagination.md)
+- [x] **Date-range filtering (DateRangeBuilder)** (L): Filters by date with optional from/to bounds: a single bound is exclusive, and two bounds form an inclusive BETWEEN. *Ocre: `Query::date_range(column, from, to)`.* [loco/reference/query-pagination](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/query-pagination.md)
 - [x] **SortDirection** (L): An asc/desc enum that deserializes from a query string and converts to a Sea-ORM Order for order_by. *Ocre: `ocre::Direction` with `Query::order_by`.* [loco/how-to/query-data](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/query-data.md)
 - [ ] **Pagination of pre-built selectors (fetch_page)** (L): Pages any selector that implements PaginatorTrait, including ones that already have joins, filters and ordering. [loco/how-to/paginate](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/paginate.md)
 - [x] **Page response envelopes** (L): PageResponse<T> holds the rows plus PagerMeta (page, page_size, total_pages, total_items), and scaffolds return a flat, ts-exported Page<T> built with Page::from_query. *Ocre: `ocre::Paginated<T>` from `Query::paginate` (items, total, limit, offset, page helpers).* [loco/how-to/paginate](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/paginate.md)
@@ -306,9 +306,9 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 ### Data
 
-- [ ] **YAML fixture seeding** (L): Per-table YAML fixtures in src/fixtures are loaded with db::seed::<ActiveModel> inside Hooks::seed, which also resets auto-increment sequences. [loco/how-to/seed-data](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/seed-data.md)
+- [x] **YAML fixture seeding** (L): Per-table YAML fixtures in src/fixtures are loaded with db::seed::<ActiveModel> inside Hooks::seed, which also resets auto-increment sequences. *Ocre: db/fixtures/*.yml loaded by `ocre db seed`, labels and references resolved.* [loco/how-to/seed-data](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/seed-data.md)
 - [~] **cargo loco db seed** (L): Seeds the database from fixtures, with --reset to clear data first and --from to read a different folder. [loco/how-to/seed-data](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/seed-data.md)
-- [ ] **Dump data to fixtures** (L): `db seed --dump` or `--dump-tables` exports live tables to YAML through Hooks::dump, which can be overridden with the typed, streaming db::dump. [loco/how-to/seed-data](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/seed-data.md)
+- [x] **Dump data to fixtures** (L): `db seed --dump` or `--dump-tables` exports live tables to YAML through Hooks::dump, which can be overridden with the typed, streaming db::dump. *Ocre: `ocre db dump` writes db/fixtures/<table>.yml.* [loco/how-to/seed-data](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/seed-data.md)
 - [~] **Truncate hook** (L): Hooks::truncate chooses which tables to clear (with truncate_table) when dangerously_truncate runs, for example before tests. *Ocre: `ocre db truncate` empties every app table of the local database; no per-table hook.* [loco/how-to/model-tests](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/model-tests.md)
 - [ ] **Static data loaders** (L): Read-only JSON data in data/<name> is loaded once into memory (get), or re-read from disk (read), via load_json_file, and the folder can be changed with LOCO_DATA. [loco/how-to/load-data](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/load-data.md)
 
@@ -842,31 +842,31 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** Translations compiled into the binary (no filesystem at runtime). Time zones and formatting in Rust crates that compile to wasm32.
 
-22 features: 7 done, 3 partial, 12 to do, 0 not applicable.
+22 features: 21 done, 0 partial, 0 to do, 1 not applicable.
 
 ### I18n
 
 - [x] **Locale dictionaries** (R): YAML/Ruby locale files under `config/locales` define nested translation keys per locale, organized in subdirectories. [i18n](https://guides.rubyonrails.org/i18n.html)
 - [x] **Translation helper t / I18n.t** (R): `t`/`translate` looks up translations in views, controllers and models, with missing-translation markup. [i18n](https://guides.rubyonrails.org/i18n.html)
 - [x] **Interpolation** (R): `%{var}` placeholders in translations are filled from passed options. [i18n](https://guides.rubyonrails.org/i18n.html)
-- [ ] **Localization of dates and times** (R): `l`/`I18n.l` formats dates/times with locale-defined formats. [i18n](https://guides.rubyonrails.org/i18n.html)
-- [ ] **Localized views** (R): Templates like `index.es.html.erb` are selected automatically for the current locale. [i18n](https://guides.rubyonrails.org/i18n.html)
-- [ ] **Locale-specific inflections** (R): Inflection rules can be defined per locale for pluralize/singularize. [i18n](https://guides.rubyonrails.org/i18n.html)
+- [x] **Localization of dates and times** (R): `l`/`I18n.l` formats dates/times with locale-defined formats. *Ocre: `i18n.l(value, "long")` reads `date.formats.*`/`time.formats.*` (or takes a `%` pattern), with month/day names built in for en, fr, de, es, it, pt, nl and overridable in locale files.* [i18n](https://guides.rubyonrails.org/i18n.html)
+- [x] **Localized views** (R): Templates like `index.es.html.erb` are selected automatically for the current locale. *Ocre: askama templates are compiled structs, so the handler picks one with `match i18n.locale() { .. }`; strings go through `t`.* [i18n](https://guides.rubyonrails.org/i18n.html)
+- [x] **Locale-specific inflections** (R): Inflection rules can be defined per locale for pluralize/singularize. *Ocre: no runtime inflector; plural forms of words are translation keys (`models.post.one`/`other`, CLDR rules per language).* [i18n](https://guides.rubyonrails.org/i18n.html)
 - [x] **Per-request locale switching** (R): `I18n.with_locale` in an around_action sets locale from params, URL path scopes, domain, user preferences, Accept-Language header or session. [i18n](https://guides.rubyonrails.org/i18n.html)
-- [~] **Locale in generated URLs** (R): `default_url_options` and `scope "(:locale)"` routes preserve the locale across links. [i18n](https://guides.rubyonrails.org/i18n.html)
+- [x] **Locale in generated URLs** (R): `default_url_options` and `scope "(:locale)"` routes preserve the locale across links. *Ocre: routes nested under `/{locale}` and links built with `i18n.path("/posts")` (`/fr/posts`).* [i18n](https://guides.rubyonrails.org/i18n.html)
 - [x] **Scoped and nested key lookup** (R): Keys resolve with dotted paths or `scope:` options. [i18n](https://guides.rubyonrails.org/i18n.html)
-- [~] **Translation defaults** (R): `default:` provides fallback strings or alternative keys when a translation is missing. [i18n](https://guides.rubyonrails.org/i18n.html)
-- [ ] **Bulk and namespace lookup** (R): Look up multiple keys at once or return an entire namespace hash. [i18n](https://guides.rubyonrails.org/i18n.html)
-- [ ] **Lazy lookup** (R): Keys starting with `.` resolve relative to the current view/controller action path. [i18n](https://guides.rubyonrails.org/i18n.html)
+- [x] **Translation defaults** (R): `default:` provides fallback strings or alternative keys when a translation is missing. *Ocre: `t(key).or_key("other.key").or("Text")`, plus `i18n.exists(key)`.* [i18n](https://guides.rubyonrails.org/i18n.html)
+- [x] **Bulk and namespace lookup** (R): Look up multiple keys at once or return an entire namespace hash. *Ocre: `i18n.namespace("editor")` returns the relative keys and texts under a prefix.* [i18n](https://guides.rubyonrails.org/i18n.html)
+- [x] **Lazy lookup** (R): Keys starting with `.` resolve relative to the current view/controller action path. *Ocre: the handler sets the path with `i18n.scope("posts.index")`, then `t(".title")`.* [i18n](https://guides.rubyonrails.org/i18n.html)
 - [x] **Pluralization** (R): `count:` selects plural forms (zero/one/other and locale-specific rules via rails-i18n). [i18n](https://guides.rubyonrails.org/i18n.html)
-- [ ] **Explicit locale passing** (R): `locale:` option on t/l and `I18n.locale=`/`default_locale` control the active locale. [i18n](https://guides.rubyonrails.org/i18n.html)
-- [ ] **Safe HTML translations** (R): Keys ending in `_html` or `.html` are marked html_safe with escaped interpolations. [i18n](https://guides.rubyonrails.org/i18n.html)
-- [ ] **Model and attribute name translations** (R): `human_attribute_name` and `model_name.human` use `activerecord.models/attributes` keys. [i18n](https://guides.rubyonrails.org/i18n.html)
-- [ ] **Validation error message translations** (R): Error messages resolve through model/attribute-specific scopes with interpolation of attribute, value and count. [i18n](https://guides.rubyonrails.org/i18n.html)
-- [ ] **Built-in framework translations** (R): Mailer subjects, form helper labels/submit buttons, view helpers (number/date/distance_of_time), Active Model and Active Support (to_sentence, etc.) use translatable keys. [i18n](https://guides.rubyonrails.org/i18n.html)
-- [~] **Load paths and available locales config** (R): Configure `i18n.load_path`, `default_locale`, `available_locales` and fallbacks. [i18n](https://guides.rubyonrails.org/i18n.html)
-- [ ] **Custom translation storage** (R): Store translations in custom locations or formats (e.g. Ruby hashes, lambdas). [i18n](https://guides.rubyonrails.org/i18n.html)
-- [ ] **Alternate I18n backends** (R): Swap or chain backends (e.g. KeyValue, ActiveRecord, Chain) for translation storage. [i18n](https://guides.rubyonrails.org/i18n.html)
+- [x] **Explicit locale passing** (R): `locale:` option on t/l and `I18n.locale=`/`default_locale` control the active locale. *Ocre: `i18n.in_locale("de")` and `LOCALES.locale(code)`; the default locale is the first code of `ocre::locales!`.* [i18n](https://guides.rubyonrails.org/i18n.html)
+- [x] **Safe HTML translations** (R): Keys ending in `_html` or `.html` are marked html_safe with escaped interpolations. *Ocre: explicit `t(key).arg(..).html()`, askama-safe, values escaped.* [i18n](https://guides.rubyonrails.org/i18n.html)
+- [x] **Model and attribute name translations** (R): `human_attribute_name` and `model_name.human` use `activerecord.models/attributes` keys. *Ocre: `i18n.model_name("post", n)` and `i18n.attribute("post", "title")` read `models.*`/`attributes.*`, falling back to the humanized name.* [i18n](https://guides.rubyonrails.org/i18n.html)
+- [x] **Validation error message translations** (R): Error messages resolve through model/attribute-specific scopes with interpolation of attribute, value and count. *Ocre: each check records Rails' key; `i18n.error_message`/`full_message("post", &error)` resolve `errors.models.*`, `errors.attributes.*`, `errors.messages.*` with `%{attribute}`, `%{model}`, `%{count}` (no `%{value}`: errors do not keep the input).* [i18n](https://guides.rubyonrails.org/i18n.html)
+- [x] **Built-in framework translations** (R): Mailer subjects, form helper labels/submit buttons, view helpers (number/date/distance_of_time), Active Model and Active Support (to_sentence, etc.) use translatable keys. *Ocre: validation messages, date/time names and formats, number formats and `distance_in_words` compiled in for en, fr, de, es, it, pt, nl (app keys win); mailer subjects and form labels are generated app code translated with `t`.* [i18n](https://guides.rubyonrails.org/i18n.html)
+- [x] **Load paths and available locales config** (R): Configure `i18n.load_path`, `default_locale`, `available_locales` and fallbacks. *Ocre: `ocre::locales!("en", "fr")` lists the files (`locales/<code>.yml`) and available locales, the first is the default; fallbacks go to the default locale, then the built-in translations.* [i18n](https://guides.rubyonrails.org/i18n.html)
+- [x] **Custom translation storage** (R): Store translations in custom locations or formats (e.g. Ruby hashes, lambdas). *Ocre: `Catalog::load` takes any `(code, text)` pairs of `&'static str` (generated constants, other `include_str!` files).* [i18n](https://guides.rubyonrails.org/i18n.html)
+- [-] **Alternate I18n backends** (R): Swap or chain backends (e.g. KeyValue, ActiveRecord, Chain) for translation storage. *Not applicable: KV or D1-backed translations would cost a billed read per request and escape `ocre i18n missing`; the only chain is app files, then built-in translations.* [i18n](https://guides.rubyonrails.org/i18n.html)
 - [x] **Missing translation handling** (R): Custom exception handlers and `raise_on_missing_translations` control behavior for missing keys. [i18n](https://guides.rubyonrails.org/i18n.html)
 
 ## Errors, logging and debugging

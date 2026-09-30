@@ -227,7 +227,7 @@ fn add_columns(table: &str, fields: &[Field]) -> Result<String, CliError> {
         }
         // Existing rows need a value for NOT NULL columns.
         let default = match (&field.enumeration, field.ty) {
-            _ if field.optional || field.ty == FieldType::Boolean => String::new(),
+            _ if field.optional || matches!(field.ty, FieldType::Boolean | FieldType::LockVersion) => String::new(),
             (Some(enumeration), _) => format!(" DEFAULT '{}'", enumeration.values[0]),
             _ if field.ty.is_textual() => " DEFAULT ''".to_owned(),
             (_, FieldType::Json) => " DEFAULT '{}'".to_owned(),

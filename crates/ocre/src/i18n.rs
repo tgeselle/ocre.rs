@@ -56,7 +56,17 @@
 //! In templates, translations are [`Display`](std::fmt::Display) values that
 //! askama writes (escaped) straight into the page:
 //! `<p>{{ i18n.t("posts.greeting").arg("name", user.name) }}</p>`. Never mark
-//! them `|safe`.
+//! them `|safe`; for a translation containing markup, end with
+//! [`.html()`](Translation::html), which escapes the values only.
+//!
+//! Beyond `t`: [`I18n::l`] formats dates and times, [`I18n::number`] and
+//! [`I18n::currency`] numbers, [`I18n::model_name`] and [`I18n::attribute`]
+//! name models and fields, [`I18n::error_message`] translates validation
+//! errors, and [`I18n::time_ago_in_words`] durations. Their texts come from
+//! the app's files first, then from built-in translations (compiled in, no
+//! parsing) for English, French, German, Spanish, Italian, Portuguese and
+//! Dutch, under the rails-i18n keys (`date.formats.short`,
+//! `errors.messages.blank`...).
 //!
 //! The files are parsed once per Worker instance, on the first translation,
 //! by a small parser for this YAML subset; lookups are a `BTreeMap` search.
@@ -68,6 +78,9 @@
 //! `translation missing: fr.posts.created` instead, so gaps are visible.
 //! `ocre i18n missing` lists them (see [`check`]).
 
+mod builtin;
+mod format;
+mod model;
 mod plural;
 mod yaml;
 
@@ -342,7 +355,7 @@ impl Catalog {
     /// assert_eq!(LOCALES.locale("de").locale(), "en");
     /// ```
     pub fn locale(&'static self, code: &str) -> I18n {
-        I18n { catalog: self, index: self.find(code).unwrap_or(0) }
+        I18n { catalog: self, index: self.find(code).unwrap_or(0), scope: "" }
     }
 
     fn find(&self, code: &str) -> Option<usize> {
@@ -370,16 +383,6 @@ impl Catalog {
                 self.tables.iter().position(|table| primary(table.code).eq_ignore_ascii_case(language))
             })
         })
-    }
-
-    /// The text for `key` in locale `index`: the locale's own, else (unless
-    /// `strict`) the default locale's.
-    fn lookup(&'static self, index: usize, key: &str, count: Option<i64>, strict: bool) -> Option<&'static str> {
-        let own = self.tables[index].get(key, count);
-        if own.is_some() || strict || index == 0 {
-            return own;
-        }
-        self.tables[0].get(key, count)
     }
 }
 
@@ -576,6 +579,8 @@ pub fn check(sources: &[(&str, &str)]) -> Vec<Problem> {
 pub struct I18n {
     catalog: &'static Catalog,
     index: usize,
+    /// Prefix of keys starting with `.`, set by [`scope`](Self::scope).
+    scope: &'static str,
 }
 
 impl fmt::Debug for I18n {
@@ -631,7 +636,160 @@ impl I18n {
     /// assert_eq!(i18n.t("posts.created").to_string(), "Post was successfully created.");
     /// ```
     pub fn t<'a>(&self, key: &'a str) -> Translation<'a> {
-        Translation { i18n: *self, key, count: None, args: Vec::new() }
+        Translation {
+            i18n: *self,
+            key: self.resolve(key),
+            alternatives: Vec::new(),
+            default: None,
+            count: None,
+            args: Vec::new(),
+        }
+    }
+
+    /// Returns the same translations with `scope` as the prefix of keys starting with `.` (Rails' lazy lookup).
+    ///
+    /// `i18n.scope("posts.index").t(".title")` looks up `posts.index.title`;
+    /// keys without a leading dot stay absolute. Rails derives the scope from
+    /// the view's path; in Ocre, the handler sets it before passing `i18n` to
+    /// its template. A scope replaces the previous one.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::LazyLock;
+    /// static LOCALES: ocre::i18n::Locales = LazyLock::new(|| {
+    ///     ocre::i18n::Catalog::load(&[("en", "en:\n  app:\n    name: Blog\n  posts:\n    index:\n      title: Posts\n")])
+    /// });
+    /// let i18n = LOCALES.locale("en").scope("posts.index");
+    /// assert_eq!(i18n.t(".title").to_string(), "Posts");
+    /// assert_eq!(i18n.t("app.name").to_string(), "Blog");
+    /// ```
+    pub fn scope(&self, scope: &'static str) -> Self {
+        Self { scope, ..*self }
+    }
+
+    /// Returns the same translations in locale `code` (Rails' `locale:` option), keeping the scope.
+    ///
+    /// `code` matches like [`Catalog::locale`]: exactly, case-insensitively,
+    /// and an unknown code gives the default locale.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::LazyLock;
+    /// static LOCALES: ocre::i18n::Locales = LazyLock::new(|| {
+    ///     ocre::i18n::Catalog::load(&[("en", "en:\n  hello: Hello\n"), ("fr", "fr:\n  hello: Bonjour\n")])
+    /// });
+    /// let i18n = LOCALES.locale("en");
+    /// assert_eq!(i18n.in_locale("fr").t("hello").to_string(), "Bonjour");
+    /// assert_eq!(i18n.in_locale("de").locale(), "en");
+    /// ```
+    pub fn in_locale(&self, code: &str) -> Self {
+        Self { index: self.catalog.find(code).unwrap_or(0), ..*self }
+    }
+
+    /// Whether `key` has a translation: in the locale, the default locale or the built-in translations.
+    ///
+    /// Keys starting with `.` are relative to the [`scope`](Self::scope).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::LazyLock;
+    /// static LOCALES: ocre::i18n::Locales =
+    ///     LazyLock::new(|| ocre::i18n::Catalog::load(&[("en", "en:\n  posts:\n    title: Posts\n")]));
+    /// let i18n = LOCALES.locale("en");
+    /// assert!(i18n.exists("posts.title"));
+    /// assert!(i18n.exists("errors.messages.blank"), "built in");
+    /// assert!(!i18n.exists("posts"), "a namespace is not a translation");
+    /// ```
+    pub fn exists(&self, key: &str) -> bool {
+        self.lookup(&[&self.resolve(key)], None, false).is_some()
+    }
+
+    /// Returns every translation under `prefix`, by key relative to it (Rails' namespace lookup).
+    ///
+    /// Nested keys keep their dots (`form.submit`); plural keys give their
+    /// `other` form. Only the app's files are read. Release builds add the
+    /// default locale's keys missing from the locale, as [`t`](Self::t) falls
+    /// back to them. Keys starting with `.` are relative to the
+    /// [`scope`](Self::scope). Handy to hand a group of texts to JavaScript:
+    /// `Json(i18n.namespace("editor"))`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::LazyLock;
+    /// static LOCALES: ocre::i18n::Locales = LazyLock::new(|| {
+    ///     ocre::i18n::Catalog::load(&[("en", "en:\n  editor:\n    bold: Bold\n    link:\n      title: Link\n  other: x\n")])
+    /// });
+    /// let texts = LOCALES.locale("en").namespace("editor");
+    /// assert_eq!(texts.into_iter().collect::<Vec<_>>(), [("bold", "Bold"), ("link.title", "Link")]);
+    /// ```
+    pub fn namespace(&self, prefix: &str) -> BTreeMap<&'static str, &'static str> {
+        self.namespace_in(prefix, cfg!(debug_assertions))
+    }
+
+    fn namespace_in(&self, prefix: &str, strict: bool) -> BTreeMap<&'static str, &'static str> {
+        let start = format!("{}.", self.resolve(prefix));
+        let mut texts = BTreeMap::new();
+        let tables = if strict || self.index == 0 { &[self.index][..] } else { &[0, self.index][..] };
+        for &index in tables {
+            let table: &'static Table = &self.catalog.tables[index];
+            for (key, _) in table.values.range(start.clone()..).take_while(|(key, _)| key.starts_with(&start)) {
+                if let Some(text) = table.get(key, None) {
+                    texts.insert(&key[start.len()..], text);
+                }
+            }
+        }
+        texts
+    }
+
+    /// Prefixes `path` with the locale, for routes nested under `/{locale}` (Rails' `default_url_options`).
+    ///
+    /// `i18n.path("/posts")` is `/fr/posts` for French visitors, so links
+    /// keep the locale; `"/"` gives `/fr`. Use it in templates:
+    /// `<a href="{{ i18n.path("/posts") }}">`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::LazyLock;
+    /// static LOCALES: ocre::i18n::Locales =
+    ///     LazyLock::new(|| ocre::i18n::Catalog::load(&[("en", "en:\n"), ("fr", "fr:\n")]));
+    /// let i18n = LOCALES.locale("fr");
+    /// assert_eq!(i18n.path("/posts/3"), "/fr/posts/3");
+    /// assert_eq!(i18n.path("/"), "/fr");
+    /// ```
+    pub fn path(&self, path: &str) -> String {
+        match path.trim_start_matches('/') {
+            "" => format!("/{}", self.locale()),
+            rest => format!("/{}/{rest}", self.locale()),
+        }
+    }
+
+    /// `.title` with the scope `posts.index` is `posts.index.title`.
+    fn resolve<'a>(&self, key: &'a str) -> Cow<'a, str> {
+        match key.strip_prefix('.') {
+            Some(rest) if !self.scope.is_empty() => Cow::Owned(format!("{}.{rest}", self.scope)),
+            Some(rest) => Cow::Borrowed(rest),
+            None => Cow::Borrowed(key),
+        }
+    }
+
+    /// The first of `keys` found in: the locale's file, the built-in
+    /// translations of its language, then (unless `strict`) the default
+    /// locale's file and its built-in translations, then built-in English.
+    fn lookup(&self, keys: &[&str], count: Option<i64>, strict: bool) -> Option<&'static str> {
+        let catalog: &'static Catalog = self.catalog;
+        let own = &catalog.tables[self.index];
+        let default = &catalog.tables[0];
+        let app = |table: &'static Table| keys.iter().find_map(|key| table.get(key, count));
+        let built_in = |code: &str| keys.iter().find_map(|key| builtin::get(code, key, count));
+        app(own)
+            .or_else(|| built_in(own.code))
+            .or_else(|| if strict { None } else { app(default).or_else(|| built_in(default.code)) })
+            .or_else(|| built_in("en"))
     }
 
     /// Returns a `Set-Cookie` value remembering this locale for a year.
@@ -676,7 +834,7 @@ impl I18n {
     /// The locale of a request: path segment, cookie, `Accept-Language`, default.
     fn select(catalog: &'static Catalog, path: Option<&str>, headers: &HeaderMap) -> Result<Self> {
         if let Some(code) = path {
-            return catalog.find(code).map(|index| Self { catalog, index }).ok_or(Error::NotFound);
+            return catalog.find(code).map(|index| Self { catalog, index, scope: "" }).ok_or(Error::NotFound);
         }
         let cookie = headers
             .get_all(header::COOKIE)
@@ -691,7 +849,7 @@ impl I18n {
                 catalog.negotiate(accept)
             })
             .unwrap_or(0);
-        Ok(Self { catalog, index })
+        Ok(Self { catalog, index, scope: "" })
     }
 }
 
@@ -740,7 +898,9 @@ impl<S: Send + Sync> FromRequestParts<S> for I18n {
 #[derive(Debug, Clone)]
 pub struct Translation<'a> {
     i18n: I18n,
-    key: &'a str,
+    key: Cow<'a, str>,
+    alternatives: Vec<Cow<'a, str>>,
+    default: Option<Cow<'a, str>>,
     count: Option<i64>,
     args: Vec<(&'a str, String)>,
 }
@@ -786,27 +946,165 @@ impl<'a> Translation<'a> {
         self
     }
 
-    fn write(&self, f: &mut fmt::Formatter<'_>, strict: bool) -> fmt::Result {
-        let I18n { catalog, index } = self.i18n;
-        let Some(text) = catalog.lookup(index, self.key, self.count, strict) else {
-            return write!(f, "translation missing: {}.{}", self.i18n.locale(), self.key);
-        };
-        let mut rest = text;
-        while let Some(start) = rest.find("%{") {
-            let Some(len) = rest[start..].find('}') else { break };
-            f.write_str(&rest[..start])?;
-            let name = &rest[start + 2..start + len];
-            match self.args.iter().find(|(arg, _)| *arg == name) {
-                Some((_, value)) => f.write_str(value)?,
-                None => match self.count {
-                    Some(count) if name == "count" => write!(f, "{count}")?,
-                    _ => f.write_str(&rest[start..=start + len])?,
-                },
-            }
-            rest = &rest[start + len + 1..];
-        }
-        f.write_str(rest)
+    /// Tries another key when this one has no translation (Rails' `default: :"other.key"`).
+    ///
+    /// Alternatives are tried in the order given, each like the first key
+    /// (locale, then default locale in release builds); a leading `.` is
+    /// relative to the [`scope`](I18n::scope).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::LazyLock;
+    /// static LOCALES: ocre::i18n::Locales =
+    ///     LazyLock::new(|| ocre::i18n::Catalog::load(&[("en", "en:\n  actions:\n    save: Save\n")]));
+    /// let i18n = LOCALES.locale("en");
+    /// assert_eq!(i18n.t("posts.form.save").or_key("actions.save").to_string(), "Save");
+    /// ```
+    pub fn or_key(mut self, key: &'a str) -> Self {
+        self.alternatives.push(self.i18n.resolve(key));
+        self
     }
+
+    /// Uses `text` when neither the key nor its alternatives have a translation (Rails' `default: "text"`).
+    ///
+    /// It replaces `translation missing: ...` in every build (debug builds
+    /// included, where a key missing from the locale shows `text` rather
+    /// than the default locale's translation). `%{name}` placeholders in
+    /// `text` are filled like in a translation.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::LazyLock;
+    /// static LOCALES: ocre::i18n::Locales = LazyLock::new(|| ocre::i18n::Catalog::load(&[("en", "en:\n")]));
+    /// let i18n = LOCALES.locale("en");
+    /// assert_eq!(i18n.t("posts.empty").or("No posts yet, %{name}").arg("name", "Ada").to_string(), "No posts yet, Ada");
+    /// ```
+    pub fn or(mut self, text: impl Into<Cow<'a, str>>) -> Self {
+        self.default = Some(text.into());
+        self
+    }
+
+    /// Marks the translation as HTML: its text is written as is, the values of [`arg`](Self::arg) escaped.
+    ///
+    /// Rails' `_html` keys: for translations containing markup, such as
+    /// `terms: "I accept the <a href=\"/terms\">terms</a>, %{name}"`. askama
+    /// writes the result without escaping it again (feature `html`); the
+    /// `%{name}` values are escaped, so user input stays text. Use it only
+    /// for keys whose text you wrote, never for text from users.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::LazyLock;
+    /// static LOCALES: ocre::i18n::Locales = LazyLock::new(|| {
+    ///     ocre::i18n::Catalog::load(&[("en", "en:\n  welcome: \"Hello <b>%{name}</b>\"\n")])
+    /// });
+    /// let i18n = LOCALES.locale("en");
+    /// assert_eq!(i18n.t("welcome").arg("name", "<script>").html().to_string(), "Hello <b>&lt;script&gt;</b>");
+    /// ```
+    pub fn html(self) -> HtmlTranslation<'a> {
+        HtmlTranslation(self)
+    }
+
+    fn write(&self, f: &mut fmt::Formatter<'_>, strict: bool) -> fmt::Result {
+        self.write_with(f, strict, false)
+    }
+
+    fn write_with(&self, f: &mut fmt::Formatter<'_>, strict: bool, escape: bool) -> fmt::Result {
+        let mut keys = Vec::with_capacity(1 + self.alternatives.len());
+        keys.push(self.key.as_ref());
+        keys.extend(self.alternatives.iter().map(AsRef::as_ref));
+        let text = match (self.i18n.lookup(&keys, self.count, strict), &self.default) {
+            (Some(text), _) => text,
+            (None, Some(default)) => default,
+            (None, None) => return write!(f, "translation missing: {}.{}", self.i18n.locale(), self.key),
+        };
+        interpolate(f, text, &self.args, self.count, escape)
+    }
+}
+
+/// Writes `text` with each `%{name}` replaced by its value in `args` (or
+/// `count` for `%{count}`), HTML-escaped when `escape`; a placeholder without
+/// a value stays as written.
+fn interpolate(
+    out: &mut impl fmt::Write,
+    text: &str,
+    args: &[(&str, String)],
+    count: Option<i64>,
+    escape: bool,
+) -> fmt::Result {
+    let mut rest = text;
+    while let Some(start) = rest.find("%{") {
+        let Some(len) = rest[start..].find('}') else { break };
+        out.write_str(&rest[..start])?;
+        let name = &rest[start + 2..start + len];
+        match args.iter().find(|(arg, _)| *arg == name) {
+            Some((_, value)) if escape => write_escaped(out, value)?,
+            Some((_, value)) => out.write_str(value)?,
+            None => match count {
+                Some(count) if name == "count" => write!(out, "{count}")?,
+                _ => out.write_str(&rest[start..=start + len])?,
+            },
+        }
+        rest = &rest[start + len + 1..];
+    }
+    out.write_str(rest)
+}
+
+fn write_escaped(out: &mut impl fmt::Write, text: &str) -> fmt::Result {
+    let mut done = 0;
+    for (at, c) in text.char_indices() {
+        let entity = match c {
+            '&' => "&amp;",
+            '<' => "&lt;",
+            '>' => "&gt;",
+            '"' => "&quot;",
+            '\'' => "&#39;",
+            _ => continue,
+        };
+        out.write_str(&text[done..at])?;
+        out.write_str(entity)?;
+        done = at + 1;
+    }
+    out.write_str(&text[done..])
+}
+
+/// A [`Translation`] written as HTML, from [`Translation::html`]: the text as is, every value escaped.
+///
+/// askama writes it without escaping (it implements
+/// `askama::filters::HtmlSafe` with the `html` feature), so
+/// `{{ i18n.t("terms").arg("name", user.name).html() }}` keeps the
+/// translation's markup while `user.name` stays text.
+///
+/// # Examples
+///
+/// ```
+/// # use std::sync::LazyLock;
+/// static LOCALES: ocre::i18n::Locales =
+///     LazyLock::new(|| ocre::i18n::Catalog::load(&[("en", "en:\n  note: \"<em>%{text}</em>\"\n")]));
+/// let html = LOCALES.locale("en").t("note").arg("text", "a & b").html();
+/// assert_eq!(html.to_string(), "<em>a &amp; b</em>");
+/// ```
+#[derive(Debug, Clone)]
+pub struct HtmlTranslation<'a>(Translation<'a>);
+
+impl fmt::Display for HtmlTranslation<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.write_with(f, cfg!(debug_assertions), true)
+    }
+}
+
+#[cfg(feature = "html")]
+impl askama::filters::HtmlSafe for HtmlTranslation<'_> {}
+
+/// English `datetime.distance_in_words.<key>` for `count`, as [`helpers`](crate::helpers) writes it.
+pub(crate) fn english_distance(key: &str, count: i64) -> String {
+    let text = builtin::get("en", &format!("datetime.distance_in_words.{key}"), Some(count)).unwrap_or(key);
+    let mut out = String::new();
+    interpolate(&mut out, text, &[], Some(count), false).expect("writing to a String");
+    out
 }
 
 /// A number [`Translation::count`] accepts: every integer type, and references to them.

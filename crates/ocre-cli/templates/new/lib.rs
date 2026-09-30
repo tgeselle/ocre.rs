@@ -46,8 +46,9 @@ fn content_security_policy() -> ContentSecurityPolicy {
     ContentSecurityPolicy::new()
         .default_src(&[SELF])
         .script_src(&[SELF, "https://unpkg.com"])
-        // The layout's <style> and htmx's indicator styles are inline.
-        .style_src(&[SELF, UNSAFE_INLINE])
+        // The layout's <style> and htmx's indicator styles are inline; unpkg.com
+        // serves the Trix editor's stylesheet (`rich_text` fields).
+        .style_src(&[SELF, UNSAFE_INLINE, "https://unpkg.com"])
         .img_src(&[SELF, DATA, HTTPS])
         .font_src(&[SELF, DATA])
         .object_src(&[NONE])

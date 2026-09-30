@@ -174,3 +174,70 @@ fn paginated_navigation() {
     assert_eq!(shifted.previous_page(), Some(Page { limit: 10, offset: 0 }));
     assert_eq!(first.map(|n| n.to_string()).items, ["1", "2"]);
 }
+
+#[test]
+fn associated_and_missing_use_exists_subqueries() {
+    let stmt = posts().where_associated("comments", "post_id").where_missing("likes", "post_id").to_statement();
+    assert_eq!(
+        stmt.sql,
+        "SELECT * FROM posts WHERE EXISTS (SELECT 1 FROM comments WHERE comments.post_id = posts.id) \
+         AND NOT EXISTS (SELECT 1 FROM likes WHERE likes.post_id = posts.id)"
+    );
+}
+
+#[test]
+fn date_ranges_are_exclusive_with_one_bound_and_inclusive_with_two() {
+    let sql = |from: Option<&str>, to: Option<&str>| posts().date_range("at", from, to).to_statement().sql;
+    assert_eq!(sql(Some("a"), Some("b")), "SELECT * FROM posts WHERE at BETWEEN ?1 AND ?2");
+    assert_eq!(sql(Some("a"), None), "SELECT * FROM posts WHERE at > ?1");
+    assert_eq!(sql(None, Some("b")), "SELECT * FROM posts WHERE at < ?1");
+    assert_eq!(sql(None, None), "SELECT * FROM posts");
+}
+
+#[test]
+fn unscoping_drops_conditions_or_limits() {
+    let query = posts().eq("a", 1).order_desc("id").limit(5).offset(10);
+    let stmt = query.clone().unscope_where().eq("b", 2).to_statement();
+    assert_eq!(stmt.sql, "SELECT * FROM posts WHERE b = ?1 ORDER BY id DESC LIMIT ?2 OFFSET ?3");
+    assert_eq!(stmt.params, params![2, 5, 10]);
+    assert_eq!(query.unscope_limit().to_statement().sql, "SELECT * FROM posts WHERE a = ?1 ORDER BY id DESC");
+}
+
+#[test]
+fn reverse_order_flips_each_term() {
+    let stmt = posts().order_asc("a").order_desc("b").order_in("c", ["x"]).reverse_order().to_statement();
+    assert_eq!(stmt.sql, "SELECT * FROM posts ORDER BY a DESC, b ASC, CASE c WHEN ?1 THEN 0 ELSE 1 END DESC");
+    assert_eq!(posts().reverse_order().to_statement().sql, "SELECT * FROM posts ORDER BY posts.id DESC");
+}
+
+#[test]
+fn explain_prefixes_the_select() {
+    let stmt = posts().eq("a", 1).explain_statement();
+    assert_eq!(stmt.sql, "EXPLAIN QUERY PLAN SELECT * FROM posts WHERE a = ?1");
+    assert_eq!(stmt.params, params![1]);
+}
+
+struct Row {
+    id: i64,
+}
+
+#[test]
+fn batches_walk_by_id_after_the_last_row() {
+    let mut batches = Query::<Row>::table("posts")
+        .eq("a", 1)
+        .order_desc("x")
+        .page(Page { limit: 1, offset: 3 })
+        .batches(2, |row| row.id);
+    let stmt = batches.statement();
+    assert_eq!(stmt.sql, "SELECT * FROM posts WHERE a = ?1 ORDER BY posts.id ASC LIMIT ?2");
+    assert_eq!(stmt.params, params![1, 2]);
+    batches.advance(&[Row { id: 4 }, Row { id: 8 }]);
+    assert_eq!((batches.after(), batches.is_done()), (Some(8), false));
+    let stmt = batches.statement();
+    assert_eq!(stmt.sql, "SELECT * FROM posts WHERE a = ?1 AND posts.id > ?2 ORDER BY posts.id ASC LIMIT ?3");
+    assert_eq!(stmt.params, params![1, 8, 2]);
+    batches.advance(&[]);
+    assert_eq!((batches.after(), batches.is_done()), (Some(8), true));
+    let resumed = Query::<Row>::table("posts").batches(0, |row| row.id).resume_after(Some(3));
+    assert_eq!(resumed.statement().params, params![3, 1]);
+}

@@ -40,6 +40,8 @@
 //! | `{{ post.body\|excerpt(q, 40) }}` | `...around the match...` | [`excerpt`](crate::helpers::excerpt) |
 //! | `{{ post.body\|highlight(q) }}` | escaped text with `<mark>` | [`highlight`](crate::helpers::highlight) |
 //! | `{{ post.body\|word_wrap(72) }}` | lines of at most 72 characters | [`word_wrap`](crate::helpers::word_wrap) |
+//! | `{{ post.body\|rich_text }}` | the HTML of a `rich_text` field, sanitized | [`sanitize`](crate::security::sanitize) |
+//! | `{{ post.body\|plain_text\|truncate(80) }}` | its text, without tags | [`strip_tags`](crate::security::strip_tags) |
 //!
 //! askama's built-in filters cover the rest of Rails' text helpers:
 //! `truncate(n)`, `wordcount`, `linebreaks` / `linebreaksbr` /
@@ -116,6 +118,16 @@ pub fn highlight(value: impl Display, _: &dyn Values, phrase: &str) -> askama::R
 #[askama::filter_fn]
 pub fn word_wrap(value: impl Display, _: &dyn Values, width: usize) -> askama::Result<String> {
     Ok(helpers::word_wrap(value, width))
+}
+
+#[askama::filter_fn]
+pub fn rich_text(value: impl Display, _: &dyn Values) -> askama::Result<Safe<String>> {
+    Ok(Safe(crate::security::sanitize(&value.to_string())))
+}
+
+#[askama::filter_fn]
+pub fn plain_text(value: impl Display, _: &dyn Values) -> askama::Result<String> {
+    Ok(crate::security::strip_tags(&value.to_string()))
 }
 
 #[cfg(test)]

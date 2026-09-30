@@ -185,7 +185,7 @@ pub use fields::{optional, patch, patch_json};
 #[cfg_attr(docsrs, doc(cfg(feature = "html")))]
 pub use htmx::{Htmx, HxRedirect};
 pub use protect::{ALLOWED_HOSTS, ALLOWED_ORIGINS};
-pub use query::{Direction, Paginated, Query, escape_like};
+pub use query::{Batches, Direction, Paginated, Query, escape_like};
 pub use request::{Format, RemoteIp, RequestId, redirect_back, remote_ip};
 pub use runtime::{Ctx, Db, serve};
 /// JSON values (`serde_json::Value`, the `json!` macro) for `json` fields,

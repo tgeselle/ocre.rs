@@ -132,3 +132,14 @@ fn class_names_keep_the_enabled_ones() {
     assert_eq!(class_names(&[("a", true), ("", true), ("b", false), ("c", true)]), "a c");
     assert_eq!(class_names(&[("a", false)]), "");
 }
+
+#[test]
+fn current_page_compares_paths_then_query_and_host_when_given() {
+    assert!(current_page("/", "https://shop.example.com"));
+    assert!(current_page("/posts/1?tab=a", "/posts/1/"));
+    assert!(!current_page("/posts/1", "/posts/1?tab=a"));
+    assert!(!current_page("/posts", "/posts/1"));
+    assert!(current_page("https://Shop.example.com/", "https://shop.example.com/?"), "an empty query matches none");
+    assert!(!current_page("https://a.example/posts", "https://b.example/posts"));
+    assert_eq!(split_url("http://h?q#f"), (Some("h"), "/", Some("q")));
+}

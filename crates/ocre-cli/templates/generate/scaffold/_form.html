@@ -1,8 +1,18 @@
+<% if rich_text %>
+{# Trix, Action Text's editor (https://trix-editor.org): the model sanitizes its HTML when saving. #}
+<link rel="stylesheet" href="https://unpkg.com/trix@2.1.19/dist/trix.css">
+<script src="https://unpkg.com/trix@2.1.19/dist/trix.umd.min.js" crossorigin="anonymous"></script>
+<style>trix-toolbar [data-trix-button-group="file-tools"] { display: none; }</style>
+<% endif %>
 {% if !errors.is_empty() %}
   <ul class="errors">
     {% for error in errors %}<li>{{ error.full_message() }}</li>{% endfor %}
   </ul>
 {% endif %}
 <% for field in fields %>
+<% if field.hidden %>
+  <%= field.input %>
+<% else %>
   <label><%= field.label %> <%= field.input %></label>
+<% endif %>
 <% endfor %>

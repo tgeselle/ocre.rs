@@ -30,12 +30,26 @@ use crate::{Error, MAX_SAFE_INTEGER, names::humanize};
 /// assert_eq!(error.full_message(), "Published at is not a valid date");
 /// assert_eq!(error.to_string(), error.full_message());
 /// ```
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FieldError {
     /// Field name as in the form or JSON body (`"title"`, `"author_id"`).
     pub field: String,
     /// Message without the field name (`"can't be blank"`).
     pub message: String,
+    /// Rails' translation key of the check (`blank`, `too_long`...), for
+    /// [`I18n::error_message`](crate::i18n::I18n::error_message).
+    #[serde(skip)]
+    key: Option<&'static str>,
+    /// `%{count}` of the message (a bound), or the confirmed field of `confirmation`.
+    #[serde(skip)]
+    detail: Option<String>,
+}
+
+/// Compares the field and the message only, as they are what users see.
+impl PartialEq for FieldError {
+    fn eq(&self, other: &Self) -> bool {
+        self.field == other.field && self.message == other.message
+    }
 }
 
 impl FieldError {
@@ -48,7 +62,32 @@ impl FieldError {
     /// assert_eq!((error.field.as_str(), error.message.as_str()), ("title", "can't be blank"));
     /// ```
     pub fn new(field: impl Into<String>, message: impl Into<String>) -> Self {
-        Self { field: field.into(), message: message.into() }
+        Self { field: field.into(), message: message.into(), key: None, detail: None }
+    }
+
+    /// The Rails translation key of the check that failed (`"blank"`, `"too_long"`...), if any.
+    ///
+    /// Set by each [`Validator`] check; `None` for [`FieldError::new`],
+    /// [`Validator::check`] and after [`Validator::message`].
+    /// [`I18n::error_message`](crate::i18n::I18n::error_message) looks it up
+    /// under `errors.messages.<key>` (and more specific keys).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut v = ocre::Validator::new();
+    /// v.required("title", "").max_length("body", "long text", 3);
+    /// let keys: Vec<_> = v.errors().iter().map(|e| e.key()).collect();
+    /// assert_eq!(keys, [Some("blank"), Some("too_long")]);
+    /// assert_eq!(ocre::FieldError::new("title", "is odd").key(), None);
+    /// ```
+    pub fn key(&self) -> Option<&'static str> {
+        self.key
+    }
+
+    /// `%{count}` for the message, or the confirmed field of `confirmation`.
+    pub(crate) fn detail(&self) -> Option<&str> {
+        self.detail.as_deref()
     }
 
     /// The message prefixed with the humanized field name: `"Title can't be blank"`.
@@ -130,6 +169,23 @@ impl Validator {
         self
     }
 
+    /// [`check`](Self::check) recording Rails' translation `key` and the `%{count}` (or confirmed field) `detail`.
+    fn fail(
+        &mut self,
+        field: &str,
+        failed: bool,
+        key: &'static str,
+        detail: Option<&dyn fmt::Display>,
+        message: impl Into<String>,
+    ) -> &mut Self {
+        self.check(field, failed, message);
+        if failed && let Some(error) = self.errors.last_mut() {
+            error.key = Some(key);
+            error.detail = detail.map(ToString::to_string);
+        }
+        self
+    }
+
     /// Checks that `value` is not empty after trimming whitespace ("can't be blank").
     ///
     /// # Examples
@@ -142,7 +198,7 @@ impl Validator {
     /// assert_eq!(v.finish().unwrap_err().to_string(), "invalid: Body can't be blank");
     /// ```
     pub fn required(&mut self, field: &str, value: &str) -> &mut Self {
-        self.check(field, value.trim().is_empty(), "can't be blank")
+        self.fail(field, value.trim().is_empty(), "blank", None, "can't be blank")
     }
 
     /// Checks that `value` has at most `max` characters (Unicode scalar values, not bytes).
@@ -160,7 +216,7 @@ impl Validator {
     /// ```
     pub fn max_length(&mut self, field: &str, value: &str, max: usize) -> &mut Self {
         let too_long = value.chars().count() > max;
-        self.check(field, too_long, format!("is too long (maximum is {max} characters)"))
+        self.fail(field, too_long, "too_long", Some(&max), format!("is too long (maximum is {max} characters)"))
     }
 
     /// Checks that `value` has at least `min` characters (Unicode scalar values, not bytes).
@@ -176,7 +232,7 @@ impl Validator {
     /// ```
     pub fn min_length(&mut self, field: &str, value: &str, min: usize) -> &mut Self {
         let too_short = value.chars().count() < min;
-        self.check(field, too_short, format!("is too short (minimum is {min} characters)"))
+        self.fail(field, too_short, "too_short", Some(&min), format!("is too short (minimum is {min} characters)"))
     }
 
     /// Checks that `value` is within `range`, bounds included.
@@ -210,9 +266,15 @@ impl Validator {
         max: &dyn fmt::Display,
     ) -> &mut Self {
         if below {
-            self.check(field, true, format!("must be greater than or equal to {min}"))
+            self.fail(
+                field,
+                true,
+                "greater_than_or_equal_to",
+                Some(min),
+                format!("must be greater than or equal to {min}"),
+            )
         } else {
-            self.check(field, above, format!("must be less than or equal to {max}"))
+            self.fail(field, above, "less_than_or_equal_to", Some(max), format!("must be less than or equal to {max}"))
         }
     }
 
@@ -245,7 +307,7 @@ impl Validator {
     /// assert_eq!(v.finish().unwrap_err().to_string(), "invalid: Status is not included in the list");
     /// ```
     pub fn inclusion(&mut self, field: &str, value: &str, allowed: &[&str]) -> &mut Self {
-        self.check(field, !allowed.contains(&value), "is not included in the list")
+        self.fail(field, !allowed.contains(&value), "inclusion", None, "is not included in the list")
     }
 
     /// Checks that `value` is not one of `forbidden` ("is reserved"), like Rails' `exclusion`.
@@ -260,7 +322,7 @@ impl Validator {
     /// assert_eq!(v.finish().unwrap_err().to_string(), "invalid: Username is reserved");
     /// ```
     pub fn exclusion(&mut self, field: &str, value: &str, forbidden: &[&str]) -> &mut Self {
-        self.check(field, forbidden.contains(&value), "is reserved")
+        self.fail(field, forbidden.contains(&value), "exclusion", None, "is reserved")
     }
 
     /// Checks that `value` has exactly `length` characters (Unicode scalar
@@ -279,7 +341,8 @@ impl Validator {
     /// ```
     pub fn length(&mut self, field: &str, value: &str, length: usize) -> &mut Self {
         let wrong = value.chars().count() != length;
-        self.check(field, wrong, format!("is the wrong length (should be {length} characters)"))
+        let message = format!("is the wrong length (should be {length} characters)");
+        self.fail(field, wrong, "wrong_length", Some(&length), message)
     }
 
     /// Checks that `value > than` ("must be greater than N"), like Rails' `comparison`.
@@ -295,7 +358,7 @@ impl Validator {
     /// assert_eq!(v.finish().unwrap_err().to_string(), "invalid: Quantity must be greater than 0");
     /// ```
     pub fn greater_than<T: PartialOrd + fmt::Display>(&mut self, field: &str, value: T, than: T) -> &mut Self {
-        self.check(field, value <= than, format!("must be greater than {than}"))
+        self.fail(field, value <= than, "greater_than", Some(&than), format!("must be greater than {than}"))
     }
 
     /// Checks that `value >= min` ("must be greater than or equal to N").
@@ -313,7 +376,8 @@ impl Validator {
         value: T,
         min: T,
     ) -> &mut Self {
-        self.check(field, value < min, format!("must be greater than or equal to {min}"))
+        let message = format!("must be greater than or equal to {min}");
+        self.fail(field, value < min, "greater_than_or_equal_to", Some(&min), message)
     }
 
     /// Checks that `value < than` ("must be less than N").
@@ -326,7 +390,7 @@ impl Validator {
     /// assert_eq!(v.finish().unwrap_err().to_string(), "invalid: Discount must be less than 1");
     /// ```
     pub fn less_than<T: PartialOrd + fmt::Display>(&mut self, field: &str, value: T, than: T) -> &mut Self {
-        self.check(field, value >= than, format!("must be less than {than}"))
+        self.fail(field, value >= than, "less_than", Some(&than), format!("must be less than {than}"))
     }
 
     /// Checks that `value <= max` ("must be less than or equal to N").
@@ -339,7 +403,13 @@ impl Validator {
     /// assert_eq!(v.finish().unwrap_err().to_string(), "invalid: Seats must be less than or equal to 8");
     /// ```
     pub fn less_than_or_equal_to<T: PartialOrd + fmt::Display>(&mut self, field: &str, value: T, max: T) -> &mut Self {
-        self.check(field, value > max, format!("must be less than or equal to {max}"))
+        self.fail(
+            field,
+            value > max,
+            "less_than_or_equal_to",
+            Some(&max),
+            format!("must be less than or equal to {max}"),
+        )
     }
 
     /// Checks that `value != other` ("must be other than N").
@@ -352,7 +422,7 @@ impl Validator {
     /// assert_eq!(v.finish().unwrap_err().to_string(), "invalid: Parent must be other than 4");
     /// ```
     pub fn other_than<T: PartialEq + fmt::Display>(&mut self, field: &str, value: T, other: T) -> &mut Self {
-        self.check(field, value == other, format!("must be other than {other}"))
+        self.fail(field, value == other, "other_than", Some(&other), format!("must be other than {other}"))
     }
 
     /// Checks that `confirmation` equals `value`, like Rails' `confirmation`:
@@ -369,7 +439,7 @@ impl Validator {
     /// ```
     pub fn confirmation(&mut self, field: &str, value: &str, confirmation: &str) -> &mut Self {
         let message = format!("doesn't match {}", humanize(field));
-        self.check(&format!("{field}_confirmation"), value != confirmation, message)
+        self.fail(&format!("{field}_confirmation"), value != confirmation, "confirmation", Some(&field), message)
     }
 
     /// Checks that a checkbox was ticked ("must be accepted"), like Rails' `acceptance`.
@@ -385,7 +455,7 @@ impl Validator {
     /// assert_eq!(v.finish().unwrap_err().to_string(), "invalid: Terms of service must be accepted");
     /// ```
     pub fn acceptance(&mut self, field: &str, accepted: bool) -> &mut Self {
-        self.check(field, !accepted, "must be accepted")
+        self.fail(field, !accepted, "accepted", None, "must be accepted")
     }
 
     /// Checks that `value` is blank: empty or only whitespace ("must be blank"), like Rails' `absence`.
@@ -402,7 +472,7 @@ impl Validator {
     /// assert_eq!(v.finish().unwrap_err().to_string(), "invalid: Nickname must be blank");
     /// ```
     pub fn absence(&mut self, field: &str, value: &str) -> &mut Self {
-        self.check(field, !value.trim().is_empty(), "must be blank")
+        self.fail(field, !value.trim().is_empty(), "present", None, "must be blank")
     }
 
     /// Checks that every character of `value` passes `allowed` ("is invalid"):
@@ -423,7 +493,7 @@ impl Validator {
     /// ```
     pub fn format(&mut self, field: &str, value: &str, allowed: impl Fn(char) -> bool) -> &mut Self {
         let invalid = !value.chars().all(allowed);
-        self.check(field, invalid, "is invalid")
+        self.fail(field, invalid, "invalid", None, "is invalid")
     }
 
     /// Replaces the message of the check just before, if it failed (Rails' `message:` option).
@@ -443,6 +513,8 @@ impl Validator {
             && let Some(error) = self.errors.last_mut()
         {
             error.message = message.into();
+            error.key = None;
+            error.detail = None;
         }
         self
     }
@@ -477,7 +549,7 @@ impl Validator {
     /// assert_eq!(v.finish().unwrap_err().to_string(), "invalid: Email is invalid");
     /// ```
     pub fn email(&mut self, field: &str, value: &str) -> &mut Self {
-        self.check(field, !is_email(value), "is invalid")
+        self.fail(field, !is_email(value), "invalid", None, "is invalid")
     }
 
     /// Parses a required number typed as text (HTML forms), adding "is not a number" when it does not parse.
@@ -495,7 +567,7 @@ impl Validator {
     /// ```
     pub fn number<T: FromStr>(&mut self, field: &str, text: &str) -> Option<T> {
         let parsed = text.trim().parse().ok();
-        self.check(field, parsed.is_none(), "is not a number");
+        self.fail(field, parsed.is_none(), "not_a_number", None, "is not a number");
         parsed
     }
 
@@ -543,7 +615,7 @@ impl Validator {
     /// ```
     pub fn one_of<T: FromStr>(&mut self, field: &str, text: &str) -> Option<T> {
         let parsed = text.parse().ok();
-        self.check(field, parsed.is_none(), "is not included in the list");
+        self.fail(field, parsed.is_none(), "inclusion", None, "is not included in the list");
         parsed
     }
 
@@ -575,7 +647,7 @@ impl Validator {
     /// ```
     pub fn json(&mut self, field: &str, text: &str) -> Option<serde_json::Value> {
         let parsed = serde_json::from_str(text).ok();
-        self.check(field, parsed.is_none(), "is not valid JSON");
+        self.fail(field, parsed.is_none(), "not_json", None, "is not valid JSON");
         parsed
     }
 
@@ -608,7 +680,7 @@ impl Validator {
     /// assert_eq!(v.finish().unwrap_err().to_string(), "invalid: Born on is not a valid date");
     /// ```
     pub fn date(&mut self, field: &str, value: &str) -> &mut Self {
-        self.check(field, !is_date(value), "is not a valid date")
+        self.fail(field, !is_date(value), "not_a_date", None, "is not a valid date")
     }
 
     /// Checks that `value` is `YYYY-MM-DD HH:MM[:SS]`, with a space or `T` (HTML `datetime-local`).
@@ -630,7 +702,7 @@ impl Validator {
             && is_date(&value[..10])
             && matches!(value.as_bytes()[10], b' ' | b'T')
             && is_time(&value[11..]);
-        self.check(field, !valid, "is not a valid date and time")
+        self.fail(field, !valid, "not_a_datetime", None, "is not a valid date and time")
     }
 
     /// Checks that `value` is a time of day written `HH:MM` or `HH:MM:SS` (HTML `<input type="time">`).
@@ -647,7 +719,7 @@ impl Validator {
     /// assert_eq!(v.finish().unwrap_err().to_string(), "invalid: Opens at is not a valid time");
     /// ```
     pub fn time(&mut self, field: &str, value: &str) -> &mut Self {
-        self.check(field, !is_time(value), "is not a valid time")
+        self.fail(field, !is_time(value), "not_a_time", None, "is not a valid time")
     }
 
     /// Checks that `value` is a UUID in its hyphenated form, any case ("is not a valid UUID").
@@ -668,7 +740,7 @@ impl Validator {
                 .iter()
                 .zip([8, 4, 4, 4, 12])
                 .all(|(group, len)| group.len() == len && group.bytes().all(|b| b.is_ascii_hexdigit()));
-        self.check(field, !valid, "is not a valid UUID")
+        self.fail(field, !valid, "not_a_uuid", None, "is not a valid UUID")
     }
 
     /// Checks that `value` is an exact decimal number such as `-12.50` ("is not a decimal number").
@@ -690,7 +762,7 @@ impl Validator {
         let unsigned = value.strip_prefix(['-', '+']).unwrap_or(value);
         let (whole, fraction) = unsigned.split_once('.').unwrap_or((unsigned, "0"));
         let valid = [whole, fraction].iter().all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()));
-        self.check(field, !valid, "is not a decimal number")
+        self.fail(field, !valid, "not_a_decimal", None, "is not a decimal number")
     }
 
     /// Adds the errors collected by `other`, e.g. a model's `validate()` after parsing a form.

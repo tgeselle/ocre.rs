@@ -80,7 +80,7 @@ pub(super) const RESERVED: &[&str] = &[
     "values",
 ];
 
-pub(super) const TYPES: &str = "string, text, integer (int, small_int, big_int), float (double), decimal, boolean (bool), date, time, datetime (date_time), uuid, references, attachment, json (jsonb), enum:<value>,<value>...";
+pub(super) const TYPES: &str = "string, text, rich_text, integer (int, small_int, big_int), float (double), decimal, boolean (bool), date, time, datetime (date_time), uuid, references, attachment, json (jsonb), enum:<value>,<value>...; `lock_version:integer` turns on optimistic locking";
 
 /// Content types an attachment accepts until the app edits its `Rules`:
 /// common images, PDF and plain text, all safe to display inline.
@@ -119,6 +119,12 @@ pub(super) enum FieldType {
     /// One of a fixed list of values (`status:enum:draft,published`): a Rust
     /// enum in the model, stored as its snake_case text with a `CHECK`.
     Enum,
+    /// Formatted text (HTML from the Trix editor), sanitized when saved and
+    /// shown with the `rich_text` filter: Action Text without its table.
+    RichText,
+    /// `lock_version:integer`: a counter checked and bumped by every update
+    /// (Rails' optimistic locking).
+    LockVersion,
 }
 
 impl FieldType {
@@ -126,6 +132,7 @@ impl FieldType {
         Some(match name {
             "string" => Self::String,
             "text" => Self::Text,
+            "rich_text" => Self::RichText,
             // SQLite integers are 64-bit whatever the declared size.
             "integer" | "int" | "small_int" | "big_int" => Self::Integer,
             "float" | "double" => Self::Float,
@@ -147,13 +154,20 @@ impl FieldType {
     pub(super) fn is_textual(self) -> bool {
         matches!(
             self,
-            Self::String | Self::Text | Self::Date | Self::Time | Self::DateTime | Self::Decimal | Self::Uuid
+            Self::String
+                | Self::Text
+                | Self::RichText
+                | Self::Date
+                | Self::Time
+                | Self::DateTime
+                | Self::Decimal
+                | Self::Uuid
         )
     }
 
     /// Parsed from form text as a number.
     pub(super) fn is_numeric(self) -> bool {
-        matches!(self, Self::Integer | Self::Float | Self::References)
+        matches!(self, Self::Integer | Self::Float | Self::References | Self::LockVersion)
     }
 }
 
@@ -238,6 +252,20 @@ impl Field {
             CliError::new(format!("unknown field type `{ty_name}` for `{name}`"))
                 .hint(format!("types: {TYPES}; add `?` for optional, `^` for unique"))
         })?;
+        // Rails' magic column: a `lock_version` integer turns on optimistic locking.
+        let ty = match (name, ty) {
+            ("lock_version", FieldType::Integer) if !optional && !unique => FieldType::LockVersion,
+            ("lock_version", _) => {
+                return Err(CliError::new("`lock_version` must be `lock_version:integer`").hint(
+                    "`lock_version` is the optimistic locking counter: write it `lock_version:integer`, without `?` or `^`",
+                ));
+            }
+            (_, ty) => ty,
+        };
+        if ty == FieldType::RichText && unique {
+            return Err(CliError::new(format!("rich_text field `{name}` cannot be unique"))
+                .hint("formatted text is not a key; drop the `^`"));
+        }
         if ty == FieldType::Boolean && optional {
             return Err(CliError::new(format!("boolean field `{name}` cannot be optional"))
                 .hint("booleans are true or false (a checkbox); drop the `?`"));
@@ -292,13 +320,30 @@ impl Field {
     /// optional values print nothing when empty, attachments their file name.
     pub(super) fn display(&self, record: &str) -> String {
         let name = &self.name;
+        // Lists show the text of formatted fields, cut short.
+        let value = if self.ty == FieldType::RichText { "|plain_text|truncate(80)" } else { "" };
         match (self.is_attachment(), self.optional) {
             (true, true) => {
                 format!("{{% if let Some(file) = {record}.{name}() %}}{{{{ file.filename }}}}{{% endif %}}")
             }
             (true, false) => format!("{{{{ {record}.{name}_filename }}}}"),
-            (false, true) => format!("{{% if let Some(value) = {record}.{name} %}}{{{{ value }}}}{{% endif %}}"),
-            (false, false) => format!("{{{{ {record}.{name} }}}}"),
+            (false, true) => {
+                format!("{{% if let Some(value) = {record}.{name} %}}{{{{ value{value} }}}}{{% endif %}}")
+            }
+            (false, false) => format!("{{{{ {record}.{name}{value} }}}}"),
+        }
+    }
+
+    /// askama expression of the show page: [`display`](Self::display), except
+    /// formatted text, rendered as sanitized HTML.
+    pub(super) fn display_full(&self, record: &str) -> String {
+        let name = &self.name;
+        match (self.ty, self.optional) {
+            (FieldType::RichText, true) => {
+                format!("{{% if let Some(value) = {record}.{name} %}}{{{{ value|rich_text }}}}{{% endif %}}")
+            }
+            (FieldType::RichText, false) => format!("{{{{ {record}.{name}|rich_text }}}}"),
+            _ => self.display(record),
         }
     }
 
@@ -308,12 +353,13 @@ impl Field {
         match self.ty {
             FieldType::String
             | FieldType::Text
+            | FieldType::RichText
             | FieldType::Date
             | FieldType::Time
             | FieldType::DateTime
             | FieldType::Decimal
             | FieldType::Uuid => "String",
-            FieldType::Integer | FieldType::References => "i64",
+            FieldType::Integer | FieldType::References | FieldType::LockVersion => "i64",
             FieldType::Float => "f64",
             FieldType::Boolean => "bool",
             FieldType::Attachment => "Upload",
@@ -361,11 +407,11 @@ impl Field {
                 .collect();
         }
         let sql_type = match self.ty {
-            FieldType::Integer | FieldType::Boolean | FieldType::References => "INTEGER",
+            FieldType::Integer | FieldType::Boolean | FieldType::References | FieldType::LockVersion => "INTEGER",
             FieldType::Float => "REAL",
             _ => "TEXT",
         };
-        let default = if self.ty == FieldType::Boolean { " DEFAULT 0" } else { "" };
+        let default = if matches!(self.ty, FieldType::Boolean | FieldType::LockVersion) { " DEFAULT 0" } else { "" };
         // Required references are deleted with their parent (Rails' `dependent: :destroy`
         // done by SQLite); optional ones are set to NULL (`dependent: :nullify`).
         let reference = match &self.target {
@@ -390,6 +436,10 @@ impl Field {
         let name = &self.name;
         match self.ty {
             FieldType::String | FieldType::Text if !self.optional => vec![format!("v.required(\"{name}\", {value});")],
+            // Trix submits `<div><br></div>` for an empty editor: check the text.
+            FieldType::RichText if !self.optional => {
+                vec![format!("v.required(\"{name}\", &ocre::security::strip_tags({value}));")]
+            }
             FieldType::Date => vec![format!("v.date(\"{name}\", {value});")],
             FieldType::DateTime => vec![format!("v.datetime(\"{name}\", {value});")],
             FieldType::Time => vec![format!("v.time(\"{name}\", {value});")],

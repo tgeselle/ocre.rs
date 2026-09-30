@@ -523,6 +523,8 @@ fn scaffold_refuses_to_overwrite_or_guess() {
         (&["g", "scaffold", "Item", "title"], "field `title` has no type"),
         (&["g", "scaffold", "Item", "Title:string"], "invalid field name `Title`"),
         (&["g", "scaffold", "Item", "type:string"], "field name `type` is reserved"),
+        (&["g", "scaffold", "Item", "lock_version:string"], "`lock_version` must be `lock_version:integer`"),
+        (&["g", "scaffold", "Item", "body:rich_text^"], "rich_text field `body` cannot be unique"),
         (&["g", "scaffold", "Item", "size:huge"], "unknown field type `huge` for `size`"),
         (&["g", "scaffold", "Item", "a:string", "a:text"], "field `a` is listed twice"),
         (&["g", "migration", "Add-Thing"], "invalid migration name `Add-Thing`"),

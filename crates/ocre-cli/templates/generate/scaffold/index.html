@@ -15,14 +15,14 @@
 <% endif %>
 <table>
   <thead>
-    <tr><% for field in fields %><th><%= field.label %></th><% endfor %><th></th></tr>
+    <tr><% for field in fields if not field.hidden %><th><%= field.label %></th><% endfor %><th></th></tr>
   </thead>
   <tbody<% if realtime %> id="<%= plural %>"<% endif %>>
     {% for <%= singular %> in <%= plural %> %}
 <% if realtime %>
     {% include "<%= plural %>/_row.html" %}
 <% else %>
-    <tr><% for field in fields %><td><%= field.display %></td><% endfor %><td><a href="{{ paths::show(<%= singular %>.id) }}">Show</a> <a href="{{ paths::edit(<%= singular %>.id) }}">Edit</a></td></tr>
+    <tr><% for field in fields if not field.hidden %><td><%= field.display %></td><% endfor %><td><a href="{{ paths::show(<%= singular %>.id) }}">Show</a> <a href="{{ paths::edit(<%= singular %>.id) }}">Edit</a></td></tr>
 <% endif %>
     {% endfor %}
   </tbody>

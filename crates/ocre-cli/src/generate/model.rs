@@ -66,14 +66,20 @@ fn add_model(edits: &mut Edits, names: &ModelNames, fields: &[Field], command: &
         }
     }
     let references: Vec<&Field> = fields.iter().filter(|f| f.target.is_some()).collect();
+    // A self join (`Employee manager:references:manager_id?`): the has-many side goes in the new file.
+    let mut own_associations = String::new();
     for field in &references {
         let target = field.target.as_ref().expect("references have a target");
+        let mut code = if field.unique { has_one_fn(names, target, field) } else { has_many_fn(names, target, field) };
+        if target.singular == names.singular {
+            own_associations.push_str(&code);
+            continue;
+        }
         let path = model_path(target);
         let source = edits.read(&path)?.ok_or_else(|| {
             CliError::new(format!("{path} does not exist"))
                 .hint(format!("generate the referenced model first, e.g. `ocre g model {} name:string`", target.model))
         })?;
-        let mut code = if field.unique { has_one_fn(names, target, field) } else { has_many_fn(names, target, field) };
         // A join model (two references or more): each side reaches the others through it.
         for other in references.iter().filter(|other| other.name != field.name) {
             code.push_str(&has_many_through_fn(names, field, other));
@@ -92,7 +98,11 @@ fn add_model(edits: &mut Edits, names: &ModelNames, fields: &[Field], command: &
         let path = next_migration_path(edits, &format!("create_{}", names.plural))?;
         edits.create(&path, table_sql(&names.plural, fields))?;
     }
-    edits.create(&model_path(names), model_rs(names, fields, command))?;
+    let mut source = model_rs(names, fields, command);
+    if !own_associations.is_empty() {
+        source = insert_after_marker(&source, ASSOCIATIONS_MARKER, &own_associations).unwrap_or(source);
+    }
+    edits.create(&model_path(names), source)?;
     super::test_files::add_factory(edits, names, fields, command)
 }
 
@@ -257,7 +267,9 @@ fn model_rs(names: &ModelNames, fields: &[Field], command: &str) -> String {
     let ModelNames { model, plural, human_singular, human_plural, .. } = names;
     let lower = human_singular.to_lowercase();
     let lower_plural = human_plural.to_lowercase();
-    let plain: Vec<&Field> = fields.iter().filter(|f| !f.is_attachment()).collect();
+    // `lock_version` is not a value the app sets: the database bumps it on every update.
+    let plain: Vec<&Field> = fields.iter().filter(|f| !f.is_attachment() && f.ty != FieldType::LockVersion).collect();
+    let lock = fields.iter().any(|f| f.ty == FieldType::LockVersion);
     let files: Vec<&Field> = fields.iter().filter(|f| f.is_attachment()).collect();
     // Attachment columns come after the plain ones, so their parameters can be
     // appended to `params![...]` with `storage::columns`.
@@ -302,6 +314,15 @@ fn model_rs(names: &ModelNames, fields: &[Field], command: &str) -> String {
     let mut change_fields = String::new();
     for field in fields {
         let (name, ty, column) = (&field.name, field.rust_type(), field.column_type());
+        if field.ty == FieldType::LockVersion {
+            row_fields.push_str("    /// Optimistic locking: bumped by every update; forms send it back unchanged.\n");
+            writeln!(row_fields, "    pub {name}: i64,").expect("writing to a String");
+            change_fields.push_str(
+                "    /// The `lock_version` the change was made from: `update` fails with\n    /// `Error::Conflict` when the row has changed since. `None` skips the check.\n",
+            );
+            writeln!(change_fields, "    pub {name}: Option<i64>,").expect("writing to a String");
+            continue;
+        }
         if field.is_attachment() {
             for (column, ty) in field.columns() {
                 writeln!(row_fields, "    pub {column}: {ty},").expect("writing to a String");
@@ -403,9 +424,18 @@ fn model_rs(names: &ModelNames, fields: &[Field], command: &str) -> String {
     } else {
         format!("    let mut v = changes.validate();\n{update_checks}    v.finish()?;\n")
     };
+    let (lock_set, lock_where) = if lock {
+        (", lock_version = lock_version + 1", format!(" AND (?{0} IS NULL OR lock_version = ?{0})", update_id + 1))
+    } else {
+        ("", String::new())
+    };
     let insert_sql = format!("INSERT INTO {plural} ({columns}) VALUES ({placeholders}) RETURNING *");
-    let update_sql =
-        format!("UPDATE {plural} SET {sets}, updated_at = datetime('now') WHERE id = ?{update_id} RETURNING *");
+    let update_sql = format!(
+        "UPDATE {plural} SET {sets}{lock_set}, updated_at = datetime('now') WHERE id = ?{update_id}{lock_where} RETURNING *"
+    );
+    let update_args =
+        [update_params.as_str(), "id", if lock { "lock_version" } else { "" }].into_iter().filter(|a| !a.is_empty());
+    let update_args = update_args.collect::<Vec<_>>().join(", ");
     let delete_query = format!(
         "    let deleted: Option<{model}> = ctx.db()?.first(\"DELETE FROM {plural} WHERE id = ?1 RETURNING *\", params![id]).await?;\n    let Some(record) = deleted else {{ return Ok(false) }};\n"
     );
@@ -417,7 +447,7 @@ fn model_rs(names: &ModelNames, fields: &[Field], command: &str) -> String {
                 "{create_validation}    let record: {model} = db\n        .first(\"{insert_sql}\", params![{insert_params}])\n        .await?\n        .ok_or_else(|| Error::internal(\"INSERT ... RETURNING returned no row\"))?;\n"
             ),
             format!(
-                "{update_validation}    let updated: Option<{model}> = db\n        .first(\n            \"{update_sql}\",\n            params![{update_params}, id],\n        )\n        .await?;\n"
+                "{update_validation}    let updated: Option<{model}> = db\n        .first(\n            \"{update_sql}\",\n            params![{update_args}],\n        )\n        .await?;\n"
             ),
             delete_query,
         )
@@ -426,7 +456,7 @@ fn model_rs(names: &ModelNames, fields: &[Field], command: &str) -> String {
             ", storage::{self, Attachment, Rules, Upload}".to_owned(),
             files.iter().map(|f| rules_const(f)).collect(),
             create_with_files(&files, &create_validation, &insert_sql, &insert_params, names),
-            update_with_files(&files, &update_validation, &update_sql, &update_params, names),
+            update_with_files(&files, &update_validation, &update_sql, &update_params, names, lock),
             format!(
                 "{delete_query}    storage::delete_attachments(ctx, &[{}]).await?;\n",
                 files.iter().map(|f| file_value(f, "record")).collect::<Vec<_>>().join(", ")
@@ -437,6 +467,21 @@ fn model_rs(names: &ModelNames, fields: &[Field], command: &str) -> String {
     let preloads: String = fields.iter().filter(|f| f.target.is_some()).map(|f| preload_fns(names, f)).collect();
     let singular = &names.singular;
     let enums: String = fields.iter().filter_map(|f| Some(enum_rs(&f.name, f.enumeration.as_ref()?))).collect();
+    let changed: String = fields
+        .iter()
+        .filter(|f| f.ty != FieldType::LockVersion)
+        .map(|f| format!("        if self.{0}.is_some() {{\n            fields.push(\"{0}\");\n        }}\n", f.name))
+        .collect();
+    let (sanitize_new, sanitize_changes) = sanitize_rich_text(fields);
+    let lock_capture = if lock { "    let lock_version = changes.lock_version;\n" } else { "" };
+    let stale_check = if lock {
+        format!(
+            "    if updated.is_none() && lock_version.is_some() && query().eq(\"id\", id).exists(&db).await? {{\n        return Err(Error::Conflict(\"This {lower} was changed by someone else since you opened it: reload it and apply your changes again.\".into()));\n    }}\n"
+        )
+    } else {
+        String::new()
+    };
+    let stale_doc = if lock { "; `Error::Conflict` (409) when `lock_version` is stale" } else { "" };
 
     format!(
         r#"//! {human_singular} model: the `{plural}` table. Generated by `{command}`.
@@ -478,6 +523,13 @@ impl {model}Changes {{
     pub fn validate(&self) -> Validator {{
 {change_validation}
     }}
+
+    /// Names of the fields this change sets (Rails' `changed`), e.g. to
+    /// run a callback only when `title` changes.
+    pub fn changed(&self) -> Vec<&'static str> {{
+        let mut fields = Vec::new();
+{changed}        fields
+    }}
 }}
 
 impl {model} {{{methods}
@@ -517,16 +569,16 @@ pub async fn find_many(ctx: &Ctx, ids: &[i64]) -> Result<Vec<{model}>> {{
 {preloads}
 pub async fn create(ctx: &Ctx, mut new: New{model}) -> Result<{model}> {{
     before_create(ctx, &mut new).await?;
-    let db = ctx.db()?;
+{sanitize_new}    let db = ctx.db()?;
 {create_body}    after_create(ctx, &record).await?;
     Ok(record)
 }}
 
-/// `None` when there is no {lower} with this id.
+/// `None` when there is no {lower} with this id{stale_doc}.
 pub async fn update(ctx: &Ctx, id: i64, mut changes: {model}Changes) -> Result<Option<{model}>> {{
     before_update(ctx, id, &mut changes).await?;
-    let db = ctx.db()?;
-{update_body}    if let Some(record) = &updated {{
+{sanitize_changes}{lock_capture}    let db = ctx.db()?;
+{update_body}{stale_check}    if let Some(record) = &updated {{
         after_update(ctx, record).await?;
     }}
     Ok(updated)
@@ -639,7 +691,14 @@ fn create_with_files(files: &[&Field], validation: &str, sql: &str, params: &str
 
 /// `update` for a model with attachments: new files go to R2 first; the
 /// replaced ones are deleted after the UPDATE (the new ones if it fails).
-fn update_with_files(files: &[&Field], validation: &str, sql: &str, params: &str, names: &ModelNames) -> String {
+fn update_with_files(
+    files: &[&Field],
+    validation: &str,
+    sql: &str,
+    params: &str,
+    names: &ModelNames,
+    lock: bool,
+) -> String {
     let (table, model) = (&names.plural, &names.model);
     let mut out = format!(
         "{validation}    // The current files: deleted from R2 once the row no longer points to them.\n    let Some(old) = find(ctx, id).await? else {{ return Ok(None) }};\n"
@@ -668,14 +727,43 @@ fn update_with_files(files: &[&Field], validation: &str, sql: &str, params: &str
         writeln!(out, "    params.extend(storage::column_changes({}.as_ref().{change}));", file.name)
             .expect("writing to a String");
     }
+    let lock_param = if lock { "    params.push(lock_version.into_param());\n" } else { "" };
     write!(
         out,
-        "    params.push(id.into_param());\n    let updated: Result<Option<{model}>> = db.first(\"{sql}\", params).await;\n    let unused = if matches!(updated, Ok(Some(_))) {{ [{}] }} else {{ [{}] }};\n    storage::delete_attachments(ctx, &unused).await?;\n    let updated = updated?;\n",
+        "    params.push(id.into_param());\n{lock_param}    let updated: Result<Option<{model}>> = db.first(\"{sql}\", params).await;\n    let unused = if matches!(updated, Ok(Some(_))) {{ [{}] }} else {{ [{}] }};\n    storage::delete_attachments(ctx, &unused).await?;\n    let updated = updated?;\n",
         replaced.join(", "),
         added.join(", ")
     )
     .expect("writing to a String");
     out
+}
+
+/// Lines of `create` and `update` sanitizing `rich_text` fields (Trix HTML)
+/// with `ocre::security::sanitize`, so only safe HTML is ever stored.
+fn sanitize_rich_text(fields: &[Field]) -> (String, String) {
+    let (mut new, mut changes) = (String::new(), String::new());
+    for field in fields.iter().filter(|f| f.ty == FieldType::RichText) {
+        let name = &field.name;
+        if field.optional {
+            writeln!(new, "    new.{name} = new.{name}.as_deref().map(ocre::security::sanitize);")
+                .expect("writing to a String");
+            writeln!(
+                changes,
+                "    changes.{name} = changes.{name}.map(|{name}| {name}.as_deref().map(ocre::security::sanitize));"
+            )
+            .expect("writing to a String");
+        } else {
+            writeln!(new, "    new.{name} = ocre::security::sanitize(&new.{name});").expect("writing to a String");
+            writeln!(changes, "    changes.{name} = changes.{name}.as_deref().map(ocre::security::sanitize);")
+                .expect("writing to a String");
+        }
+    }
+    if !new.is_empty() {
+        let comment = "    // Formatted text keeps only safe HTML (no scripts, styles or event handlers).\n";
+        new.insert_str(0, comment);
+        changes.insert_str(0, comment);
+    }
+    (new, changes)
 }
 
 /// `comments(ctx, page)` on the referenced model: the has-many side of `references`.

@@ -32,6 +32,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 /// | [`Unauthorized`](Self::Unauthorized) | 401 | `Unauthorized` |
 /// | [`Forbidden`](Self::Forbidden) | 403 | `Forbidden` |
 /// | [`Invalid`](Self::Invalid) | 422 | `Validation failed` plus the field errors |
+/// | [`Conflict`](Self::Conflict) | 409 | its message |
 /// | [`PayloadTooLarge`](Self::PayloadTooLarge) | 413 | its message |
 /// | [`TooManyRequests`](Self::TooManyRequests) | 429 | `Too many requests. Try again later.` |
 /// | [`Internal`](Self::Internal) | 500 | `Internal server error` (message logged) |
@@ -70,6 +71,13 @@ pub enum Error {
     /// Built by [`Validator::finish`](crate::Validator::finish). JSON answers
     /// group messages by field: `"fields": {"title": ["can't be blank"]}`.
     Invalid(Vec<FieldError>),
+    /// 409 Conflict: the record changed since it was read (optimistic
+    /// locking with a `lock_version` column), or a unique key already
+    /// exists; the message is shown to the user.
+    ///
+    /// Generated `update` functions of models with a `lock_version` field
+    /// return it for a stale version (Rails' `ActiveRecord::StaleObjectError`).
+    Conflict(String),
     /// 413 Payload Too Large: the request body is over a limit, with a message shown to the user.
     ///
     /// See [`storage::Multipart`](crate::storage::Multipart).
@@ -138,6 +146,33 @@ impl Error {
         Self::Internal(message.into())
     }
 
+    /// Whether the error says a unique value is already used: a "has
+    /// already been taken" validation error (generated models check unique
+    /// fields before writing), D1's `UNIQUE constraint failed` (two requests
+    /// raced past the check), or a [`Conflict`](Self::Conflict).
+    ///
+    /// [`Query::create_or_first`](crate::Query::create_or_first) uses it to
+    /// fall back to the existing row.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ocre::{Error, FieldError};
+    ///
+    /// assert!(Error::Invalid(vec![FieldError::new("email", "has already been taken")]).is_taken());
+    /// assert!(Error::internal("D1_ERROR: UNIQUE constraint failed: users.email").is_taken());
+    /// assert!(!Error::Invalid(vec![FieldError::new("email", "can't be blank")]).is_taken());
+    /// assert!(!Error::NotFound.is_taken());
+    /// ```
+    pub fn is_taken(&self) -> bool {
+        match self {
+            Self::Invalid(fields) => fields.iter().any(|field| field.message == "has already been taken"),
+            Self::Internal(message) => message.contains("UNIQUE constraint failed"),
+            Self::Conflict(_) => true,
+            _ => false,
+        }
+    }
+
     /// Client-safe form: internal details move to [`Public::internal`] and
     /// are replaced by a generic message.
     pub(crate) fn into_public(self) -> Public {
@@ -149,6 +184,7 @@ impl Error {
             Self::Forbidden => (StatusCode::FORBIDDEN, "Forbidden".to_owned(), vec![]),
             Self::Invalid(fields) => (StatusCode::UNPROCESSABLE_ENTITY, "Validation failed".to_owned(), fields),
             Self::PayloadTooLarge(message) => (StatusCode::PAYLOAD_TOO_LARGE, message, vec![]),
+            Self::Conflict(message) => (StatusCode::CONFLICT, message, vec![]),
             Self::TooManyRequests => {
                 (StatusCode::TOO_MANY_REQUESTS, "Too many requests. Try again later.".to_owned(), vec![])
             }
@@ -181,6 +217,7 @@ impl std::fmt::Display for Error {
                 write!(f, "invalid: {}", messages.join(", "))
             }
             Self::PayloadTooLarge(message) => write!(f, "payload too large: {message}"),
+            Self::Conflict(message) => write!(f, "conflict: {message}"),
             Self::TooManyRequests => f.write_str("too many requests"),
             Self::Internal(message) => write!(f, "internal error: {message}"),
         }

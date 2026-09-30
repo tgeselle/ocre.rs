@@ -120,12 +120,19 @@ fn controller_rs(names: &ModelNames, fields: &[Field], command: &str, realtime: 
         if field.ty == FieldType::Boolean {
             form_fields.push_str("    /// Unchecked checkboxes are not submitted.\n");
         }
+        if field.ty == FieldType::LockVersion {
+            form_fields.push_str("    /// Hidden field: the version the edit form was opened on.\n");
+        }
         writeln!(form_fields, "    pub {name}: {},", form_type(field)).expect("writing to a String");
         let value = from_form(field);
-        writeln!(new_values, "            {name}: {value},").expect("writing to a String");
+        if field.ty != FieldType::LockVersion {
+            writeln!(new_values, "            {name}: {value},").expect("writing to a String");
+        }
         writeln!(change_values, "            {name}: Some({value}),").expect("writing to a String");
         writeln!(record_values, "            {name}: {},", to_form(field, "record")).expect("writing to a String");
     }
+    // `rich_text` fields render with `ocre::filters` (`|rich_text`, `|plain_text`).
+    let filters = if fields.iter().any(|f| f.ty == FieldType::RichText) { "filters, " } else { "" };
     if !files.is_empty() {
         record_values.push_str("            ..Self::default()\n");
     }
@@ -156,7 +163,7 @@ use axum::{{
     response::{{Html, IntoResponse, Redirect, Response}},
     routing::{{get, post}},
 }};
-use ocre::{{Ctx, Error, FieldError, Flash, OptionExt, Page, Result, Session, Validator, {import}render{storage_import}}};
+use ocre::{{Ctx, Error, FieldError, {filters}Flash, OptionExt, Page, Result, Session, Validator, {import}render{storage_import}}};
 use serde::Deserialize;
 
 use crate::models::{singular}::{{self, New{model}, {model}, {model}Changes}};
@@ -471,6 +478,8 @@ struct ViewField {
     show: String,
     /// The form widget bound to `form.<name>`.
     input: String,
+    /// Not shown in lists or on the show page, and a hidden input in forms (`lock_version`).
+    hidden: bool,
 }
 
 #[derive(Serialize)]
@@ -486,6 +495,8 @@ struct ViewContext<'a> {
     /// Some field is a file: forms are `multipart/form-data`.
     multipart: bool,
     fields: Vec<ViewField>,
+    /// Some field is `rich_text`: forms load the Trix editor.
+    rich_text: bool,
 }
 
 /// Renders `templates/<plural>/*.html` from the `scaffold/` templates (the
@@ -514,10 +525,12 @@ fn views(
                 attachment: field.is_attachment(),
                 optional: field.optional,
                 display: field.display(singular),
-                show: if field.is_attachment() { file_link(field, singular) } else { field.display(singular) },
-                input: input(field),
+                show: if field.is_attachment() { file_link(field, singular) } else { field.display_full(singular) },
+                input: input(field, singular),
+                hidden: field.ty == FieldType::LockVersion,
             })
             .collect(),
+        rich_text: fields.iter().any(|f| f.ty == FieldType::RichText),
     };
     let values = Value::from_serialize(&context);
     let mut out = Vec::new();
@@ -542,7 +555,7 @@ fn file_link(field: &Field, singular: &str) -> String {
 }
 
 /// The form widget of a field, bound to `form.<name>`.
-fn input(field: &Field) -> String {
+fn input(field: &Field, singular: &str) -> String {
     let name = &field.name;
     let required = if field.optional { "" } else { " required" };
     match field.ty {
@@ -550,6 +563,14 @@ fn input(field: &Field) -> String {
             format!(r#"<input name="{name}" value="{{{{ form.{name} }}}}"{required}>"#)
         }
         FieldType::Text => format!(r#"<textarea name="{name}" rows="5"{required}>{{{{ form.{name} }}}}</textarea>"#),
+        // Trix edits a hidden input (`required` would not reach the editor):
+        // the model checks presence on the text.
+        FieldType::RichText => format!(
+            r#"<input type="hidden" id="{singular}_{name}" name="{name}" value="{{{{ form.{name} }}}}"><trix-editor input="{singular}_{name}"></trix-editor>"#
+        ),
+        FieldType::LockVersion => {
+            format!(r#"<input type="hidden" name="{name}" value="{{{{ form.{name} }}}}">"#)
+        }
         FieldType::Json => format!(
             r#"<textarea name="{name}" rows="5" spellcheck="false" placeholder="{{}}"{required}>{{{{ form.{name} }}}}</textarea>"#
         ),

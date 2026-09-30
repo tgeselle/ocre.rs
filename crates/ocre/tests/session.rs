@@ -133,8 +133,9 @@ fn values_survive_a_round_trip_encrypted() {
 fn tampered_or_foreign_cookies_start_empty() {
     let set = round_trip("", |s| s.insert("admin", true).unwrap()).unwrap();
     let mut pair = cookie_pair(&set);
-    pair.pop();
-    pair.push('A');
+    // Always a different last character (the value is random, so it may already end in `A`).
+    let last = pair.pop().unwrap();
+    pair.push(if last == 'A' { 'B' } else { 'A' });
     let session = Session::from_headers(&headers(&pair), key(), true);
     assert_eq!(session.get::<bool>("admin").unwrap(), None);
 

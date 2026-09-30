@@ -3,7 +3,7 @@
 use serde::{Deserialize, de::DeserializeOwned};
 
 use super::Db;
-use crate::{Page, Paginated, Param, Query, Result};
+use crate::{Batches, Error, Page, Paginated, Param, Query, Result};
 
 #[derive(Deserialize)]
 struct Count {
@@ -13,6 +13,11 @@ struct Count {
 #[derive(Deserialize)]
 struct Value<V> {
     value: V,
+}
+
+#[derive(Deserialize)]
+struct Plan {
+    detail: String,
 }
 
 impl<T: DeserializeOwned> Query<T> {
@@ -109,9 +114,187 @@ impl<T: DeserializeOwned> Query<T> {
         let items = self.clone().page(page).all(db).await?;
         Ok(Paginated { items, total, limit: page.limit, offset: page.offset })
     }
+
+    /// Returns the first matching row, or runs `create` when there is none
+    /// (Rails' `find_or_create_by`; with a `New...` value built in memory
+    /// instead of saved, `find_or_initialize_by`).
+    ///
+    /// Two requests can both miss and both create: back the lookup with a
+    /// `UNIQUE` index and use [`create_or_first`](Self::create_or_first)
+    /// when duplicates must not happen.
+    ///
+    /// # Errors
+    ///
+    /// The lookup's errors, or those of `create` (e.g. [`Error::Invalid`]).
+    ///
+    /// # Free plan
+    ///
+    /// One query when the row exists, plus `create`'s otherwise.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use ocre::{Ctx, Error, Query, Result, params};
+    ///
+    /// #[derive(serde::Deserialize)]
+    /// struct Tag {
+    ///     id: i64,
+    ///     name: String,
+    /// }
+    ///
+    /// async fn tag_named(ctx: &Ctx, name: &str) -> Result<Tag> {
+    ///     let db = ctx.db()?;
+    ///     Query::table("tags")
+    ///         .eq("name", name)
+    ///         .first_or_create(&db, || async {
+    ///             let sql = "INSERT INTO tags (name) VALUES (?1) RETURNING *";
+    ///             db.first(sql, params![name]).await?.ok_or_else(|| Error::internal("no row returned"))
+    ///         })
+    ///         .await
+    /// }
+    /// ```
+    pub async fn first_or_create<F, Fut>(&self, db: &Db, create: F) -> Result<T>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        match self.first(db).await? {
+            Some(row) => Ok(row),
+            None => create().await,
+        }
+    }
+
+    /// Runs `create` first and, when it fails because the value is already
+    /// taken, returns the existing row instead (Rails' `create_or_find_by`).
+    ///
+    /// Safe against two requests racing: the table's `UNIQUE` index decides
+    /// and the loser reads the winner's row. "Taken" means
+    /// [`Error::is_taken`]: a generated model's "has already been taken"
+    /// validation, or D1's `UNIQUE constraint failed`. The query must match
+    /// the conflicting row (usually `eq` on the unique column).
+    ///
+    /// # Errors
+    ///
+    /// Any other error of `create`; [`Error::NotFound`] when the conflicting
+    /// row cannot be found by this query.
+    ///
+    /// # Free plan
+    ///
+    /// `create`'s queries, plus one lookup after a conflict.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use ocre::{Ctx, Error, Query, Result, params};
+    ///
+    /// #[derive(serde::Deserialize)]
+    /// struct Subscriber {
+    ///     id: i64,
+    ///     email: String,
+    /// }
+    ///
+    /// // `email` has a UNIQUE index (`email:string^`).
+    /// async fn subscribe(ctx: &Ctx, email: &str) -> Result<Subscriber> {
+    ///     let db = ctx.db()?;
+    ///     Query::table("subscribers")
+    ///         .eq("email", email)
+    ///         .create_or_first(&db, || async {
+    ///             let sql = "INSERT INTO subscribers (email) VALUES (?1) RETURNING *";
+    ///             db.first(sql, params![email]).await?.ok_or_else(|| Error::internal("no row returned"))
+    ///         })
+    ///         .await
+    /// }
+    /// ```
+    pub async fn create_or_first<F, Fut>(&self, db: &Db, create: F) -> Result<T>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        match create().await {
+            Err(err) if err.is_taken() => self.first(db).await?.ok_or(Error::NotFound),
+            other => other,
+        }
+    }
+}
+
+impl<T: DeserializeOwned> Batches<T> {
+    /// Runs the next batch: up to the batch size of rows after the last id
+    /// read, or `None` once every row was read.
+    ///
+    /// See [`Query::batches`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Internal`](crate::Error::Internal) (500) when D1 rejects the
+    /// statement or a row does not deserialize into `T`.
+    ///
+    /// # Free plan
+    ///
+    /// One query reading at most the batch size of rows (plus the rows the
+    /// conditions skip without an index).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use ocre::{Ctx, Query, Result};
+    ///
+    /// #[derive(serde::Deserialize)]
+    /// struct Post {
+    ///     id: i64,
+    /// }
+    ///
+    /// async fn count_by_hand(ctx: &Ctx) -> Result<usize> {
+    ///     let db = ctx.db()?;
+    ///     let mut batches = Query::<Post>::table("posts").batches(500, |post| post.id);
+    ///     let mut total = 0;
+    ///     while let Some(posts) = batches.next(&db).await? {
+    ///         total += posts.len();
+    ///     }
+    ///     Ok(total)
+    /// }
+    /// ```
+    pub async fn next(&mut self, db: &Db) -> Result<Option<Vec<T>>> {
+        if self.is_done() {
+            return Ok(None);
+        }
+        let stmt = self.statement();
+        let rows: Vec<T> = db.all(&stmt.sql, stmt.params).await?;
+        self.advance(&rows);
+        Ok(if rows.is_empty() { None } else { Some(rows) })
+    }
 }
 
 impl<T> Query<T> {
+    /// The query plan, one line per step (Rails' `explain`): `SEARCH` means
+    /// an index is used, `SCAN` a full table read.
+    ///
+    /// Runs [`explain_statement`](Self::explain_statement). Check a query
+    /// while developing (log it, or return it from a debug route), not on
+    /// every request.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Internal`](crate::Error::Internal) (500) when D1 rejects the statement.
+    ///
+    /// # Free plan
+    ///
+    /// One query that reads no table row.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use ocre::{Ctx, Query, Result};
+    /// async fn plan(ctx: &Ctx) -> Result<String> {
+    ///     let steps = Query::<()>::table("posts").eq("author_id", 3).explain(&ctx.db()?).await?;
+    ///     Ok(steps.join("\n")) // "SEARCH posts USING INDEX index_posts_on_author_id (author_id=?)"
+    /// }
+    /// ```
+    pub async fn explain(&self, db: &Db) -> Result<Vec<String>> {
+        let stmt = self.explain_statement();
+        let rows: Vec<Plan> = db.all(&stmt.sql, stmt.params).await?;
+        Ok(rows.into_iter().map(|row| row.detail).collect())
+    }
+
     /// Number of matching rows (`COUNT(*)`), ignoring order and limits.
     ///
     /// # Errors

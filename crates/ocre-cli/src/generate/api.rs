@@ -288,8 +288,11 @@ fn graphql_rs(names: &ModelNames, fields: &[Field]) -> String {
         if field.ty == FieldType::Boolean {
             input_fields.push_str("    #[graphql(default)]\n");
         }
-        writeln!(input_fields, "    pub {name}: {column},").expect("writing to a String");
-        writeln!(input_values, "            {name}: input.{name},").expect("writing to a String");
+        // A new record starts at `lock_version` 0; patches send the version they read.
+        if field.ty != FieldType::LockVersion {
+            writeln!(input_fields, "    pub {name}: {column},").expect("writing to a String");
+            writeln!(input_values, "            {name}: input.{name},").expect("writing to a String");
+        }
         if field.optional {
             writeln!(patch_fields, "    pub {name}: MaybeUndefined<{ty}>,").expect("writing to a String");
             writeln!(

@@ -13,6 +13,7 @@ fn public_form_hides_internal_messages() {
     assert_eq!(public(Error::Unauthorized), (StatusCode::UNAUTHORIZED, "Unauthorized".to_owned(), vec![]));
     assert_eq!(public(Error::Forbidden), (StatusCode::FORBIDDEN, "Forbidden".to_owned(), vec![]));
     assert_eq!(public(Error::PayloadTooLarge("big".into())), (StatusCode::PAYLOAD_TOO_LARGE, "big".to_owned(), vec![]));
+    assert_eq!(public(Error::Conflict("stale".into())), (StatusCode::CONFLICT, "stale".to_owned(), vec![]));
     assert_eq!(
         public(Error::TooManyRequests),
         (StatusCode::TOO_MANY_REQUESTS, "Too many requests. Try again later.".to_owned(), vec![])
@@ -48,6 +49,7 @@ fn display_describes_each_variant() {
     assert_eq!(Error::Unauthorized.to_string(), "unauthorized");
     assert_eq!(Error::Forbidden.to_string(), "forbidden");
     assert_eq!(Error::PayloadTooLarge("big".into()).to_string(), "payload too large: big");
+    assert_eq!(Error::Conflict("stale".into()).to_string(), "conflict: stale");
     assert_eq!(Error::TooManyRequests.to_string(), "too many requests");
     let invalid =
         Error::Invalid(vec![FieldError::new("title", "can't be blank"), FieldError::new("pages", "is invalid")]);
@@ -65,4 +67,20 @@ fn runtime_errors_become_internal() {
 fn or_404_maps_none_to_not_found() {
     assert_eq!(Some(3).or_404().unwrap(), 3);
     assert!(matches!(None::<i32>.or_404(), Err(Error::NotFound)));
+}
+
+#[test]
+fn taken_values_are_recognized() {
+    assert!(
+        Error::Invalid(vec![
+            FieldError::new("email", "can't be blank"),
+            FieldError::new("email", "has already been taken")
+        ])
+        .is_taken()
+    );
+    assert!(Error::internal("UNIQUE constraint failed: users.email").is_taken());
+    assert!(Error::Conflict("stale".into()).is_taken());
+    assert!(!Error::internal("no such table").is_taken());
+    assert!(!Error::Invalid(vec![]).is_taken());
+    assert!(!Error::Forbidden.is_taken());
 }

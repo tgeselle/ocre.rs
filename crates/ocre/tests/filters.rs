@@ -25,3 +25,15 @@ fn every_filter_renders_its_helper() {
         "2,048|2048.0|€2,048.00|2048%|2 KB|2.05 Thousand|2 minutes|about 1 year|1971|...&#60;b&#62;...|a &lt;<mark>b</mark>&gt; c|a\n&#60;b&#62;\nc|tab active"
     );
 }
+
+#[derive(Template)]
+#[template(source = "{{ body|rich_text }}|{{ body|plain_text }}", ext = "html")]
+struct RichText<'a> {
+    body: &'a str,
+}
+
+#[test]
+fn rich_text_is_sanitized_and_plain_text_drops_tags() {
+    let html = RichText { body: "<div><strong>Hi</strong><script>x()</script></div>" }.render().unwrap();
+    assert_eq!(html, "<div><strong>Hi</strong></div>|Hi");
+}
