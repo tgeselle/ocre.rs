@@ -257,6 +257,11 @@ fn finish_reports_internal_errors_and_shows_details_only_in_development() {
     let own = block_on(finish(own, &details(false), &reporter, &timings, 1.0, false));
     assert_eq!(own.headers()["x-request-id"], "mine");
     assert!(reporter.take().is_empty(), "no report without an internal error");
+
+    // A redirect's target goes on the request line (Rails' verbose redirect logs).
+    let redirect = axum::response::IntoResponse::into_response(axum::response::Redirect::to("/posts/1"));
+    let redirect = block_on(finish(redirect, &details(true), &reporter, &timings, 1.0, true));
+    assert_eq!(redirect.headers()["location"], "/posts/1");
 }
 
 #[test]

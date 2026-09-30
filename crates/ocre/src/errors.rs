@@ -710,7 +710,12 @@ pub(crate) async fn finish(
         response.headers_mut().insert("server-timing", value);
     }
     let status = response.status().as_u16();
-    reporter.log.debug(timings.summary(&request.method, &request.path, status, total_ms));
+    let mut line = timings.summary(&request.method, &request.path, status, total_ms);
+    // Rails' verbose redirect logs: where a redirect sends the browser.
+    if let Some(location) = response.headers().get(axum::http::header::LOCATION).and_then(|value| value.to_str().ok()) {
+        line.push_str(&format!(" -> {location}"));
+    }
+    reporter.log.debug(line);
     response
 }
 
