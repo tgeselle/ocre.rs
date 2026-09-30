@@ -145,8 +145,9 @@ class Index:
         inner = item["inner"][kind]
         rows, traits = [], []
         if kind == "struct":
-            plain = inner["kind"].get("plain")
-            tuple_fields = inner["kind"].get("tuple")
+            shape = inner["kind"] if isinstance(inner["kind"], dict) else {}  # "unit" for `struct Foo;`
+            plain = shape.get("plain")
+            tuple_fields = shape.get("tuple")
             for field_id in (plain["fields"] if plain else tuple_fields or []):
                 field = self.get(field_id)
                 if field is not None and field["name"] and not field["name"].isdigit():
@@ -193,7 +194,8 @@ def entry(path, kind, item, gate=None):
         line += f"\n  `pub use {item['inner']['use']['source']}`"
     elif kind != "module" and item.get("span"):
         code = signature(item, kind)
-        if kind == "struct" and None in (item["inner"]["struct"]["kind"].get("tuple") or []):
+        struct_kind = item["inner"]["struct"]["kind"] if kind == "struct" else None
+        if isinstance(struct_kind, dict) and None in (struct_kind.get("tuple") or []):
             # Tuple structs with private fields: show the shape, not the private types.
             code = code[: code.index("(")] + "(/* private fields */)"
         line += f"\n  `{code}`"

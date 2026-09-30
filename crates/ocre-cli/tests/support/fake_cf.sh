@@ -108,6 +108,18 @@ esac
 echo "$tool $*" >> "$state/calls.log"
 
 if [ "$tool" = "wrangler" ]; then
+  # `ocre logs`: `wrangler tail <worker> --format <f> [--status s] [--search t]`.
+  # The auth failure is wrangler 4.144.0's recorded stderr with an expired,
+  # unrefreshable login; the stream is NOT recorded (it needs a deployed
+  # Worker): wrangler's documented pretty format, then an end instead of Ctrl-C.
+  if [ "$1" = "tail" ]; then
+    if [ -e "$state/tail_auth_fails" ]; then replay wrangler_tail_auth; fi
+    echo "Successfully created tail, expires at 2026-09-30T05:00:00Z"
+    echo "Connected to $2, waiting for logs..."
+    echo "GET https://$2.example.workers.dev/posts - Ok @ 9/29/2026, 11:00:00 PM"
+    echo "  (info) {\"level\":\"info\",\"message\":\"GET /posts 200\",\"request_id\":\"8c2f1a0b9d3e4f5a-CDG\"}"
+    exit 0
+  fi
   # The local D1 fallback: `wrangler d1 ... DB --local <args> -c .wrangler/ocre-d1.json --persist-to .wrangler/state`.
   if [ ! -e .wrangler/ocre-d1.json ]; then echo "✘ [ERROR] no derived config" >&2; exit 1; fi
   case "$2 $3" in

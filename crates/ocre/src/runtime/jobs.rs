@@ -398,16 +398,25 @@ where
             }
             Err(err) if discards(&err) => {
                 worker::console_error!("{LOG_PREFIX} {name} discarded, not retried: {err}");
+                report(&ctx, "ocre.job", &err, [("job", name.as_str()), ("retried", "false")]);
                 message.ack();
             }
             Err(err) => {
                 let delay = retry_delay(now(), envelope.at);
                 worker::console_error!("{LOG_PREFIX} {name} failed, retrying in {delay} s: {err}");
+                report(&ctx, "ocre.job", &err, [("job", name.as_str()), ("retried", "true")]);
                 message.retry_with_options(&QueueRetryOptionsBuilder::new().with_delay_seconds(delay).build());
             }
         }
     }
+    super::errors::flush(&ctx).await;
     Ok(())
+}
+
+/// Queues Ocre's own report of a failed job or cron run (already logged).
+pub(crate) fn report<const N: usize>(ctx: &Ctx, source: &str, err: &crate::Error, context: [(&str, &str); N]) {
+    let context = context.iter().map(|(key, value)| ((*key).to_owned(), serde_json::Value::from(*value))).collect();
+    ctx.errors().report_unhandled(&err.to_string(), source, context, false);
 }
 
 /// Runs the app's task for the Cron Trigger that fired; the Worker's `scheduled` entry point.
@@ -448,8 +457,13 @@ where
     Fut: Future<Output = Result<()>>,
 {
     let cron = event.cron();
-    match run(Ctx::new(env), cron.clone()).await {
+    let ctx = Ctx::new(env);
+    match run(ctx.clone(), cron.clone()).await {
         Ok(()) => worker::console_log!("{CRON_LOG_PREFIX} {cron} done"),
-        Err(err) => worker::console_error!("{CRON_LOG_PREFIX} {cron} failed: {err}"),
+        Err(err) => {
+            worker::console_error!("{CRON_LOG_PREFIX} {cron} failed: {err}");
+            report(&ctx, "ocre.cron", &err, [("cron", cron.as_str())]);
+        }
     }
+    super::errors::flush(&ctx).await;
 }

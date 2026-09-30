@@ -610,6 +610,23 @@ targets = ["wasm32-unknown-unknown"]
 
 rustup reads it in the app directory and installs the stable toolchain with the WebAssembly target on first use. A Rust installed without rustup (for example Homebrew's `rust`) ignores it and has no wasm target; `ocre dev`, `ocre deploy` and `ocre new --deploy` then stop with ``the wasm32-unknown-unknown target is not installed for rustc at <sysroot>`` and the hint ``use a rustup toolchain (Homebrew's `rust` has no wasm target) and run `rustup target add wasm32-unknown-unknown` ``. See [Installation](../getting-started/installation.md).
 
+### LOG_LEVEL
+
+- Kind: variable. Optional.
+- Value: `debug`, `info`, `warn`, `error` or `off` (`warning` and `fatal` are accepted): the lowest level `ctx.log()` and Ocre write. Default: `debug` in `ocre dev` (debug build), `info` after `ocre deploy` (release build). An unknown value is the default.
+- Read on every request, job batch and cron run. See [Errors, logging and debugging](../guides/debugging.md#levels-and-formats).
+
+### LOG_FORMAT
+
+- Kind: variable. Optional.
+- Value: `json` (one JavaScript object per line, whose fields Workers Logs indexes) or `text` (`INFO message key=value ...`). Default: `text` in `ocre dev`, `json` after `ocre deploy`.
+
+### SENTRY_DSN
+
+- Kind: secret. Optional; read only when the app registers `ocre::errors::Sentry` (see [Reporting errors](../guides/debugging.md#sending-reports-to-sentry)).
+- Value: the project's DSN, `https://<key>@<host>/<project id>`, from Sentry or a Sentry-compatible service.
+- When missing, reports are only logged. A value that is not a DSN is logged as ``[ocre] SENTRY_DSN is not a Sentry DSN (...)`` and nothing is sent. The optional `SENTRY_RELEASE` variable names the release in each event.
+
 ## See also
 
 - [CLI commands](cli.md): [`ocre dev`](cli.md#ocre-dev), [`ocre deploy`](cli.md#ocre-deploy), [`ocre secret`](cli.md#ocre-secret).

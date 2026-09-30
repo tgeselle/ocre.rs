@@ -83,11 +83,14 @@ impl<S: Send + Sync> FromRequestParts<S> for RequestId {
     type Rejection = Infallible;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        Ok(Self(request_id(&parts.headers)))
+        match parts.extensions.get::<Self>() {
+            Some(id) => Ok(id.clone()),
+            None => Ok(Self(request_id(&parts.headers))),
+        }
     }
 }
 
-fn request_id(headers: &HeaderMap) -> String {
+pub(crate) fn request_id(headers: &HeaderMap) -> String {
     let valid = |id: &&str| {
         (1..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
     };

@@ -7,6 +7,7 @@ pub(crate) mod cache;
 mod crypto;
 mod ctx;
 mod d1;
+pub(crate) mod errors;
 #[cfg(feature = "graphql")]
 mod graphql;
 pub(crate) mod jobs;
@@ -74,6 +75,18 @@ use crate::{protect, session};
 /// One call per Worker request (100,000 a day); the middleware itself reads no
 /// D1 rows and no KV keys: sessions live in the cookie.
 ///
+/// Around the router, `serve` picks the request id ([`RequestId`](crate::RequestId))
+/// and tags [`Ctx::log`] with it, the method and the path; answers with an
+/// `X-Request-Id` header; reports an [`Error::Internal`](crate::Error::Internal)
+/// response through [`Ctx::errors`] (logged as `[ocre] <message>`, then
+/// sent to the [`errors`](crate::errors) subscribers); and logs
+/// `GET /posts 200 in 40 ms (db: 3 queries, 12 ms)` at `debug`. Debug
+/// builds (`ocre dev`) also add a `Server-Timing` header (D1 time and
+/// total, in the browser's Network panel) and show the development error
+/// page: a 500 page with the internal message, the request's details
+/// (secrets filtered) and the D1 statements it ran, or `error.detail` in a
+/// JSON error. Release builds (`ocre deploy`) never show internal details.
+///
 /// # Examples
 ///
 /// `src/lib.rs` of a generated app:
@@ -104,11 +117,19 @@ pub async fn serve(routes: Router<Ctx>, req: HttpRequest, env: Env) -> worker::R
         allowed_origins: protect::parse_origins(var(protect::ALLOWED_ORIGINS)),
         allowed_hosts: protect::parse_hosts(var(protect::ALLOWED_HOSTS)),
     };
-    let ctx = Ctx::new(env);
+    let started = crate::clock::now_millis();
+    let dev = cfg!(debug_assertions);
+    let request_id = crate::request::request_id(req.headers());
+    let details = crate::errors::RequestDetails::new(&request_id, req.method().as_str(), req.uri(), req.headers(), dev);
+    let ctx = Ctx::new(env).with_log(details.logger());
     let mut req = req;
     req.extensions_mut().insert(ctx.clone());
-    let mut app = protect::wrap(routes.with_state(ctx), config);
-    let mut response = app.call(req).await?;
+    req.extensions_mut().insert(crate::RequestId(request_id));
+    let mut app = protect::wrap(routes.with_state(ctx.clone()), config);
+    let response = app.call(req).await?;
+    let total_ms = crate::clock::now_millis() - started;
+    let mut response = crate::errors::finish(response, &details, ctx.errors(), ctx.timings(), total_ms, dev).await;
+    errors::flush(&ctx).await;
     match response.extensions_mut().remove::<storage::R2Stream>() {
         Some(stream) => storage::into_js_response(response, stream),
         None => worker::response_to_wasm(response),

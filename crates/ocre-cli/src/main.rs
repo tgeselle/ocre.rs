@@ -153,6 +153,23 @@ enum Command {
     },
     /// Deploy to Cloudflare and apply remote migrations.
     Deploy,
+    /// Stream the deployed Worker's live logs (`wrangler tail`): each request,
+    /// its console lines (`ctx.log()`, Ocre's `[ocre]` errors) and uncaught
+    /// exceptions, as they happen. Ctrl-C stops. Stored logs are in the
+    /// dashboard (Workers Logs).
+    ///
+    /// Example: `ocre logs --status error`, `ocre logs --search checkout --format json`.
+    Logs {
+        /// Output: pretty (default) or json, one object per event.
+        #[arg(long, default_value = "pretty", value_parser = ["pretty", "json"])]
+        format: String,
+        /// Keep invocations with this outcome: ok, error or canceled (repeatable).
+        #[arg(long, value_parser = ["ok", "error", "canceled"])]
+        status: Vec<String>,
+        /// Keep events whose console lines contain this text.
+        #[arg(long)]
+        search: Option<String>,
+    },
     /// Print a new random secret, like `rails secret`: a value for SECRET_KEY_BASE.
     ///
     /// Example: `ocre secret` for a value to put in a git-ignored env file, then `ocre secrets push`.
@@ -624,6 +641,7 @@ fn main() -> ExitCode {
         Command::Sql { query, remote } => db::sql(&query, remote, json),
         Command::Dev { port } => cloudflare::dev(port, json),
         Command::Deploy => cloudflare::deploy(json),
+        Command::Logs { format, status, search } => cloudflare::logs(&format, &status, search.as_deref(), json),
         Command::Secret => secret::run(),
         Command::Secrets(SecretsCommand::List) => Project::find().and_then(|project| secrets::list(&project, json)),
         Command::Secrets(SecretsCommand::Push { names, file }) => {

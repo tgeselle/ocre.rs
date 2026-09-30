@@ -55,6 +55,7 @@ impl IntoResponse for Error {
         let page = ErrorPage { status: public.status, message: public.message, fields: public.fields };
         let mut response = (page.status, Html(page.default_html())).into_response();
         response.extensions_mut().insert(page);
+        crate::error::mark(public.internal, &mut response);
         response
     }
 }

@@ -5,7 +5,7 @@ use worker::{
     send::{SendFuture, SendWrapper},
 };
 
-use crate::{Error, Param, Result, Statement, sql::Value};
+use crate::{Error, Param, Result, Statement, instrument::Timings, log::Logger, sql::Value};
 
 /// Handle to the application's D1 (SQLite) database, from [`Ctx::db`](crate::Ctx::db).
 ///
@@ -47,11 +47,25 @@ use crate::{Error, Param, Result, Statement, sql::Value};
 /// ```
 pub struct Db {
     inner: SendWrapper<D1Database>,
+    probe: Option<Probe>,
+}
+
+/// Where a handle reports its statements: the request's logger (a `debug`
+/// line per statement) and timings (`Server-Timing`, the development error page).
+#[derive(Clone)]
+struct Probe {
+    log: Logger,
+    timings: Timings,
 }
 
 impl Db {
     pub(crate) fn new(db: D1Database) -> Self {
-        Self { inner: SendWrapper::new(db) }
+        Self { inner: SendWrapper::new(db), probe: None }
+    }
+
+    /// This handle, timing and logging each statement for the request.
+    pub(crate) fn probed(self, log: Logger, timings: Timings) -> Self {
+        Self { probe: Some(Probe { log, timings }), ..self }
     }
 
     /// Runs a query and returns every row, deserialized into `T`.
@@ -92,10 +106,10 @@ impl Db {
         params: Vec<Param>,
     ) -> impl Future<Output = Result<Vec<T>>> + Send + use<'q, T> {
         let stmt = self.prepare(sql, params);
-        SendFuture::new(async move {
+        SendFuture::new(timed(self.probe.clone(), sql, async move {
             let rows = stmt?.all().await.map_err(|err| query_error(sql, err))?;
             rows.results::<T>().map_err(|err| query_error(sql, err))
-        })
+        }))
     }
 
     /// Runs a query and returns its first row, if any, deserialized into `T`.
@@ -142,7 +156,9 @@ impl Db {
         params: Vec<Param>,
     ) -> impl Future<Output = Result<Option<T>>> + Send + use<'q, T> {
         let stmt = self.prepare(sql, params);
-        SendFuture::new(async move { stmt?.first::<T>(None).await.map_err(|err| query_error(sql, err)) })
+        SendFuture::new(timed(self.probe.clone(), sql, async move {
+            stmt?.first::<T>(None).await.map_err(|err| query_error(sql, err))
+        }))
     }
 
     /// Runs a statement that returns no rows (`INSERT`, `UPDATE`, `DELETE`) and gives the number of rows changed.
@@ -177,11 +193,11 @@ impl Db {
         params: Vec<Param>,
     ) -> impl Future<Output = Result<usize>> + Send + use<'q> {
         let stmt = self.prepare(sql, params);
-        SendFuture::new(async move {
+        SendFuture::new(timed(self.probe.clone(), sql, async move {
             let result = stmt?.run().await.map_err(|err| query_error(sql, err))?;
             let meta = result.meta().map_err(|err| query_error(sql, err))?;
             Ok(meta.and_then(|m| m.changes).unwrap_or(0))
-        })
+        }))
     }
 
     /// Whether a query returns at least one row.
@@ -214,10 +230,10 @@ impl Db {
     /// ```
     pub fn exists<'q>(&self, sql: &'q str, params: Vec<Param>) -> impl Future<Output = Result<bool>> + Send + use<'q> {
         let stmt = self.prepare(sql, params);
-        SendFuture::new(async move {
+        SendFuture::new(timed(self.probe.clone(), sql, async move {
             let row = stmt?.first::<serde_json::Value>(None).await.map_err(|err| query_error(sql, err))?;
             Ok(row.is_some())
-        })
+        }))
     }
 
     /// Runs every statement in one transaction and returns the rows changed by each one.
@@ -260,8 +276,10 @@ impl Db {
         let prepared: Result<Vec<D1PreparedStatement>> =
             statements.into_iter().map(|s| self.prepare(&s.sql, s.params)).collect();
         let db = &self.inner;
+        let probe = self.probe.clone();
         SendFuture::new(async move {
-            let results = db.batch(prepared?).await.map_err(|err| query_error(&sql, err))?;
+            let batch = async { db.batch(prepared?).await.map_err(|err| query_error(&sql, err)) };
+            let results = timed(probe, &sql, batch).await?;
             results
                 .iter()
                 .map(|result| {
@@ -275,6 +293,22 @@ impl Db {
         let values: Vec<JsValue> = params.into_iter().map(to_js).collect();
         self.inner.prepare(sql).bind(&values).map_err(|err| query_error(sql, err))
     }
+}
+
+/// Runs one D1 call; with a probe, records how long it waited (Workers' clock only
+/// advances during I/O, so this is D1's time) and logs it at `debug`.
+async fn timed<T>(probe: Option<Probe>, sql: &str, future: impl Future<Output = Result<T>>) -> Result<T> {
+    let Some(probe) = probe else { return future.await };
+    let started = crate::clock::now_millis();
+    let result = future.await;
+    let ms = crate::clock::now_millis() - started;
+    probe.timings.record(sql, ms);
+    if probe.log.enabled(crate::log::Level::Debug) {
+        let log = probe.log.with("duration_ms", ms);
+        let log = if result.is_err() { log.with("failed", true) } else { log };
+        log.debug(format_args!("SQL ({ms} ms) {sql}"));
+    }
+    result
 }
 
 fn to_js(param: Param) -> JsValue {

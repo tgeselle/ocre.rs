@@ -1,7 +1,8 @@
 use super::*;
 
 fn public(err: Error) -> (StatusCode, String, Vec<FieldError>) {
-    let Public { status, message, fields } = err.into_public();
+    let Public { status, message, fields, internal } = err.into_public();
+    assert_eq!(internal.is_some(), status == StatusCode::INTERNAL_SERVER_ERROR);
     (status, message, fields)
 }
 
@@ -18,6 +19,17 @@ fn public_form_hides_internal_messages() {
     );
     let (status, message, _) = public(Error::internal("password=hunter2"));
     assert_eq!((status, message.as_str()), (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"));
+    assert_eq!(Error::internal("D1 down").into_public().internal.as_deref(), Some("D1 down"));
+}
+
+#[test]
+fn only_internal_errors_mark_their_response_for_reporting() {
+    let mut response = axum::response::Response::default();
+    mark(None, &mut response);
+    assert!(response.extensions().get::<InternalError>().is_none());
+    mark(Some("D1 down".into()), &mut response);
+    assert_eq!(response.extensions().get::<InternalError>().unwrap().0, "D1 down");
+    log_internal("logged as an error line");
 }
 
 #[test]

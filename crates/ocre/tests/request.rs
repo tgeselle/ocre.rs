@@ -75,3 +75,13 @@ fn redirect_back_only_follows_same_host_referers() {
     assert_eq!(location(&[host]), "/fallback");
     assert_eq!(location(&[("referer", "https://blog.example/")]), "/fallback");
 }
+
+#[test]
+fn request_id_reuses_the_one_serve_picked() {
+    // `serve` stores the id it logs with, so the extractor, the logs and the
+    // X-Request-Id header agree even when the id was generated.
+    let mut p = parts(&[]);
+    p.extensions.insert(RequestId("0123456789abcdef".into()));
+    let Ok(RequestId(id)) = block_on(RequestId::from_request_parts(&mut p, &()));
+    assert_eq!(id, "0123456789abcdef");
+}

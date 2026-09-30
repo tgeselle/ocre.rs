@@ -61,6 +61,9 @@ pub use async_graphql;
 impl From<Error> for async_graphql::Error {
     fn from(err: Error) -> Self {
         let public = err.into_public();
+        if let Some(internal) = &public.internal {
+            crate::error::log_internal(internal);
+        }
         let fields = (!public.fields.is_empty()).then(|| public.fields_json());
         async_graphql::Error::new(public.message).extend_with(|_, extensions| {
             extensions.set("status", public.status.as_u16());

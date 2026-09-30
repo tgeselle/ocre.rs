@@ -35,6 +35,19 @@ pub fn now() -> i64 {
     }
 }
 
+/// Unix time in milliseconds, for durations (D1 statements, requests).
+pub(crate) fn now_millis() -> f64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        js_sys::Date::now()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let elapsed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
+        elapsed.map_or(0.0, |elapsed| elapsed.as_secs_f64() * 1000.0)
+    }
+}
+
 #[cfg(test)]
 #[path = "../tests/clock.rs"]
 mod tests;

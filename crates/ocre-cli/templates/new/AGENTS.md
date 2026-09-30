@@ -63,6 +63,7 @@ on stdout (`"ok": true|false`, plus `error` and `hint` on failure).
 | Run locally (http://localhost:8787) | `ocre dev` |
 | List routes (method, path, handler) | `ocre routes` (or `ocre routes posts`) |
 | New secret value | `ocre secret` |
+| Live production logs | `ocre logs` (`--status error`, `--search text`) |
 | Secret names locally and deployed; upload production values | `ocre secrets list`, `ocre secrets push GITHUB_CLIENT_SECRET --file .prod.vars` |
 | Check tools, bindings, migrations, secrets (fails on a problem) | `ocre doctor` |
 | Versions and configuration; code size; TODO/FIXME comments | `ocre about`, `ocre stats`, `ocre notes` |
@@ -253,6 +254,13 @@ package.json        pinned cf, wrangler, typescript (commit package-lock.json); 
   (429 when over) with a `BINDING: bindings.rateLimit({ namespace: "<unique integer>", simple: { limit: 10, period: 60 } }),`
   entry in cloudflare.config.ts; key by
   `ocre::remote_ip(&headers)` or user id.
+- Logging: `ctx.log().info(...)` (levels trace/debug/info/warn/error; add fields with
+  `ctx.log().with("key", value)`), never `println!`. Lines carry the request id and
+  go to Workers Logs as JSON in production. `LOG_LEVEL` (var) sets the level.
+- Errors: return `Error::internal("...")` for unexpected failures (logged with the
+  request's details and sent to `ocre::errors` subscribers, e.g. Sentry with the
+  `SENTRY_DSN` secret); `ctx.errors().report(...)` for errors you handle yourself.
+  `ocre dev` shows a development error page with the D1 statements the request ran.
 - `GET /up` is the health check; keep it cheap (no database).
 - Email: build it in a mailer (`src/mailers/`), send it from the handler with
   `ocre::mail::send(&ctx, mailers::user::welcome(&address)?).await?`. Validate

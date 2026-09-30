@@ -24,6 +24,7 @@
 - [Realtime](guides/realtime.md)
 - [Caching](guides/caching.md)
 - [Translations](guides/i18n.md)
+- [Errors, logging and debugging](guides/debugging.md)
 - [Testing an Ocre app](guides/testing.md)
 - [Deployment](guides/deployment.md)
 - [Upgrading from wrangler.toml](guides/upgrading.md)

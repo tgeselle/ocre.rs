@@ -1,7 +1,8 @@
+use serde::de::DeserializeOwned;
 use worker::{Env, send::SendWrapper};
 
 use super::Db;
-use crate::{Error, Result};
+use crate::{Error, Result, errors::Reporter, instrument::Timings, log::Logger};
 
 /// Name of the D1 binding every Ocre app uses for its main database.
 const DB_BINDING: &str = "DB";
@@ -38,13 +39,111 @@ const DB_BINDING: &str = "DB";
 #[derive(Clone)]
 pub struct Ctx {
     env: SendWrapper<Env>,
+    log: Logger,
+    errors: Reporter,
+    timings: Timings,
 }
 
 impl Ctx {
     pub(crate) fn new(env: Env) -> Self {
         // Once per Worker instance: the keys of encrypted model columns.
         crate::encryption::ensure_installed(&|name| env.secret(name).ok().map(|secret| secret.to_string()));
-        Self { env: SendWrapper::new(env) }
+        let var = |name: &str| env.var(name).ok().map(|var| var.to_string());
+        crate::log::configure(var(crate::log::LOG_LEVEL).as_deref(), var(crate::log::LOG_FORMAT).as_deref());
+        install_panic_hook();
+        let log = Logger::new();
+        Self { env: SendWrapper::new(env), errors: Reporter::new(log.clone()), log, timings: Timings::default() }
+    }
+
+    /// The same context whose log lines and error reports carry `log`'s fields (the request id...).
+    pub(crate) fn with_log(mut self, log: Logger) -> Self {
+        self.errors = Reporter::new(log.clone());
+        self.log = log;
+        self
+    }
+
+    pub(crate) fn timings(&self) -> &Timings {
+        &self.timings
+    }
+
+    /// The logger of this request, job batch or cron run (see [`ocre::log`](crate::log)).
+    ///
+    /// In a request its lines carry `request_id`, `method` and `path`, the
+    /// same request id as the [`RequestId`](crate::RequestId) extractor and
+    /// the `X-Request-Id` response header. Add fields with
+    /// [`Logger::with`]. No binding call; each line is one Workers Logs event.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use axum::extract::State;
+    /// use ocre::Ctx;
+    ///
+    /// async fn import(State(ctx): State<Ctx>) -> &'static str {
+    ///     let log = ctx.log().with("import_id", 12);
+    ///     log.info("import started");
+    ///     log.warn(format_args!("{} rows skipped", 3));
+    ///     "OK"
+    /// }
+    /// # let _ = import;
+    /// ```
+    pub fn log(&self) -> &Logger {
+        &self.log
+    }
+
+    /// The error reporter of this request, job batch or cron run (see [`ocre::errors`](crate::errors)).
+    ///
+    /// Reports are logged at once and sent to the registered subscribers
+    /// when the response is ready (or the job or cron run ends).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use axum::extract::State;
+    /// use ocre::{Ctx, Result};
+    ///
+    /// async fn refresh(State(ctx): State<Ctx>) -> Result<&'static str> {
+    ///     ctx.errors().set_context("feed", "rss");
+    ///     let body: Option<String> = ctx.errors().handle("<rss/>".parse::<String>());
+    ///     Ok(if body.is_some() { "refreshed" } else { "kept the old feed" })
+    /// }
+    /// # let _ = refresh;
+    /// ```
+    pub fn errors(&self) -> &Reporter {
+        &self.errors
+    }
+
+    /// The app's settings, read from Worker variables and secrets into `T` (see [`ocre::config`](crate::config)).
+    ///
+    /// Each field reads the variable of the same name in upper case, or
+    /// else the secret. No binding call: one environment lookup per field.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Internal`] (500, logged) naming the variable when a required
+    /// one is missing or does not convert to its field's type.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use axum::extract::State;
+    /// use ocre::{Ctx, Result};
+    /// use serde::Deserialize;
+    ///
+    /// #[derive(Deserialize)]
+    /// struct Settings {
+    ///     support_email: String,
+    ///     max_uploads: Option<u32>,
+    /// }
+    ///
+    /// async fn contact(State(ctx): State<Ctx>) -> Result<String> {
+    ///     let settings: Settings = ctx.config()?;
+    ///     Ok(settings.support_email)
+    /// }
+    /// # let _ = contact;
+    /// ```
+    pub fn config<T: DeserializeOwned>(&self) -> Result<T> {
+        crate::config::from_lookup(&|name| super::errors::lookup(&self.env, name))
     }
 
     /// The raw Workers environment, for bindings Ocre does not wrap yet.
@@ -128,10 +227,28 @@ impl Ctx {
     /// # let _ = track;
     /// ```
     pub fn db_named(&self, binding: &str) -> Result<Db> {
-        self.env.d1(binding).map(Db::new).map_err(|err| {
+        self.env.d1(binding).map(|db| Db::new(db).probed(self.log.clone(), self.timings.clone())).map_err(|err| {
             Error::internal(format!(
                 "D1 binding `{binding}` is missing ({err}). Fix: add `{binding}: bindings.d1({{ name: \"<database>\" }}),` to worker.env in cloudflare.config.ts"
             ))
         })
     }
+}
+
+/// Logs panics as `error` lines with their location: on Workers a panic
+/// otherwise ends the request with only `RuntimeError: unreachable`.
+fn install_panic_hook() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        std::panic::set_hook(Box::new(|info| {
+            let payload = info.payload();
+            let message = payload
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("Box<dyn Any>");
+            let location = info.location().map(|at| (at.file(), at.line(), at.column()));
+            Logger::new().error(crate::log::panic_line(message, location));
+        }));
+    });
 }

@@ -451,6 +451,34 @@ fn missing(tool: &str, err: std::io::Error) -> CliError {
 }
 
 /// Remote commands and `cf dev` need the app's pinned packages.
+/// `ocre logs`: streams the deployed Worker's live logs until stopped
+/// (Ctrl-C) through the app's wrangler (`wrangler tail`): cf 1.0.0-beta.5
+/// has no tail command. `format` is `pretty` or `json`; `status` keeps
+/// invocations by outcome (`ok`, `error`, `canceled`); `search` keeps
+/// events whose console lines contain the text.
+pub fn logs(format: &str, status: &[String], search: Option<&str>, json: bool) -> CliResult {
+    let project = Project::find()?;
+    require_install(&project.root)?;
+    let config = project.config()?;
+    let name = config.worker_name()?;
+    let mut args = vec!["tail", name, "--format", format];
+    for status in status {
+        args.extend(["--status", status.as_str()]);
+    }
+    if let Some(search) = search {
+        args.extend(["--search", search]);
+    }
+    let mut command = Command::new(project.root.join("node_modules/.bin/wrangler"));
+    command.args(&args).current_dir(&project.root).stdin(Stdio::null());
+    run(command, &format!("wrangler {}", args.join(" ")), Echo::for_json(json)).map_err(|err| {
+        err.hint(format!(
+            "wrangler tail uses wrangler's own login: run `npx wrangler login` in {}, or set CLOUDFLARE_API_TOKEN; the Worker must be deployed (`ocre deploy`)",
+            project.root.display()
+        ))
+    })?;
+    Ok(Report::new("logs"))
+}
+
 fn require_install(root: &Path) -> Result<(), CliError> {
     if root.join("node_modules/.bin/cf").is_file() && root.join("node_modules/.bin/wrangler").is_file() {
         return Ok(());

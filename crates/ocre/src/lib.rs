@@ -132,8 +132,10 @@
 mod api;
 pub mod cache;
 mod clock;
+pub mod config;
 pub mod encryption;
 mod error;
+pub mod errors;
 mod fields;
 #[cfg(feature = "html")]
 #[cfg_attr(docsrs, doc(cfg(feature = "html")))]
@@ -145,8 +147,10 @@ pub mod helpers;
 #[cfg(feature = "html")]
 mod htmx;
 pub mod i18n;
+mod instrument;
 pub mod jobs;
 pub mod jwt;
+pub mod log;
 pub mod mail;
 mod names;
 pub mod oauth;

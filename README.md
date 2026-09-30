@@ -68,6 +68,7 @@ explanations, each page also as Markdown (`<page>.md`), with
 | `ocre test [--e2e] [-- args]` | `cargo test`, then the wasm32 check; `--e2e` also runs `tests/e2e.sh` against a `cf dev` started for the run (`BASE_URL`) |
 | `ocre deploy` | Creates what `cloudflare.config.ts` names and Cloudflare lacks (the D1 database, queues, KV namespaces without an `id`, whose id it then writes into the file, R2 buckets), uploads a new `SECRET_KEY_BASE` only when the Worker has none (an existing one is never rotated), applies remote migrations, then runs `cf deploy`. Refuses locale files the Worker could not load |
 | `ocre i18n missing` | Keys of the default locale missing from other locales (with the plural forms each language needs), undeclared or invalid locale files; fails when there is any |
+| `ocre logs [--status error] [--search text] [--format json]` | Live logs of the deployed Worker (`wrangler tail`) |
 | `ocre routes [filter]` | The app's routes (method, path, handler), read from `src/lib.rs` and the modules it merges; `--json` returns `routes` |
 | `ocre schedules` / `ocre schedules run <task> [--port N]` | The crons of `cloudflare.config.ts` and their tasks (`--json` returns `schedules`); `run` fires one task on the running `ocre dev` through the dev server's local scheduled endpoint |
 | `ocre secret` | New random `SECRET_KEY_BASE` value (128 hex characters), like `rails secret` |

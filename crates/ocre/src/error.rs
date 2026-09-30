@@ -85,12 +85,19 @@ pub enum Error {
     Internal(String),
 }
 
-/// What a client may see of an [`Error`].
+/// What a client may see of an [`Error`], plus the internal message of a 500 (never sent).
 pub(crate) struct Public {
     pub status: StatusCode,
     pub message: String,
     pub fields: Vec<FieldError>,
+    pub internal: Option<String>,
 }
+
+/// Response extension of a 500 built from [`Error::Internal`]: `serve`
+/// logs and reports the message with the request's details, and in debug
+/// builds shows it on the development error page.
+#[derive(Debug, Clone)]
+pub(crate) struct InternalError(pub String);
 
 impl Public {
     /// `{"title": ["can't be blank", ...], ...}`, the shape Rails APIs use.
@@ -131,9 +138,10 @@ impl Error {
         Self::Internal(message.into())
     }
 
-    /// Client-safe form. Internal details are logged here and replaced by a
-    /// generic message.
+    /// Client-safe form: internal details move to [`Public::internal`] and
+    /// are replaced by a generic message.
     pub(crate) fn into_public(self) -> Public {
+        let mut internal = None;
         let (status, message, fields) = match self {
             Self::NotFound => (StatusCode::NOT_FOUND, "Not found".to_owned(), vec![]),
             Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message, vec![]),
@@ -145,11 +153,19 @@ impl Error {
                 (StatusCode::TOO_MANY_REQUESTS, "Too many requests. Try again later.".to_owned(), vec![])
             }
             Self::Internal(message) => {
-                log_internal(&message);
+                internal = Some(message);
                 (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_owned(), vec![])
             }
         };
-        Public { status, message, fields }
+        Public { status, message, fields, internal }
+    }
+}
+
+/// Marks `response` with [`InternalError`] when it answers an
+/// [`Error::Internal`] (`internal` from [`Public::internal`]), for `serve` to report.
+pub(crate) fn mark(internal: Option<String>, response: &mut axum::response::Response) {
+    if let Some(message) = internal {
+        response.extensions_mut().insert(InternalError(message));
     }
 }
 
@@ -179,12 +195,11 @@ impl From<worker::Error> for Error {
     }
 }
 
-/// Worker logs (Workers Logs in the dashboard); stderr in native unit tests.
+/// Logs `[ocre] <message>` as an `error` line (Workers Logs in the
+/// dashboard; stderr in native unit tests), for failures outside a request's
+/// error reporting.
 pub(crate) fn log_internal(message: &str) {
-    #[cfg(target_arch = "wasm32")]
-    worker::console_error!("[ocre] {message}");
-    #[cfg(not(target_arch = "wasm32"))]
-    eprintln!("[ocre] {message}");
+    crate::log::Logger::new().error(format_args!("[ocre] {message}"));
 }
 
 /// Extension for `Option`: `option.or_404()?` turns a missing record into a 404 response.

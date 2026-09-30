@@ -64,7 +64,8 @@ impl From<worker::Error> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let public = self.0.into_public();
+        let mut public = self.0.into_public();
+        let internal = public.internal.take();
         let fields = (!public.fields.is_empty()).then(|| public.fields_json());
         let mut error = serde_json::json!({ "status": public.status.as_u16(), "message": public.message });
         if let Some(fields) = fields {
@@ -75,6 +76,7 @@ impl IntoResponse for ApiError {
             // RFC 9110: a 401 names the scheme the client should use.
             response.headers_mut().insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
         }
+        crate::error::mark(internal, &mut response);
         response
     }
 }

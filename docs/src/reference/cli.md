@@ -34,6 +34,7 @@ The examples below come from `ocre 0.1.0` on apps created by `ocre new ... --sta
 | [`ocre dev`](#ocre-dev) | Applies local migrations, then runs the app with `cf dev` |
 | [`ocre test`](#ocre-test) | Runs `cargo test`, the wasm32 check and, with `--e2e`, `tests/e2e.sh` against a local server |
 | [`ocre deploy`](#ocre-deploy) | Creates missing Cloudflare resources, applies remote migrations, then runs `cf deploy` |
+| [`ocre logs`](#ocre-logs) | Streams the deployed Worker's live logs (`wrangler tail`) |
 | [`ocre secret`](#ocre-secret) | Prints a new random value for `SECRET_KEY_BASE` |
 | [`ocre secrets list` / `push`](#ocre-secrets) | Lists secret names locally and on the Worker; uploads values from a git-ignored file |
 | [`ocre routes [FILTER]`](#ocre-routes) | Lists the app's HTTP routes, read from its source |
@@ -921,6 +922,24 @@ Errors (besides the shared ones):
 | `` unexpected `cf ...` output: ... `` | none |
 
 Resources created before a failure stay created; running `ocre deploy` again skips them.
+
+## ocre logs
+
+Streams the deployed Worker's live logs until you stop it (Ctrl-C): each request with its outcome, its console lines (`ctx.log()` lines, Ocre's `[ocre]` errors) and uncaught exceptions. It runs the app's `wrangler tail`, because cf 1.0.0-beta.5 has no tail command, so it uses wrangler's own login (`npx wrangler login` in the app, or `CLOUDFLARE_API_TOKEN`). Stored logs are in the dashboard (Workers Logs).
+
+```sh
+ocre logs                               # pretty, every request
+ocre logs --status error                # failed invocations only
+ocre logs --search checkout --format json
+```
+
+| Flag | Effect |
+|---|---|
+| `--format pretty\|json` | `pretty` (default), or one JSON object per event |
+| `--status ok\|error\|canceled` | Keep invocations with that outcome (repeatable) |
+| `--search <text>` | Keep events whose console lines contain the text |
+
+Errors: outside an app, the usual "no cloudflare.config.ts found" error; without `npm install`, the hint names it; when wrangler fails (not logged in, Worker never deployed), the error carries wrangler's output and the hint `wrangler tail uses wrangler's own login: run npx wrangler login ... the Worker must be deployed (ocre deploy)`. See [Errors, logging and debugging](../guides/debugging.md).
 
 ## ocre secret
 
