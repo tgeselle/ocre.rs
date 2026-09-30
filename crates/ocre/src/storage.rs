@@ -13,6 +13,14 @@
 //! [`delete`] and [`delete_attachments`] cover the rest. [`store_bytes`] stores
 //! app-made files and [`store_body`] streams a raw request body.
 //!
+//! Beyond the Worker: [`head`], [`exists`] and [`list`] inspect the bucket;
+//! [`presign_get`] / [`serve_redirect`] let browsers download straight from
+//! R2's S3 API; [`direct_upload`] and [`attach_direct_upload`] let them
+//! upload straight to it (no 100 MB request limit, no Worker memory), and
+//! [`purge_unattached`] deletes direct uploads no row adopted. [`analyze`]
+//! reads a file's real type and image size, [`Variant`] builds Cloudflare
+//! Image Transformations URLs, [`public_url`] links to a public bucket.
+//!
 //! Keys are random (`<prefix>/<22 characters>`, 128 bits, never derived from
 //! file names) and never reused, so a stored object never changes: replacing
 //! a file means storing a new key and deleting the old one. `ocre g scaffold
@@ -25,6 +33,9 @@
 //! upload is one), 10M class B operations (each download or 304 is one),
 //! deletes free, no egress fees. R2 has to be enabled once in the dashboard,
 //! which asks for a payment method even for the free tier.
+//! Listing is a class A operation per call (up to 1,000 keys), `head` a
+//! class B one; presigning costs no operation (the browser's `PUT` or
+//! `GET` on the URL does).
 //!
 //! CPU: downloads never pass through WebAssembly ([`serve`] hands R2's stream
 //! to [`crate::serve`]). Uploads are read into memory and split: about 1.2 ms
@@ -73,7 +84,10 @@
 //! }
 //! ```
 
+mod analyze;
 mod multipart;
+mod presign;
+mod variant;
 
 use std::fmt::Write as _;
 
@@ -85,15 +99,25 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
-pub use crate::runtime::storage::{delete, delete_attachments, read, serve, store, store_body, store_bytes};
-use crate::{IntoParam, Param, Validator, token::random_bytes};
+pub use crate::runtime::storage::{
+    attach_direct_upload, delete, delete_attachments, direct_upload, exists, head, list, presign_get, presign_put,
+    public_url, purge_unattached, read, read_first, serve, serve_redirect, store, store_body, store_bytes,
+};
+use crate::{Error, IntoParam, Param, Result, Validator, token::random_bytes};
+pub use analyze::{Analysis, analyze};
 pub use multipart::{Multipart, MultipartForm};
+pub use presign::{
+    DirectUpload, DirectUploadRequest, MAX_EXPIRES_IN, R2_ACCESS_KEY_ID, R2_ACCOUNT_ID, R2_BUCKET,
+    R2_SECRET_ACCESS_KEY, S3Endpoint,
+};
+pub(crate) use presign::{attachment_from_head, presign_get_url, r2_endpoint, verify_key};
+pub use variant::{Fit, Variant};
 
 /// Name of the R2 binding holding every file: `STORAGE: bindings.r2({ name: "<app>-storage" })` in cloudflare.config.ts.
 ///
 /// The bucket itself is `<app>-storage`; the first generator that needs it
 /// adds the entry, and `ocre deploy` creates the bucket. Every function of
-/// this module fails with [`Error::Internal`](crate::Error::Internal) naming
+/// this module fails with [`Error::Internal`] naming
 /// this entry when the binding is missing.
 ///
 /// # Examples
@@ -231,6 +255,27 @@ pub struct Upload {
 }
 
 impl Upload {
+    /// An upload made by the app (Active Storage's `attach(io:, filename:, content_type:)`), cleaned up like a browser's.
+    ///
+    /// For bytes that did not come from a form: a generated PDF, a fetched
+    /// image, a test fixture. The file name loses directories and control
+    /// characters, the content type is lowercased without parameters, as
+    /// [`MultipartForm::file`] does. Hand it to a model (`NewPhoto { image:
+    /// Some(upload), .. }`) or to [`store`]; [`store_bytes`] stores bytes directly.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ocre::storage::Upload;
+    ///
+    /// let upload = Upload::new("reports/2026.pdf", "Application/PDF; x=y", b"%PDF-1.7".to_vec());
+    /// assert_eq!((upload.filename.as_str(), upload.content_type.as_str()), ("2026.pdf", "application/pdf"));
+    /// assert_eq!(upload.size(), 8);
+    /// ```
+    pub fn new(filename: &str, content_type: &str, bytes: impl Into<Bytes>) -> Self {
+        Self { filename: sanitize_filename(filename), content_type: essence(content_type), bytes: bytes.into() }
+    }
+
     /// Returns the size of the file in bytes.
     ///
     /// # Examples
@@ -247,13 +292,178 @@ impl Upload {
     }
 }
 
+/// An object in the bucket, as [`head`] and [`list`] describe it (without its bytes).
+///
+/// # Examples
+///
+/// ```
+/// use ocre::storage::StoredObject;
+///
+/// let object = StoredObject {
+///     key: "uploads/2u1Vd0zJ8sQqS6rJq0rVmA".into(),
+///     size: 2048,
+///     content_type: "image/png".into(),
+///     etag: "b6ab5f279cbcf9a1b96b3ab5b207cf94".into(),
+///     uploaded_at: 1_790_000_000,
+///     filename: None,
+/// };
+/// let attachment = object.attachment("C:\\me.png");
+/// assert_eq!((attachment.filename.as_str(), attachment.size), ("me.png", 2048));
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredObject {
+    /// Object key.
+    pub key: String,
+    /// Size in bytes.
+    pub size: u64,
+    /// Content type recorded with the object (`application/octet-stream` when none was).
+    pub content_type: String,
+    /// R2's entity tag, unquoted (the MD5 of the content for single-part uploads).
+    pub etag: String,
+    /// Upload time, in Unix seconds (compare with [`crate::now`]).
+    pub uploaded_at: i64,
+    /// File name recorded by [`store`] and friends; `None` for objects uploaded directly.
+    pub filename: Option<String>,
+}
+
+impl StoredObject {
+    /// The [`Attachment`] of this object under `filename` (cleaned up), with its recorded size and type.
+    ///
+    /// Check the object against [`Rules`] first ([`attach_direct_upload`] does both).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let object = ocre::storage::StoredObject { key: "k".into(), size: 3, content_type: "text/plain".into(), ..Default::default() };
+    /// assert_eq!(object.attachment("a.txt").content_type, "text/plain");
+    /// ```
+    pub fn attachment(&self, filename: &str) -> Attachment {
+        Attachment {
+            key: self.key.clone(),
+            filename: sanitize_filename(filename),
+            content_type: essence(&self.content_type),
+            size: i64::try_from(self.size).unwrap_or(i64::MAX),
+        }
+    }
+}
+
+/// One page of [`list`]: the objects, and the cursor of the next page.
+///
+/// # Examples
+///
+/// ```
+/// use ocre::storage::Listing;
+///
+/// let last_page = Listing { objects: vec![], cursor: None };
+/// assert!(last_page.cursor.is_none());
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Listing {
+    /// Objects in key order.
+    pub objects: Vec<StoredObject>,
+    /// Pass it to the next [`list`] call; `None` on the last page.
+    pub cursor: Option<String>,
+}
+
+/// What one [`purge_unattached`] call did: the keys it deleted, and where the next call resumes.
+///
+/// # Examples
+///
+/// ```
+/// let purged = ocre::storage::Purged { deleted: vec!["uploads/a".into()], cursor: None };
+/// assert_eq!(purged.deleted.len(), 1);
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Purged {
+    /// Keys deleted by this call.
+    pub deleted: Vec<String>,
+    /// Cursor of the next page of the listing; `None` once the prefix was listed to the end.
+    pub cursor: Option<String>,
+}
+
+/// Name of the Worker variable holding the base URL of a public bucket, for [`public_url`].
+///
+/// An `r2.dev` URL or a custom domain connected to the bucket (dashboard:
+/// R2 > bucket > Settings > Public access), as
+/// `STORAGE_PUBLIC_URL: bindings.text("https://files.example.com"),` in `worker.env`.
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(ocre::storage::STORAGE_PUBLIC_URL, "STORAGE_PUBLIC_URL");
+/// ```
+pub const STORAGE_PUBLIC_URL: &str = "STORAGE_PUBLIC_URL";
+
+/// `<base>/<key>`, with each key segment percent-encoded.
+pub(crate) fn join_public_url(base: Option<String>, key: &str) -> Result<String> {
+    let base = base.filter(|base| !base.trim().is_empty()).ok_or_else(|| {
+        Error::internal(format!(
+            "public file URLs need the {STORAGE_PUBLIC_URL} variable. Fix: allow public access to the bucket (dashboard: \
+             R2 > bucket > Settings > Public access: an r2.dev URL or a custom domain), then add \
+             `{STORAGE_PUBLIC_URL}: bindings.text(\"https://files.example.com\"),` to worker.env in cloudflare.config.ts"
+        ))
+    })?;
+    let mut url = base.trim().trim_end_matches('/').to_owned();
+    for segment in key.split('/') {
+        url.push('/');
+        for byte in segment.bytes() {
+            if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+                url.push(byte as char);
+            } else {
+                write!(url, "%{byte:02X}").expect("writing to a String");
+            }
+        }
+    }
+    Ok(url)
+}
+
+/// `302 Found` to a presigned URL; browsers and shared caches may reuse it for half its lifetime.
+pub(crate) fn redirect_response(url: &str, expires_in: u64) -> Response {
+    let mut response = Response::new(Body::empty());
+    *response.status_mut() = StatusCode::FOUND;
+    response.headers_mut().insert(header::LOCATION, header_value(url));
+    let cache = format!("private, max-age={}", expires_in / 2);
+    response.headers_mut().insert(header::CACHE_CONTROL, header_value(&cache));
+    response
+}
+
+/// Largest page [`list`] asks R2 for.
+pub(crate) const MAX_LIST: u32 = 1000;
+
+/// Largest number of keys looked up per D1 query (D1 binds at most 100 parameters).
+pub(crate) const KEYS_PER_QUERY: usize = 100;
+
+/// Keys of the objects uploaded before `cutoff` (Unix seconds).
+pub(crate) fn stale_keys(objects: &[StoredObject], cutoff: i64) -> Vec<String> {
+    objects.iter().filter(|object| object.uploaded_at < cutoff).map(|object| object.key.clone()).collect()
+}
+
+/// `SELECT <column> AS key FROM <table> WHERE <column> IN (?1, ...)` for `count` keys.
+///
+/// `table` and `column` come from app code, never from requests; anything
+/// but ASCII letters, digits and `_` is refused.
+pub(crate) fn referenced_keys_sql(table: &str, column: &str, count: usize) -> Result<String> {
+    let identifier = |name: &str| {
+        !name.is_empty()
+            && !name.starts_with(|c: char| c.is_ascii_digit())
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    if !identifier(table) || !identifier(column) {
+        return Err(Error::internal(format!(
+            "purge_unattached takes a table and a column name (letters, digits, `_`), not `{table}` / `{column}`"
+        )));
+    }
+    let placeholders: Vec<String> = (1..=count).map(|n| format!("?{n}")).collect();
+    Ok(format!("SELECT {column} AS key FROM {table} WHERE {column} IN ({})", placeholders.join(", ")))
+}
+
 /// Describes what a file field accepts: a size limit and a content-type allowlist.
 ///
 /// Checked by [`Validator::file`](crate::Validator::file) before anything is
 /// stored. A `const`, so the [`Multipart`] request limit can be computed from
 /// it (generated forms use the sum of their files' limits plus 1 MB). The
-/// content type comes from the browser: the allowlist limits it, nothing
-/// sniffs file contents.
+/// content type comes from the browser: the allowlist limits it, and
+/// [`Validator::file_content`](crate::Validator::file_content) checks the bytes match it.
 ///
 /// # Examples
 ///
@@ -326,10 +536,21 @@ impl Validator {
     /// assert!(Validator::new().file("doc", &note, &DOC).finish().is_ok());
     /// ```
     pub fn file(&mut self, field: &str, upload: &Upload, rules: &Rules) -> &mut Self {
-        let too_large = upload.size() > rules.max_bytes as u64;
+        self.file_size_and_type(field, upload.size(), &upload.content_type, rules)
+    }
+
+    /// [`Validator::file`]'s checks on a size and a content type (declared for a direct upload, or read by `head`).
+    pub(crate) fn file_size_and_type(
+        &mut self,
+        field: &str,
+        size: u64,
+        content_type: &str,
+        rules: &Rules,
+    ) -> &mut Self {
+        let too_large = size > rules.max_bytes as u64;
         self.check(field, too_large, format!("is too large (maximum is {})", human_size(rules.max_bytes as u64)));
         let allowed = rules.content_types.join(", ");
-        self.check(field, !rules.allows(&upload.content_type), format!("has an unsupported type (allowed: {allowed})"))
+        self.check(field, !rules.allows(content_type), format!("has an unsupported type (allowed: {allowed})"))
     }
 }
 

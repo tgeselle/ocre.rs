@@ -263,3 +263,73 @@ fn send_data_sends_generated_bytes_as_a_file() {
     let response = send_data("<script>", "page.html", "text/html", Disposition::Inline);
     assert_eq!(header_of(&response, header::CONTENT_TYPE), "application/octet-stream");
 }
+
+#[test]
+fn uploads_built_by_the_app_are_cleaned_up_like_a_browsers() {
+    let upload = Upload::new("C:\\tmp\\report.pdf", " Application/PDF; q=1", vec![1u8, 2, 3]);
+    assert_eq!(
+        (upload.filename.as_str(), upload.content_type.as_str(), upload.size()),
+        ("report.pdf", "application/pdf", 3)
+    );
+}
+
+#[test]
+fn stored_objects_become_attachments_under_a_clean_name() {
+    let object = StoredObject {
+        key: "uploads/k".into(),
+        size: u64::MAX,
+        content_type: "Image/PNG".into(),
+        ..Default::default()
+    };
+    let attachment = object.attachment("../me.png");
+    assert_eq!(
+        attachment,
+        Attachment {
+            key: "uploads/k".into(),
+            filename: "me.png".into(),
+            content_type: "image/png".into(),
+            size: i64::MAX
+        }
+    );
+}
+
+#[test]
+fn public_urls_join_the_base_and_the_encoded_key() {
+    let base = |url: &str| Some(url.to_owned());
+    assert_eq!(
+        join_public_url(base("https://files.example.com/"), "users/avatar/a b+é").unwrap(),
+        "https://files.example.com/users/avatar/a%20b%2B%C3%A9"
+    );
+    assert_eq!(join_public_url(base(" https://pub-1.r2.dev "), "k").unwrap(), "https://pub-1.r2.dev/k");
+    for missing in [None, base("  ")] {
+        let message = join_public_url(missing, "k").unwrap_err().to_string();
+        assert!(message.contains("STORAGE_PUBLIC_URL: bindings.text("), "{message}");
+    }
+}
+
+#[test]
+fn redirects_point_to_the_url_and_are_cached_for_half_its_life() {
+    let response = redirect_response("https://acc.r2.cloudflarestorage.com/b/k?X-Amz-Signature=1", 3600);
+    assert_eq!(response.status(), StatusCode::FOUND);
+    assert_eq!(header_of(&response, header::LOCATION), "https://acc.r2.cloudflarestorage.com/b/k?X-Amz-Signature=1");
+    assert_eq!(header_of(&response, header::CACHE_CONTROL), "private, max-age=1800");
+}
+
+#[test]
+fn stale_keys_are_those_uploaded_before_the_cutoff() {
+    let object = |key: &str, uploaded_at| StoredObject { key: key.into(), uploaded_at, ..Default::default() };
+    let objects = [object("old", 99), object("edge", 100), object("new", 101)];
+    assert_eq!(stale_keys(&objects, 100), ["old"]);
+}
+
+#[test]
+fn referenced_keys_sql_binds_every_key_and_refuses_odd_identifiers() {
+    assert_eq!(
+        referenced_keys_sql("lessons", "video_key", 3).unwrap(),
+        "SELECT video_key AS key FROM lessons WHERE video_key IN (?1, ?2, ?3)"
+    );
+    for (table, column) in [("lessons; DROP TABLE users", "k"), ("t", ""), ("1t", "k"), ("t", "a-b")] {
+        let message = referenced_keys_sql(table, column, 1).unwrap_err().to_string();
+        assert!(message.contains("purge_unattached takes a table and a column name"), "{message}");
+    }
+}

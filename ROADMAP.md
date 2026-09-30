@@ -4,7 +4,7 @@ Feature-level inventory of Rails 8.1 and Loco 1.2, with what Ocre has and how
 each part maps to Cloudflare's free plan. Collected from the official Rails
 guides and the Loco documentation source; every item links to its page.
 
-993 features: 532 done, 104 partial, 265 to do, 92 not applicable on Workers.
+993 features: 539 done, 107 partial, 255 to do, 92 not applicable on Workers.
 
 Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason given).
 (R) Rails, (L) Loco.
@@ -725,7 +725,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** R2 (10 GB free, no egress fees) through a binding; direct uploads with presigned URLs. Image variants through Cloudflare Images transformations (free quota not verified). Rich text needs a JS editor, HTML sanitizing and R2 for attachments.
 
-51 features: 12 done, 3 partial, 36 to do, 0 not applicable.
+51 features: 19 done, 6 partial, 26 to do, 0 not applicable.
 
 ### Storage
 
@@ -740,15 +740,15 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [ ] **Per-call strategy override** (L): *_with_strategy and *_with_policy variants override the storage strategy for a single operation. [loco/how-to/configure-storage](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/configure-storage.md)
 - [x] **Upload and download** (L): Buffered upload/download of bytes, for example from multipart form uploads in controllers. [loco/how-to/configure-storage](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/configure-storage.md)
 - [~] **Streaming upload and download** (L): upload_stream and download_stream work with BytesStream, which converts to and from an axum Body so large files are not buffered. [loco/how-to/configure-storage](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/configure-storage.md)
-- [ ] **Exists, list and stat** (L): Checks whether a key exists, lists keys under a prefix, and returns metadata as ListEntry values. [loco/how-to/configure-storage](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/configure-storage.md)
-- [ ] **Presigned URLs** (L): presign_get and presign_put return time-limited signed URLs so clients can upload or download directly from the cloud store. [loco/how-to/configure-storage](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/configure-storage.md)
+- [x] **Exists, list and stat** (L): Checks whether a key exists, lists keys under a prefix, and returns metadata as ListEntry values. *Ocre: `storage::exists`, `head` (a `StoredObject`) and `list` (paged by cursor).* [loco/how-to/configure-storage](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/configure-storage.md)
+- [x] **Presigned URLs** (L): presign_get and presign_put return time-limited signed URLs so clients can upload or download directly from the cloud store. *Ocre: `storage::presign_get` and `presign_put`, signed with SigV4 for R2's S3 API (secrets `R2_ACCESS_KEY_ID`/`R2_SECRET_ACCESS_KEY`).* [loco/how-to/configure-storage](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/configure-storage.md)
 - [ ] **Custom storage drivers (StoreDriver)** (L): Implementing the StoreDriver trait adds your own storage backend. [loco/how-to/configure-storage](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/configure-storage.md)
 - [~] **Storage service configuration** (R): `storage.yml` defines named services selected per environment via `config.active_storage.service`. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [ ] **Disk service** (R): Stores files on the local filesystem. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
-- [ ] **S3 and S3-compatible service** (R): Stores files in Amazon S3 or compatible APIs with configurable region, bucket, upload options and endpoint. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
+- [~] **S3 and S3-compatible service** (R): Stores files in Amazon S3 or compatible APIs with configurable region, bucket, upload options and endpoint. *Ocre: `S3Endpoint` presigns URLs for any S3-compatible bucket; storing and reading go through the R2 binding.* [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [ ] **Google Cloud Storage service** (R): Stores files in GCS buckets. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [ ] **Mirror service** (R): Writes uploads to a primary and multiple mirror services for migration or redundancy. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
-- [ ] **Public access services** (R): `public: true` services serve permanent public URLs instead of signed expiring ones. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
+- [x] **Public access services** (R): `public: true` services serve permanent public URLs instead of signed expiring ones. *Ocre: `storage::public_url` joins keys to `STORAGE_PUBLIC_URL` (an r2.dev or custom domain of the bucket).* [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [x] **has_one_attached** (R): Declares a single file attachment on a model, with per-attachment `service:` and variant definitions. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [ ] **has_many_attached** (R): Declares multiple file attachments on a model. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [ ] **Attaching IO objects** (R): `attach(io:, filename:, content_type:, identify:)` attaches files from IO/File objects or signed blob IDs. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
@@ -756,19 +756,19 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [x] **Attachment form validation** (R): Attachments are staged until the record saves, allowing validations to run before upload. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [ ] **Querying attachments** (R): `with_attached_<name>` scopes and joins on attachment/blob tables for querying records by attachments. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [x] **Removing files** (R): `purge` and `purge_later` delete attachments and their blobs synchronously or via a job. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
-- [ ] **Redirect serving mode** (R): `url_for`/`rails_blob_path` generate stable URLs that redirect to short-lived signed service URLs. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
+- [x] **Redirect serving mode** (R): `url_for`/`rails_blob_path` generate stable URLs that redirect to short-lived signed service URLs. *Ocre: `storage::serve_redirect` answers with a short-lived presigned R2 URL.* [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [x] **Proxy serving mode** (R): Files can be streamed through the app (`rails_storage_proxy_path`), enabling CDN caching in front. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [~] **Authenticated file controllers** (R): Custom controllers inheriting Active Storage streaming concerns add authentication before serving files. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [x] **Downloading files** (R): `download` reads blob contents into memory or `open` downloads to a tempfile for processing. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
-- [ ] **File analysis** (R): Blobs are analyzed after upload in a job to extract metadata like image dimensions and video/audio duration. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
-- [ ] **Image variants** (R): `variant` with transformations (resize_to_limit, etc.) via Vips or MiniMagick, including named variants and preprocessed ones. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
-- [ ] **Lazy vs immediate variant loading** (R): Variants are processed on first request or eagerly via `processed`/`preprocessed`. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
+- [~] **File analysis** (R): Blobs are analyzed after upload in a job to extract metadata like image dimensions and video/audio duration. *Ocre: `storage::analyze` reads the type from the file's signature and image dimensions (PNG, GIF, WebP, JPEG); `Validator::file_content` rejects a mismatched type. No audio/video duration.* [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
+- [x] **Image variants** (R): `variant` with transformations (resize_to_limit, etc.) via Vips or MiniMagick, including named variants and preprocessed ones. *Ocre: `Variant::new().width(..).fit(Fit::Cover)` builds Cloudflare Images `/cdn-cgi/image/` URLs (free quota; needs transformations on the zone).* [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
+- [x] **Lazy vs immediate variant loading** (R): Variants are processed on first request or eagerly via `processed`/`preprocessed`. *Ocre: Variants are made on first request by Cloudflare and cached at the edge.* [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [ ] **File previews** (R): `preview`/`representation` generate images from PDFs and videos using previewers. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
-- [ ] **Direct uploads** (R): `direct_upload: true` file fields upload straight from the browser to the storage service using the JS library. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
+- [~] **Direct uploads** (R): `direct_upload: true` file fields upload straight from the browser to the storage service using the JS library. *Ocre: `storage::direct_upload` signs a PUT URL and `attach_direct_upload` checks the signed key; no bundled JavaScript yet.* [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [ ] **Direct upload JavaScript events** (R): Events (`direct-upload:start/progress/error/end`, etc.) and `DirectUpload` class allow progress tracking, custom drag-and-drop and framework integration. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [ ] **Attachment fixtures and test cleanup** (R): Fixtures for blobs/attachments, a test storage service, and cleanup of files created during tests. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [ ] **Custom storage services** (R): Implement `ActiveStorage::Service` subclasses to support other cloud providers. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
-- [ ] **Purging unattached uploads** (R): Unattached blobs (e.g. abandoned direct uploads) can be found with `ActiveStorage::Blob.unattached` and purged. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
+- [x] **Purging unattached uploads** (R): Unattached blobs (e.g. abandoned direct uploads) can be found with `ActiveStorage::Blob.unattached` and purged. *Ocre: `storage::purge_unattached` deletes objects under a prefix that no row of the table references, one page per call (for a cron).* [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 
 ### Rich text
 
