@@ -956,6 +956,12 @@ fn generated_app_broadcasts_changes_to_websockets_on_workerd() {
     let root = sandbox.new_app("e2e-live", &[]);
     let (report, ok) = sandbox.json(&["g", "scaffold", "Note", "title:string", "--realtime"], &root);
     assert!(ok, "{report}");
+    std::fs::write(root.join("src/chat.rs"), E2E_CHAT).unwrap();
+    let lib = std::fs::read_to_string(root.join("src/lib.rs"))
+        .unwrap()
+        .replace("// ocre:modules", "// ocre:modules\nmod chat;")
+        .replace("// ocre:routes", "// ocre:routes\n        .merge(chat::routes())");
+    std::fs::write(root.join("src/lib.rs"), lib).unwrap();
     let server = start(&sandbox, &root);
 
     // A broadcast to a channel nobody listens to still succeeds.
@@ -994,7 +1000,62 @@ fn generated_app_broadcasts_changes_to_websockets_on_workerd() {
     assert_eq!(get(&server, "/realtime/notes").status, 400, "plain GET");
     let evil = [("origin", "https://evil.example"), ("sec-fetch-site", "cross-site")];
     assert_eq!(websocket(&server, "/realtime/notes", &evil).err(), Some(403), "cross-site WebSocket hijacking");
+
+    // The development list of broadcasts, for tests: oldest first.
+    let (status, sent) = json(&server, "GET", "/ocre/dev/realtime/sent.json", "");
+    assert_eq!(status, 200, "{sent}");
+    let sent = sent.as_array().unwrap();
+    assert_eq!(sent.iter().map(|b| b["channel"].as_str().unwrap()).collect::<Vec<_>>(), ["notes"; 4]);
+    assert_eq!(sent[1]["message"], expected.as_str());
+    assert_eq!(sent[3]["message"], "<div id=\"note_2\" hx-swap-oob=\"delete\"></div>");
+
+    // Relayed client messages: JSON with the server-set identity, to the other
+    // sockets only; listeners (no rebroadcast) are ignored.
+    let mut ada = websocket(&server, "/chat/lobby?name=ada", &[]).unwrap();
+    let mut bob = websocket(&server, "/chat/lobby?name=bob", &[]).unwrap();
+    let mut quiet = websocket(&server, "/chat/lobby", &[]).unwrap();
+    quiet.send(tungstenite::Message::text("ignored")).unwrap();
+    ada.send(tungstenite::Message::text(r#"{"typing":true}"#)).unwrap();
+    let typing = r#"{"data":{"typing":true},"from":"ada"}"#;
+    assert_eq!(receive(&mut bob), typing);
+    assert_eq!(receive(&mut quiet), typing);
+    bob.send(tungstenite::Message::text("hi <b>")).unwrap();
+    // Ada was there first: she saw Bob join (presence), then his message.
+    assert_eq!(receive(&mut ada), r#"{"event":"joined","from":"bob"}"#);
+    assert_eq!(receive(&mut ada), r#"{"data":"hi <b>","from":"bob"}"#);
+    assert_eq!(receive(&mut quiet), r#"{"data":"hi <b>","from":"bob"}"#);
+    bob.close(None).unwrap();
+    while bob.read().is_ok() {}
+    assert_eq!(receive(&mut ada), r#"{"event":"left","from":"bob"}"#);
+    assert_eq!(receive(&mut quiet), r#"{"event":"left","from":"bob"}"#);
 }
+
+/// A relaying channel: `?name=` identifies a publisher, no name only listens.
+const E2E_CHAT: &str = r#"use axum::{
+    Router,
+    extract::{Path, Query, State},
+    response::Response,
+    routing::get,
+};
+use ocre::{Ctx, Result, realtime::WebSocketUpgrade};
+
+#[derive(serde::Deserialize)]
+struct Who {
+    name: Option<String>,
+}
+
+pub fn routes() -> Router<Ctx> {
+    Router::new().route("/chat/{room}", get(join))
+}
+
+async fn join(State(ctx): State<Ctx>, Path(room): Path<String>, Query(who): Query<Who>, upgrade: WebSocketUpgrade) -> Result<Response> {
+    let channel = format!("chat:{room}");
+    match who.name {
+        Some(name) => upgrade.identified_by(name).rebroadcast().connect(&ctx, &channel).await,
+        None => upgrade.connect(&ctx, &channel).await,
+    }
+}
+"#;
 
 const E2E_EN: &str = r#"en:
   hello:
@@ -1044,6 +1105,81 @@ pub fn routes() -> Router<Ctx> {
         .route("/cached", get(cached))
         .route("/cached/delete", post(forget))
         .route("/fresh", get(fresh))
+        .route("/fragments", get(fragments))
+        .route("/query-cache", get(query_cache))
+}
+
+/// Renders of cached fragments in this Worker instance.
+static RENDERS: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Template)]
+#[template(source = "<li>{{ name }}</li>", ext = "html")]
+struct Item<'a> {
+    name: &'a str,
+}
+
+#[derive(Template)]
+#[template(source = "<ul>{{ first }}{% for row in rows %}{{ row }}{% endfor %}</ul>", ext = "html")]
+struct List {
+    first: ocre::cache::Fragment,
+    rows: Vec<ocre::cache::Fragment>,
+}
+
+#[derive(serde::Deserialize)]
+struct Version {
+    v: String,
+}
+
+/// `first` and item `c` are keyed by `?v=`; `a` and `b<` are not.
+async fn fragments(State(ctx): State<Ctx>, axum::extract::Query(version): axum::extract::Query<Version>) -> Result<Html<String>> {
+    let ttl = Duration::from_secs(600);
+    let first = ocre::cache::fragment(&ctx, &ocre::cache::key(&[&"first", &version.v]), ttl, || {
+        RENDERS.fetch_add(1, Ordering::Relaxed);
+        Item { name: "first" }
+    })
+    .await?;
+    let names = ["a", "b<", "c"];
+    let rows = ocre::cache::fragments(
+        &ctx,
+        &names,
+        ttl,
+        |name| ocre::cache::key(&[&"item", name, &if *name == "c" { version.v.as_str() } else { "1" }]),
+        |name| {
+            RENDERS.fetch_add(1, Ordering::Relaxed);
+            Item { name }
+        },
+    )
+    .await?;
+    let html = render(&List { first, rows })?;
+    Ok(Html(format!("{}|renders={}", html.0, RENDERS.load(Ordering::Relaxed))))
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct Counter {
+    n: i64,
+}
+
+const COUNTER: &str = "SELECT n FROM e2e_counter";
+
+/// The query cache: stale after a write behind Ocre's back, fresh after `uncached` or an Ocre write.
+async fn query_cache(State(ctx): State<Ctx>) -> Result<Json<serde_json::Value>> {
+    let db = ctx.db()?;
+    db.execute("CREATE TABLE IF NOT EXISTS e2e_counter (n INTEGER NOT NULL)", ocre::params![]).await?;
+    db.execute("DELETE FROM e2e_counter", ocre::params![]).await?;
+    db.execute("INSERT INTO e2e_counter (n) VALUES (1)", ocre::params![]).await?;
+    let before: Option<Counter> = db.first(COUNTER, ocre::params![]).await?;
+    // Behind Ocre's back: the raw binding does not empty the query cache.
+    let raw = ctx.env().d1("DB")?;
+    worker::send::SendFuture::new(async move { raw.prepare("UPDATE e2e_counter SET n = 2").run().await }).await?;
+    let cached: Option<Counter> = db.first(COUNTER, ocre::params![]).await?;
+    let all: Vec<Counter> = db.all(COUNTER, ocre::params![]).await?;
+    let exists = db.exists("SELECT 1 FROM e2e_counter WHERE n = 2", ocre::params![]).await?;
+    let uncached: Option<Counter> = ctx.db()?.uncached().first(COUNTER, ocre::params![]).await?;
+    db.execute("UPDATE e2e_counter SET n = 3", ocre::params![]).await?;
+    let after: Option<Counter> = db.first(COUNTER, ocre::params![]).await?;
+    Ok(Json(serde_json::json!({
+        "before": before, "cached": cached, "all": all, "exists": exists, "uncached": uncached, "after": after,
+    })))
 }
 
 #[derive(Template)]
@@ -1152,6 +1288,24 @@ fn generated_app_translates_and_caches_on_workerd() {
     assert_eq!((again.status, again.body.as_str()), (304, ""));
     let other = send(&server, "GET", "/fresh", &[("accept-language", "en"), ("if-none-match", &etag)], &[]);
     assert_eq!((other.status, other.body.as_str()), (200, "Hello"), "the locale is part of the version");
+
+    // Fragments: rendered once, then read from KV (bulk for the list), written
+    // unescaped into the page; a new key renders again.
+    let list = "<ul><li>first</li><li>a</li><li>b&#60;</li><li>c</li></ul>";
+    assert_eq!(get(&server, "/fragments?v=1").body, format!("{list}|renders=4"));
+    assert_eq!(get(&server, "/fragments?v=1").body, format!("{list}|renders=4"));
+    assert_eq!(get(&server, "/fragments?v=2").body, format!("{list}|renders=6"));
+
+    // Query cache: one request sees its own writes, not writes behind its back.
+    let (status, counts) = json(&server, "GET", "/query-cache", "");
+    assert_eq!(status, 200, "{counts}");
+    assert_eq!(
+        counts,
+        serde_json::json!({
+            "before": {"n": 1}, "cached": {"n": 1}, "all": [{"n": 1}], "exists": true,
+            "uncached": {"n": 2}, "after": {"n": 3},
+        })
+    );
 }
 
 /// Routes exercising the rest of `ocre::storage` directly.
@@ -1441,4 +1595,161 @@ fn generated_app_stores_uploads_in_r2_on_workerd() {
     );
     assert_eq!(over.status, 413, "{}", over.body);
     assert!(over.body.contains(r#""message":"The request is too large (maximum is 128 KB)""#), "{}", over.body);
+}
+
+const E2E_NEW: &str = r#"use axum::{Router, extract::{Path, State}, routing::{get, post}};
+use ocre::{Cookies, Ctx, Result};
+
+pub fn routes() -> Router<Ctx> {
+    Router::new()
+        .route("/e2e/posts", post(create_post))
+        .route("/e2e/posts/{id}/touch", post(touch))
+        .route("/e2e/cookies", get(read_cookies).post(set_cookies))
+        .route("/e2e/events", post(event))
+        .route("/e2e/cache", post(cache))
+        .route("/e2e/enqueue", post(enqueue))
+}
+
+async fn create_post(State(ctx): State<Ctx>) -> Result<String> {
+    let post = crate::models::post::create(&ctx, crate::models::post::NewPost { title: "Hello".into() }).await?;
+    Ok(post.id.to_string())
+}
+
+async fn touch(State(ctx): State<Ctx>, Path(id): Path<i64>) -> Result<String> {
+    Ok(crate::models::post::touch(&ctx, id).await?.to_string())
+}
+
+async fn set_cookies(cookies: Cookies) -> Result<&'static str> {
+    cookies.set("theme", "dark", None)?;
+    cookies.set_signed("seen", "1", Some(std::time::Duration::from_secs(60)))?;
+    cookies.set_encrypted("token", "s3cret", None)?;
+    Ok("set")
+}
+
+async fn read_cookies(cookies: Cookies) -> Result<String> {
+    Ok(format!("{:?} {:?} {:?}", cookies.get("theme"), cookies.signed("seen")?, cookies.encrypted("token")?))
+}
+
+async fn event(State(ctx): State<Ctx>) -> &'static str {
+    ctx.events().tagged("step", "checkout").notify("order.placed", ocre::serde_json::json!({ "order_id": 42 }));
+    "notified"
+}
+
+async fn cache(State(ctx): State<Ctx>) -> Result<String> {
+    for n in 0..3 {
+        ocre::cache::write(&ctx, &format!("e2e/{n}"), &n, std::time::Duration::from_secs(600)).await?;
+    }
+    let first = ocre::cache::clear(&ctx, "e2e/", 2).await?;
+    let second = ocre::cache::clear(&ctx, "e2e/", 10).await?;
+    let left: Option<i32> = ocre::cache::read(&ctx, "e2e/2").await?;
+    Ok(format!("{} {} {} {:?}", first.deleted, second.deleted, second.more, left))
+}
+
+async fn enqueue(State(ctx): State<Ctx>) -> Result<&'static str> {
+    ocre::jobs::enqueue(&ctx, &crate::jobs::Job::RecordVisit(crate::jobs::RecordVisit { name: "e2e".into() })).await?;
+    Ok("queued")
+}
+"#;
+
+#[test]
+#[ignore = "builds WebAssembly and runs cf dev; run with --ignored"]
+fn generated_app_uses_the_newer_backend_features_on_workerd() {
+    let sandbox = Sandbox::new();
+    sandbox.use_real_cloudflare();
+    let root = sandbox.new_app("e2e-new", &[]);
+    for args in [
+        &["g", "model", "Post", "title:string"][..],
+        &["g", "model", "Photo", "url:string"],
+        &["g", "scaffold", "Comment", "body:text", "commentable:polymorphic:post,photo"],
+        &["g", "scaffold", "Album", "title:string", "photos:attachments"],
+        &["g", "api", "Book", "title:string", "pages:attachments"],
+        &["g", "scaffold", "Essay", "title:string", "body:rich_text"],
+        &["g", "job", "RecordVisit", "name:string"],
+        &["g", "mailbox"],
+        &["g", "cache"],
+    ] {
+        let (report, ok) = sandbox.json(args, &root);
+        assert!(ok, "{args:?}: {report}");
+    }
+    std::fs::write(root.join("src/e2e_new.rs"), E2E_NEW).unwrap();
+    let lib = std::fs::read_to_string(root.join("src/lib.rs"))
+        .unwrap()
+        .replace("// ocre:modules", "// ocre:modules\nmod e2e_new;")
+        .replace("// ocre:routes", "// ocre:routes\n        .merge(e2e_new::routes())");
+    std::fs::write(root.join("src/lib.rs"), lib).unwrap();
+    let vars = std::fs::read_to_string(root.join(".dev.vars")).unwrap();
+    std::fs::write(root.join(".dev.vars"), format!("{vars}D1_REPLICAS=on\n")).unwrap();
+    let server = start(&sandbox, &root);
+
+    // Read replicas: a write answers with the session's bookmark; reads carry none.
+    let created = post(&server, "/e2e/posts", &[]);
+    assert_eq!((created.status, created.body.as_str()), (200, "1"), "{}", created.body);
+    assert!(created.cookie.starts_with("ocre_d1_db="), "{:?}", created.headers);
+    let listed = send(&server, "GET", "/comments", &[("cookie", &created.cookie)], &[]);
+    assert_eq!(listed.status, 200);
+    assert!(listed.headers.get("set-cookie").is_none(), "a read keeps responses cacheable");
+    assert_eq!(post(&server, "/e2e/posts/1/touch", &[]).body, "true");
+    assert_eq!(post(&server, "/e2e/posts/9/touch", &[]).body, "false");
+
+    // Polymorphic references: checked, stored, listed.
+    let form = [("body", "Nice"), ("commentable_type", "post"), ("commentable_id", "1")];
+    let created = post(&server, "/comments", &form);
+    assert_eq!((created.status, created.location.as_str()), (303, "/comments/1"), "{}", created.body);
+    let missing = post(&server, "/comments", &[("body", "x"), ("commentable_type", "photo"), ("commentable_id", "1")]);
+    assert_eq!(missing.status, 422);
+    assert!(missing.body.contains("must exist"), "{}", missing.body);
+
+    // Many attachments: scaffold page and JSON API.
+    assert_eq!(post(&server, "/albums", &[("title", "Trip")]).status, 303);
+    let png = binary_file(2000);
+    let added = multipart(
+        &server,
+        "POST",
+        "/albums/1/photos",
+        &[],
+        &[("photos", "a.png", "image/png", &png), ("photos", "b.png", "image/png", b"\x89PNG\r\n\x1a\nB")],
+    );
+    assert_eq!((added.status, added.location.as_str()), (303, "/albums/1"), "{}", added.body);
+    let shown = get(&server, "/albums/1");
+    assert!(shown.body.contains(">a.png</a>") && shown.body.contains(">b.png</a>"), "{}", shown.body);
+    let (status, _, body) = download(&server, "/albums/1/photos/1", &[]);
+    assert!(status == 200 && body == png);
+    assert_eq!(post(&server, "/albums/1/photos/1/delete", &[]).status, 303);
+    assert_eq!(get(&server, "/albums/1/photos/1").status, 404);
+    let (status, _) = json(&server, "POST", "/api/books", r#"{"title": "Atlas"}"#);
+    assert_eq!(status, 201);
+    let pages = multipart(&server, "POST", "/api/books/1/pages", &[], &[("pages", "p.png", "image/png", &png)]);
+    assert_eq!(pages.status, 200, "{}", pages.body);
+    let (status, listed) = json(&server, "GET", "/api/books/1/pages", "");
+    assert_eq!((status, listed.as_array().map(Vec::len)), (200, Some(1)), "{listed}");
+    assert_eq!(page(agent().delete(&format!("{}/api/books/1", server.base)).call().unwrap()).status, 204);
+
+    // Rich text embeds and the upload script.
+    let embed = multipart(&server, "POST", "/essays/embeds", &[], &[("file", "e.png", "image/png", &png)]);
+    assert_eq!(embed.status, 200, "{}", embed.body);
+    let url = serde_json::from_str::<serde_json::Value>(&embed.body).unwrap()["url"].as_str().unwrap().to_owned();
+    assert_eq!(download(&server, &url, &[]).2, png);
+    assert!(get(&server, "/ocre/direct-upload.js").body.contains("trix-attachment-add"));
+
+    // Cookies, events, cache clearing.
+    let set = post(&server, "/e2e/cookies", &[]);
+    let jar: Vec<String> = set
+        .headers
+        .get_all("set-cookie")
+        .iter()
+        .map(|value| value.to_str().unwrap().split(';').next().unwrap().to_owned())
+        .collect();
+    assert_eq!(jar.len(), 3, "{jar:?}");
+    let read = send(&server, "GET", "/e2e/cookies", &[("cookie", &jar.join("; "))], &[]);
+    assert_eq!(read.body, r#"Some("dark") Some("1") Some("s3cret")"#);
+    assert_eq!(post(&server, "/e2e/events", &[]).body, "notified");
+    wait_for_log(&sandbox, "event order.placed {\"order_id\":42}");
+    assert_eq!(post(&server, "/e2e/cache", &[]).body, "2 1 false None");
+
+    // Jobs through the dev capture, and an email to the mailbox.
+    assert_eq!(post(&server, "/e2e/enqueue", &[]).body, "queued");
+    let jobs = wait_for_body(&server, "/ocre/dev/jobs.json", "\"outcome\":\"done\"");
+    assert!(jobs.contains(r#"{"record_visit":{"name":"e2e"}}"#), "{jobs}");
+    let raw = "From: ada@example.com\r\nTo: app@example.com\r\nSubject: Hi\r\nMessage-ID: <1@e2e>\r\n\r\nHello";
+    assert_eq!(deliver(&server, "ada@example.com", "app@example.com", raw).0, 200);
 }
