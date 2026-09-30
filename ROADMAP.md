@@ -4,7 +4,7 @@ Feature-level inventory of Rails 8.1 and Loco 1.2, with what Ocre has and how
 each part maps to Cloudflare's free plan. Collected from the official Rails
 guides and the Loco documentation source; every item links to its page.
 
-993 features: 725 done, 76 partial, 42 to do, 150 not applicable on Workers.
+993 features: 726 done, 76 partial, 41 to do, 150 not applicable on Workers.
 
 Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason given).
 (R) Rails, (L) Loco.
@@ -812,7 +812,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** Cache API (per data center, free) for HTTP and fragment caching, KV for global data that is read often and written rarely (the free plan has a small daily write quota; check the current number before relying on it).
 
-21 features: 16 done, 1 partial, 2 to do, 2 not applicable.
+21 features: 17 done, 1 partial, 1 to do, 2 not applicable.
 
 ### Caching
 
@@ -820,7 +820,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [x] **Cache get, insert and remove** (L): Stores and reads any Serialize/Deserialize value (JSON-encoded) by key on ctx.cache. *Ocre: `cache::read`, `write` (with a TTL), `delete` and `fetch` store any serde value as JSON in KV.* [loco/how-to/use-cache](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/use-cache.md)
 - [x] **Cache TTL (insert_with_expiry)** (L): Stores a value that expires after a given Duration. [loco/how-to/use-cache](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/use-cache.md)
 - [x] **Fetch-or-compute (get_or_insert)** (L): Returns the cached value, or runs a future to compute, store and return it, optionally with a TTL via get_or_insert_with_expiry. [loco/how-to/use-cache](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/use-cache.md)
-- [ ] **Cache ping and clear** (L): Checks that the cache backend is reachable and wipes the cache (FLUSHDB on Redis). [loco/how-to/use-cache](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/use-cache.md)
+- [x] **Cache ping and clear** (L): Checks that the cache backend is reachable and wipes the cache (FLUSHDB on Redis). *Ocre: `cache::clear(&ctx, prefix, limit)` deletes cached values by key prefix, a bounded page per call (KV writes are the free plan's scarce quota); `ocre doctor` checks the `CACHE` binding.* [loco/how-to/use-cache](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/use-cache.md)
 - [x] **Development caching toggle** (R): `bin/rails dev:cache` enables/disables caching in development. *Ocre: `ocre dev --no-cache` / `--cache` writes or removes `CACHE_STORE=null` in .dev.vars, and the choice stays.* [caching_with_rails](https://guides.rubyonrails.org/caching_with_rails.html)
 - [x] **Low-level caching (Rails.cache)** (R): `Rails.cache.fetch/read/write/delete` with `expires_in`, `race_condition_ttl` and cache keys for arbitrary values. [caching_with_rails](https://guides.rubyonrails.org/caching_with_rails.html)
 - [x] **Fragment caching** (R): `cache` view helper caches template fragments keyed by record `cache_key_with_version` and template digest. *Ocre: `cache::fragment(ctx, &key, ttl, || Row {..})` caches rendered askama HTML under `views/<key>`; `cache::key` builds versioned keys.* [caching_with_rails](https://guides.rubyonrails.org/caching_with_rails.html)

@@ -68,7 +68,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{Error, Result};
 
-pub use crate::runtime::cache::{delete, fetch, read, write};
+pub use crate::runtime::cache::{clear, delete, fetch, read, write};
 #[cfg(feature = "html")]
 #[cfg_attr(docsrs, doc(cfg(feature = "html")))]
 pub use crate::runtime::cache::{fragment, fragments};
@@ -194,6 +194,22 @@ pub(crate) fn store_kind(value: Option<&str>) -> Result<Store> {
              Fix: change it in .dev.vars or in worker.env of cloudflare.config.ts"
         ))),
     }
+}
+
+/// What [`clear`] deleted.
+///
+/// # Examples
+///
+/// ```
+/// let cleared = ocre::cache::Cleared { deleted: 200, more: true };
+/// assert!(cleared.more, "call clear again");
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Cleared {
+    /// How many values were deleted.
+    pub deleted: usize,
+    /// Whether keys with the prefix remain.
+    pub more: bool,
 }
 
 /// Prefix of the KV keys holding [`fragment`]s: `views/`, as in Rails.

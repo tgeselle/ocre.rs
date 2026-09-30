@@ -279,6 +279,54 @@ pub fn delete<'a>(ctx: &Ctx, key: &'a str) -> impl Future<Output = Result<()>> +
     })
 }
 
+/// Deletes up to `limit` cached values whose key starts with `prefix` (Rails'
+/// `Rails.cache.clear`, bounded): `""` for everything, `"views/"` for
+/// fragments, `"posts/"` for one family of keys. Call it again while
+/// [`Cleared::more`](crate::cache::Cleared::more) is true, e.g. from a
+/// scheduled task after a deploy that changed the cached data's shape.
+///
+/// Free plan: one KV list (of 1,000 a day) plus one KV write per deleted
+/// key (**1,000 writes a day**), so keep `limit` small; with
+/// [`STORE_VAR`](crate::cache::STORE_VAR) set to `"null"` nothing is deleted.
+///
+/// # Errors
+///
+/// - [`Error::Internal`] (500) when the `CACHE` binding is missing (`ocre g cache` adds it).
+/// - [`Error::Internal`] when KV rejects the list or a delete, e.g. past the daily limit.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use ocre::{Ctx, Result};
+///
+/// async fn nightly(ctx: Ctx) -> Result<()> {
+///     let cleared = ocre::cache::clear(&ctx, "views/", 200).await?;
+///     ctx.log().info(format_args!("cleared {} fragments, more: {}", cleared.deleted, cleared.more));
+///     Ok(())
+/// }
+/// # let _ = nightly;
+/// ```
+pub fn clear<'a>(
+    ctx: &Ctx,
+    prefix: &'a str,
+    limit: usize,
+) -> impl Future<Output = Result<crate::cache::Cleared>> + Send + use<'a> {
+    let env = ctx.env().clone();
+    let memo = Arc::clone(ctx.memo());
+    SendFuture::new(async move {
+        let Some(kv) = store(&env)? else {
+            return Ok(crate::cache::Cleared::default());
+        };
+        let page = kv.list().prefix(prefix.to_owned()).limit(limit.clamp(1, 1000) as u64).execute().await;
+        let page = page.map_err(|err| kv_error("list", prefix, &err))?;
+        for key in &page.keys {
+            kv.delete(&key.name).await.map_err(|err| kv_error("delete", &key.name, &err))?;
+            memo.remember_kv(&key.name, None);
+        }
+        Ok(crate::cache::Cleared { deleted: page.keys.len(), more: !page.list_complete })
+    })
+}
+
 /// Fragment caching, like Rails' `<% cache post do %>`: the HTML stored under `key`, or else the template `build` returns, rendered and stored.
 ///
 /// askama templates cannot wait for KV, so the handler caches the costly
