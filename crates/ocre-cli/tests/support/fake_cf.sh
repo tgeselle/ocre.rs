@@ -335,6 +335,7 @@ case "$1 $2" in
         exit 1
       fi
       echo "secrets file ok" >> "$state/calls.log"
+      cp "$3" "$state/uploaded_secrets"
     fi
     echo "build $OCRE_BUILD" >> "$state/calls.log"
     worker="$(sed -n 's/^		name: "\(.*\)",$/\1/p' cloudflare.config.ts)"

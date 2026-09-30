@@ -2,7 +2,7 @@
 
 use std::{
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
 
 use crate::{config::Config, output::CliError};
@@ -85,6 +85,16 @@ pub fn check_wasm_target() -> Result<(), CliError> {
     if Path::new(&sysroot).join("lib/rustlib/wasm32-unknown-unknown").is_dir() {
         return Ok(());
     }
-    Err(CliError::new(format!("the wasm32-unknown-unknown target is not installed for rustc at {sysroot}"))
-        .hint("use a rustup toolchain (Homebrew's `rust` has no wasm target) and run `rustup target add wasm32-unknown-unknown`"))
+    let error = CliError::new(format!("the wasm32-unknown-unknown target is not installed for rustc at {sysroot}"));
+    // rustup installed, but another Rust (Homebrew's) comes first in PATH: a plain
+    // `cargo check` in a terminal fails the same way, with "can't find crate for `core`".
+    let rustup = Command::new("rustup").arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status();
+    if !sysroot.contains("/.rustup/") && rustup.is_ok_and(|status| status.success()) {
+        return Err(error.hint(
+            "this rustc is not rustup's but comes first in PATH (Homebrew's `rust` has no wasm target): put rustup's \
+             first (`export PATH=\"$HOME/.cargo/bin:$PATH\"` in your shell profile) or `brew uninstall rust`, then \
+             `rustup target add wasm32-unknown-unknown`; `which cargo` must point to rustup's",
+        ));
+    }
+    Err(error.hint("use a rustup toolchain (Homebrew's `rust` has no wasm target) and run `rustup target add wasm32-unknown-unknown`"))
 }

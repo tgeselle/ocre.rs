@@ -173,3 +173,31 @@ fn dev_routes_list_recent_jobs_and_runs() {
     assert_eq!(enqueued.last().unwrap()["queue"], "default");
     assert_eq!(performed.last().unwrap()["outcome"], "done");
 }
+
+#[test]
+fn budgets_take_only_what_is_left() {
+    let budget = Budget::new(5);
+    assert!(budget.take(3) && !budget.take(3) && budget.take(2));
+    assert_eq!(budget.left(), 0);
+}
+
+/// One step: done at 3, an error at 99, the next cursor otherwise. A plain
+/// function, so every call below shares one `run_steps` instantiation.
+fn stepper(cursor: u32) -> std::pin::Pin<Box<dyn Future<Output = Result<Step<u32>>>>> {
+    Box::pin(async move {
+        match cursor {
+            3 => Ok(Step::Done),
+            99 => Err(Error::internal("boom")),
+            n => Ok(Step::Next(n + 1)),
+        }
+    })
+}
+
+#[test]
+fn steps_run_until_done_or_out_of_budget() {
+    let run = |calls, start| crate::support::block_on(run_steps(&Budget::new(calls), 2, start, stepper));
+    assert_eq!(run(100, 0).unwrap(), None, "done at 3");
+    assert_eq!(run(4, 0).unwrap(), Some(2), "two steps of 2 calls, then the cursor to continue from");
+    assert_eq!(run(1, 0).unwrap(), Some(0), "not even one step");
+    assert!(run(10, 99).is_err());
+}

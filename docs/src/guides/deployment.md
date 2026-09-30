@@ -54,7 +54,7 @@ flowchart TD
 3. **Queues.** For every queue `cloudflare.config.ts` names (`bindings.queue` and `triggers.queue` names, and each `deadLetterQueue`, written by the first `ocre g job`), it checks `cf queues list` and runs `cf queues create --queue-name <name>` for the missing ones. A consumer of a missing queue would fail the deploy.
 4. **R2 buckets.** Each `bindings.r2({ name })` (`<app>-storage`, written by the first `attachment` field) is checked with `cf r2 buckets get` and created with `cf r2 buckets create` when missing. An account without R2 gets Cloudflare's API error 10042, and the deploy stops with this hint: "enable R2 once in the Cloudflare dashboard (Storage & databases > R2; the free plan asks for a payment method but charges nothing within 10 GB, 1M writes and 10M reads a month), then run `ocre deploy` again".
 5. **KV namespaces.** Each `bindings.kv()` entry without an `id` (the `CACHE` binding of `ocre g cache`) gets the namespace titled `<worker name>-<binding>`, lowercased with `_` as `-` (`blog-cache`). If `cf kv namespaces list` already has it, it is linked; otherwise `cf kv namespaces create` makes it. Either way `ocre deploy` rewrites the entry to `CACHE: bindings.kv({ id: "<id>" }),` in `cloudflare.config.ts`: commit that change.
-6. **`SECRET_KEY_BASE`.** It runs `cf workers secrets list --worker <name>`. When the Worker has no `SECRET_KEY_BASE` (or does not exist yet), it generates a random one (128 hex characters, like `ocre secret`), writes it to `.wrangler/ocre-secrets.env` (readable by you only, git-ignored), passes it to `cf deploy --secrets-file`, and deletes the file afterwards, even when the deploy fails. An existing secret is never replaced: that would sign every user out. If the secrets list fails for any other reason, the deploy stops rather than risk overwriting it.
+6. **`SECRET_KEY_BASE`.** It runs `cf workers secrets list --worker <name>`. When the Worker has no `SECRET_KEY_BASE` (or does not exist yet), it takes the one of `.prod.vars`, or else generates a random one (128 hex characters, like `ocre secret`) and, once the deploy succeeded, appends it to `.prod.vars` (git-ignored, readable by you only) with a comment: Cloudflare never gives a secret back, and losing it signs everyone out and makes [encrypted columns](models.md#encrypted-columns) unreadable, so back that file up. It writes the value to `.wrangler/ocre-secrets.env` (readable by you only, git-ignored), passes it to `cf deploy --secrets-file`, and deletes the file afterwards, even when the deploy fails. An existing secret is never replaced: that would sign every user out. If the secrets list fails for any other reason, the deploy stops rather than risk overwriting it.
 7. **Migrations.** `cf d1 migrations apply <id>` on the production database, before the new code goes live, so it never runs against an old schema. On the first deploy the database is new and gets every migration.
 8. **Build and upload.** `cf deploy`, with `OCRE_BUILD=--release`. cf delegates the build to the app's wrangler, which runs the `build.command` of `wrangler.config.ts`, `worker-build --release` (installing `worker-build` 0.8 with `cargo install` if needed): an optimized WebAssembly build passed through `wasm-opt`. Durable Objects (the `CHANNELS` namespace of realtime apps) are created by this step from the `exports` of `cloudflare.config.ts`; nothing else to provision.
 9. **URL.** The report shows the first `https://...workers.dev` address cf printed.
@@ -77,6 +77,7 @@ cf's output streams as it runs, then `ocre deploy` summarizes what it created an
 ```text
 ...
 Created the SECRET_KEY_BASE secret on Cloudflare
+Saved it in .prod.vars (git-ignored): back it up, Cloudflare never gives it back
 Created D1 database blog on Cloudflare
 Created queue blog-jobs on Cloudflare
 Created queue blog-jobs-failed on Cloudflare
@@ -100,7 +101,8 @@ With `--json`, the output of cf and wrangler goes to stderr and stdout carries o
 |---|---|---|
 | `ok`, `command` | always | `true`, `"deploy"` |
 | `url` | when cf printed a `workers.dev` URL | The deployed URL. Absent when the Worker is only on a custom domain (`workersDev: false`) |
-| `secret_created` | only when `true` | A new `SECRET_KEY_BASE` was uploaded with this deploy. The secret itself is never printed |
+| `secret_created` | only when `true` | A `SECRET_KEY_BASE` was uploaded with this deploy. The secret itself is never printed |
+| `secret_saved` | only when set | `".prod.vars"`: the generated secret was written there |
 | `provisioned` | only when not empty | Resources created because they were missing: `D1 database <name>`, `queue <name>`, `R2 bucket <name>`, `KV namespace <title> (id written to cloudflare.config.ts)` |
 
 A failure is `{"ok": false, "error": "...", "hint": "..."}`, for example when not logged in:

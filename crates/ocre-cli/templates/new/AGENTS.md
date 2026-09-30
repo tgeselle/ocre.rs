@@ -155,8 +155,12 @@ package.json        pinned cf, wrangler, typescript (commit package-lock.json); 
   values it reads (names, queues, buckets, crons, KV ids). Keep the
   `// ocre:env`, `// ocre:triggers` and `// ocre:exports` markers. Check with
   `npx tsc -p .` (or `ocre doctor`).
-- Handlers are plain axum handlers taking `State(ctx): State<Ctx>`. Do not add
-  `#[worker::send]`; Ocre types are already `Send`.
+- Handlers are plain axum handlers taking `State(ctx): State<Ctx>`. Ocre types
+  are `Send`; add `#[worker::send]` only to a handler that awaits another
+  crate's JavaScript-backed future (reqwest, `worker::Fetch`): without it the
+  route fails with "`Handler<_, _>` is not satisfied".
+- Outgoing HTTP: `reqwest` with `default-features = false` (it uses `fetch` in
+  WebAssembly) or `worker::Fetch`; each call is a subrequest.
 - Queries: start from the model's `query()` (an `ocre::Query<T>`):
   `post::query().eq("published", true).order_desc("id").page(page).all(&ctx.db()?)`;
   `.first(&db)` (find_by), `.count`, `.exists`, `.pluck(&db, "id")`,
@@ -470,6 +474,11 @@ package.json        pinned cf, wrangler, typescript (commit package-lock.json); 
   Put static files in `public/`: they cost no Worker request or CPU.
 - D1: daily read/write row quotas. Avoid N+1 queries: one query with `JOIN` or
   `WHERE id IN (...)` instead of a query per row.
+- 50 D1 queries and 50 subrequests (`fetch`) per invocation (request, queue
+  batch, cron run). Write many rows with one statement:
+  `ocre::bulk::{insert, upsert, update}` (then `db.execute(&s.sql, s.params)`).
+  Long jobs: `ocre::jobs::run_steps(&Budget::new(49), cost_per_step, cursor, step)`
+  returns the cursor to re-enqueue the job with when the budget runs out.
 - 100,000 requests per day.
 - Queues: 10,000 operations per day (a job costs 3; each retry 1 more), so
   about 3,000 jobs per day; messages expire after 24 hours. Each consumer

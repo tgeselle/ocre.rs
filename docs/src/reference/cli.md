@@ -239,6 +239,7 @@ Migrations applied to two (--remote)
   create  two/.dev.vars
 Logged in to Cloudflare as ada@example.com
 Created the SECRET_KEY_BASE secret on Cloudflare
+Saved it in .prod.vars (git-ignored): back it up, Cloudflare never gives it back
 
 https://app.example.workers.dev
 
@@ -925,6 +926,7 @@ Migrations applied to the remote database
 Uploaded app
   https://app.example.workers.dev
 Created the SECRET_KEY_BASE secret on Cloudflare
+Saved it in .prod.vars (git-ignored): back it up, Cloudflare never gives it back
 Created D1 database blog on Cloudflare
 Created queue blog-jobs on Cloudflare
 Created queue blog-jobs-failed on Cloudflare

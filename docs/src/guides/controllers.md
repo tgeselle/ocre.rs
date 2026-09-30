@@ -244,7 +244,7 @@ async fn page(Path(path): Path<String>) -> Response {
 
 ## Handlers and extractors
 
-A handler is an `async fn` whose arguments are axum extractors and whose return type implements `IntoResponse`. Handlers do not need `#[worker::send]`: every Ocre type is `Send`. Params are typed per source instead of Rails' merged `params` hash, and a form or JSON struct lists exactly the fields it accepts, which replaces strong parameters.
+A handler is an `async fn` whose arguments are axum extractors and whose return type implements `IntoResponse`. Every Ocre type is `Send`, so handlers need no annotation unless they await a future from another crate that is not (see [Futures that are not Send](#futures-that-are-not-send)). Params are typed per source instead of Rails' merged `params` hash, and a form or JSON struct lists exactly the fields it accepts, which replaces strong parameters.
 
 | Extractor | From | Gives | On failure |
 |---|---|---|---|
@@ -256,6 +256,7 @@ A handler is an `async fn` whose arguments are axum extractors and whose return 
 | `ocre::Json(body): ocre::Json<T>` | a JSON body | `T` | JSON 400 (see [JSON APIs](json-apis.md#errors)) |
 | `page: ocre::Page` | `?limit=&offset=` | `page.limit` (1-100, default 50), `page.offset` | JSON 400 `limit must be between 1 and 100` |
 | `session: ocre::Session` | the encrypted session cookie | `get`, `insert`, `remove`, `clear`, `flash` | its methods fail with a 500 (logged) when `SECRET_KEY_BASE` is missing |
+| `cookies: ocre::Cookies` | the request's cookies | `get`/`set`, `signed`/`set_signed`, `encrypted`/`set_encrypted`, `remove` (see [Security: cookies](security.md#cookies)) | never fails; the signed and encrypted methods fail with a 500 when `SECRET_KEY_BASE` is missing |
 | `flash: ocre::Flash` | messages set by the previous request (read once, then removed) | `flash.notice()`, `flash.alert()`, `flash.get(kind)` | 500 when `SECRET_KEY_BASE` is missing |
 | `format: ocre::Format` | the `Accept` header | `Format::Html`, `Json`, `Xml`, `Text` or `Other` | never fails |
 | `Htmx(is_htmx): ocre::Htmx` | the `HX-Request: true` header | `bool` | never fails |
@@ -268,7 +269,46 @@ A handler is an `async fn` whose arguments are axum extractors and whose return 
 
 The extractor that reads the body (`Form`, `Json`, `Multipart`) must be the last argument, an axum rule. axum's `Form`, `Json` and body extractors refuse bodies over 2 MB with `413` (Loco's `limit_payload`); a route that needs more adds `.layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024))`. Workers accept request bodies up to 100 MB. After `ocre g auth`, `CurrentUser` and `BearerUser` are extractors too (see [Authentication](authentication.md)); an extractor is also how Ocre does Rails' `before_action`: a handler that takes `CurrentUser` only runs for signed-in users.
 
-Cookies other than the session are headers (Rails' `cookies`): read them from `HeaderMap`, and set one by returning a header, `([(header::SET_COOKIE, "theme=dark; Path=/; Max-Age=31536000; HttpOnly; Secure; SameSite=Lax")], body)`; a cookie is deleted with `Max-Age=0`. Values that must not be forged or read belong in the `Session`, which is signed and encrypted.
+Cookies other than the session go through the `Cookies` extractor (Rails' `cookies`, `cookies.signed`, `cookies.encrypted`); values tied to the visitor's session belong in the `Session`, which is signed and encrypted.
+
+### Futures that are not Send
+
+axum requires a handler's future to be `Send`. Ocre's types are, but a future holding a JavaScript value is not: `worker::Fetch`, reqwest in WebAssembly, `wasm_bindgen_futures::JsFuture`, a D1 or KV handle from `worker` itself. Awaiting one in a handler fails to compile at the route, far from the cause:
+
+```text
+error[E0277]: the trait bound `fn() -> impl Future<Output = Result<..., ...>> {remote}: Handler<_, _>` is not satisfied
+  |
+5 |     Router::new().route("/remote", get(remote))
+  |                                    --- ^^^^^^ unsatisfied trait bound
+  = note: Consider using `#[axum::debug_handler]` to improve the error message
+```
+
+Put `#[worker::send]` on the handler: it wraps its future in `worker::send::SendFuture`, which is sound because a Worker runs your code on one thread. For a single call inside a larger function, wrap only that future: `worker::send::SendFuture::new(async { ... }).await`. Functions that Ocre's generated code calls from handlers (a model method, a job's `perform`) need the same wrapping when they await such a future.
+
+## Calling other services
+
+Ocre has no HTTP client of its own; two work in a Worker:
+
+- [reqwest](https://docs.rs/reqwest) with `default-features = false`: in WebAssembly it calls the Worker's `fetch`, with its usual API (`json`, headers, query strings). `cargo add reqwest --no-default-features --features json`.
+- `worker::Fetch`, the `worker` crate's thin wrapper over `fetch`.
+
+```rust,ignore
+use axum::Json;
+use ocre::{Error, Result};
+
+#[worker::send] // reqwest's futures hold JavaScript values
+async fn rates() -> Result<Json<serde_json::Value>> {
+    let rates = reqwest::get("https://api.example.com/rates")
+        .await
+        .map_err(|err| Error::internal(format!("rates API: {err}")))?
+        .json()
+        .await
+        .map_err(|err| Error::internal(format!("rates API: {err}")))?;
+    Ok(Json(rates))
+}
+```
+
+Each call is a subrequest: 50 per invocation on the free plan (counted with the other calls a job makes, see [Long jobs](jobs.md#long-jobs-continue-in-steps)). Cache answers that change slowly with `ocre::cache::fetch`, and put secrets (API keys) in Worker secrets read with `ctx.config()`.
 
 ## Responses
 

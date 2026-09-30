@@ -337,6 +337,128 @@ fn preview(text: &str) -> String {
     }
 }
 
+/// How many calls an invocation may still make: D1 queries, `fetch`es, KV
+/// and R2 operations, as the job counts them.
+///
+/// On the free plan a Worker invocation (a request, a queue batch, a cron
+/// run) may run 50 D1 queries and make 50 subrequests; past that the call
+/// fails. A job over many rows takes a budget, spends it per call, and
+/// stops early with a cursor to continue from ([`run_steps`]). Ocre does not
+/// count for you: [`take`](Self::take) what each step is about to use.
+///
+/// # Examples
+///
+/// ```
+/// use ocre::jobs::Budget;
+///
+/// let budget = Budget::new(Budget::FREE_D1_QUERIES - 5); // 5 for the rest of the job
+/// assert!(budget.take(40));
+/// assert!(!budget.take(10), "not enough left: nothing taken");
+/// assert_eq!(budget.left(), 5);
+/// ```
+#[derive(Debug)]
+pub struct Budget {
+    left: std::sync::atomic::AtomicU32,
+}
+
+impl Budget {
+    /// D1 queries per invocation on the free plan: 50.
+    pub const FREE_D1_QUERIES: u32 = 50;
+    /// Subrequests (`fetch`) per invocation on the free plan: 50.
+    pub const FREE_SUBREQUESTS: u32 = 50;
+
+    /// A budget of `calls`.
+    pub fn new(calls: u32) -> Self {
+        Self { left: std::sync::atomic::AtomicU32::new(calls) }
+    }
+
+    /// Takes `calls` from the budget when that many are left; `false` (and nothing taken) otherwise.
+    pub fn take(&self, calls: u32) -> bool {
+        use std::sync::atomic::Ordering;
+        self.left.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| left.checked_sub(calls)).is_ok()
+    }
+
+    /// The calls not taken yet.
+    pub fn left(&self) -> u32 {
+        self.left.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// What a step of [`run_steps`] did: more to do from the cursor, or done.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Step<C> {
+    /// Continue from this cursor (the next page, the last id handled).
+    Next(C),
+    /// Nothing left.
+    Done,
+}
+
+/// Runs `step` from `cursor` while `budget` covers its `cost` (the calls one
+/// step makes), for work too large for one invocation: a page of rows per
+/// step, the next page's cursor between them (Active Job's continuations).
+///
+/// Returns `Some(cursor)` when the budget ran out first: enqueue the job
+/// again with it, and the next run continues there. `None` when a step
+/// answered [`Step::Done`]. A failing step stops the run with its error; a
+/// retried job starts again from the cursor it was enqueued with, so make
+/// steps safe to repeat.
+///
+/// # Errors
+///
+/// The first error a step returns.
+///
+/// # Examples
+///
+/// ```no_run
+/// use ocre::jobs::{Budget, Step, run_steps};
+/// use ocre::{Ctx, Query, Result};
+/// use serde::{Deserialize, Serialize};
+///
+/// #[derive(Deserialize)]
+/// struct Row {
+///     id: i64,
+/// }
+///
+/// #[derive(Serialize, Deserialize)]
+/// pub struct Reindex {
+///     after_id: i64,
+/// }
+///
+/// impl Reindex {
+///     pub async fn perform(self, ctx: &Ctx) -> Result<()> {
+///         let budget = Budget::new(Budget::FREE_D1_QUERIES - 1); // 1 left to enqueue the rest
+///         // Each step reads a page of 100 rows and writes them back: 2 queries.
+///         let rest = run_steps(&budget, 2, self.after_id, |after_id| async move {
+///             let db = ctx.db()?;
+///             let page: Vec<Row> = Query::table("tracks").gt("id", after_id).order_asc("id").limit(100).all(&db).await?;
+///             let Some(last) = page.last() else { return Ok(Step::Done) };
+///             // ... one bulk::update of the page ...
+///             Ok(Step::Next(last.id))
+///         })
+///         .await?;
+///         if let Some(after_id) = rest {
+///             ocre::jobs::enqueue(ctx, &Reindex { after_id }).await?;
+///         }
+///         Ok(())
+///     }
+/// }
+/// ```
+pub async fn run_steps<C, F, Fut>(budget: &Budget, cost: u32, mut cursor: C, mut step: F) -> Result<Option<C>>
+where
+    F: FnMut(C) -> Fut,
+    Fut: Future<Output = Result<Step<C>>>,
+{
+    loop {
+        if !budget.take(cost) {
+            return Ok(Some(cursor));
+        }
+        match step(cursor).await? {
+            Step::Next(next) => cursor = next,
+            Step::Done => return Ok(None),
+        }
+    }
+}
+
 /// Development endpoint listing recent jobs, served by `ocre dev` only, for
 /// tests (Rails' `assert_enqueued_with` and `assert_performed_jobs`).
 ///

@@ -46,7 +46,7 @@ pub fn parse_vars(text: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
-fn read_vars(root: &Path, file: &str) -> Result<BTreeMap<String, String>, CliError> {
+pub(crate) fn read_vars(root: &Path, file: &str) -> Result<BTreeMap<String, String>, CliError> {
     match fs::read_to_string(root.join(file)) {
         Ok(text) => Ok(parse_vars(&text)),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),

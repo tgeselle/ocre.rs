@@ -1350,6 +1350,7 @@ cf's own output is shown as it runs; the command then ends with:
 
 ```text
 Created the SECRET_KEY_BASE secret on Cloudflare
+Saved it in .prod.vars (git-ignored): back it up, Cloudflare never gives it back
 
 https://blog.<your-subdomain>.workers.dev
 ```

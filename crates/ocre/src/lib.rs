@@ -39,6 +39,7 @@
 //! | Module | Contents |
 //! |---|---|
 //! | crate root | [`serve`], [`Ctx`], [`Db`], [`params!`] and [`Query`] / [`Paginated`] (D1), [`Error`] / [`Result`], [`Json`] / [`ApiError`] / [`Page`] (JSON APIs), [`Session`] / [`Flash`] / [`Cookies`], [`Validator`], [`NestedForm`] (bracketed form names), request helpers ([`Format`], [`RemoteIp`], [`RequestId`], [`redirect_back`]), `render` / `error_page` / `Htmx` / `HxRedirect` (feature `html`), serde helpers ([`optional`], [`patch`], [`bool_from_sql`], ...) |
+//! | [`bulk`] | Many rows in one D1 statement: `bulk::insert`, `upsert` and `update` (one JSON parameter, `json_each`) |
 //! | [`cache`] | Read-through values in Workers KV, `Cache-Control`, `ETag` and `304 Not Modified` |
 //! | [`config`] | Typed app settings from Worker variables and secrets (`ctx.config::<Settings>()`), the environment (development or production) |
 //! | [`encryption`] | Encrypted model columns (AES-256-GCM keyed from `SECRET_KEY_BASE`), deterministic for lookups |
@@ -136,6 +137,7 @@
 #![warn(rustdoc::broken_intra_doc_links)]
 
 mod api;
+pub mod bulk;
 pub mod cache;
 mod clock;
 pub mod config;

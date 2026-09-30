@@ -1276,6 +1276,29 @@ Returned as JSON with `?limit=2`:
 
 `preload_posts` returns a `HashMap<i64, Post>` keyed by id (rows come in no particular order, and missing ids are skipped). `for_posts` is not paginated: use it for a page of parents, not for a whole table. For aggregates (counts, sums), prefer one `JOIN ... GROUP BY` query as in `busiest_posts` and `posts_with_comment_counts` above.
 
+## Many rows in one query
+
+A free-plan invocation runs 50 D1 queries, and D1 binds at most 100 parameters per statement, so writing rows one by one does not scale. `ocre::bulk` writes many rows in one statement: the rows go as one JSON array parameter, unpacked by SQLite's `json_each`.
+
+| Builder | SQL | Rails |
+|---|---|---|
+| `bulk::insert(table, &columns, &rows)` | `INSERT INTO t (a, b) SELECT value ->> '$.a', value ->> '$.b' FROM json_each(?1)` | `insert_all` |
+| `bulk::upsert(table, key, &columns, &rows)` | the same, `ON CONFLICT (key) DO UPDATE SET` the other columns | `upsert_all` |
+| `bulk::update(table, key, &columns, &rows, touch)` | `UPDATE t SET a = row.value ->> '$.a' ... FROM json_each(?1) AS row WHERE t.key = row.value ->> '$.key'`, plus `updated_at` when `touch` | `update_all` with a value per row |
+
+```rust,ignore
+#[derive(serde::Serialize)]
+struct Play {
+    track_id: i64,
+    played_at: String,
+}
+
+let insert = ocre::bulk::insert("plays", &["track_id", "played_at"], &plays)?;
+let inserted = ctx.db()?.execute(&insert.sql, insert.params).await?; // one query, however many rows
+```
+
+Rows are structs or maps (anything serializing to a JSON object); each listed column is read by name, a missing one is `NULL`. Booleans are stored as `1`/`0`, nested values as JSON text. The builders return a `Statement`, so several go into one `db.batch` to apply together. They skip the models' validations and callbacks, like Rails' `insert_all`: validate first when the data comes from users. Table and column names must be plain identifiers (never user input); a D1 statement is limited in size, so send a few thousand small rows at a time (`rows.chunks(500)`).
+
 ## Transactions
 
 D1 runs every statement in auto-commit mode, and refuses `BEGIN TRANSACTION` and `SAVEPOINT` from a Worker. The unit of atomicity is `db.batch(statements)`: D1 runs the statements in order, in one round trip, and when one fails none of them is applied. There is no transaction left open while Rust code runs, so a batch cannot read a value and decide what to write next.

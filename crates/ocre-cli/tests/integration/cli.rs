@@ -825,6 +825,16 @@ fn dev_and_deploy_need_the_wasm_target() {
             "the wasm32-unknown-unknown target is not installed for rustc at /nonexistent/sysroot"
         );
     }
+    // rustup is installed, but another rustc comes first in PATH.
+    sandbox.script("rustup", "#!/bin/sh\necho 'rustup 1.28.2'\n");
+    let (report, _) = sandbox.json(&["dev"], &root);
+    assert!(
+        report["hint"].as_str().unwrap().starts_with("this rustc is not rustup's but comes first in PATH"),
+        "{report}"
+    );
+    sandbox.script("rustup", "#!/bin/sh\nexit 1\n");
+    let (report, _) = sandbox.json(&["dev"], &root);
+    assert!(report["hint"].as_str().unwrap().starts_with("use a rustup toolchain"), "{report}");
     sandbox.isolate_path();
     fs::remove_file(sandbox.work.join("../bin/rustc")).unwrap();
     let (report, _) = sandbox.json(&["dev"], &root);
@@ -882,13 +892,19 @@ fn deploy_creates_secret_key_base_only_when_the_worker_has_none() {
     assert!(output.status.success(), "{stdout}");
     assert!(
         stdout.ends_with(
-            "Created the SECRET_KEY_BASE secret on Cloudflare\nCreated D1 database shop on Cloudflare\n\nhttps://shop.example.workers.dev\n"
+            "Created the SECRET_KEY_BASE secret on Cloudflare\nSaved it in .prod.vars (git-ignored): back it up, Cloudflare never gives it back\nCreated D1 database shop on Cloudflare\n\nhttps://shop.example.workers.dev\n"
         ),
         "{stdout}"
     );
     assert!(sandbox.calls().contains(&"secrets file ok".to_owned()));
     assert_eq!(deploy_calls(), ["cf deploy --secrets-file .wrangler/ocre-secrets.env"]);
     assert!(!secrets_file.exists(), "deleted after the deploy");
+    // The only copy: kept in .prod.vars, readable by its owner only.
+    let uploaded = fs::read_to_string(sandbox.work.join("../state/uploaded_secrets")).unwrap();
+    let prod_vars = fs::read_to_string(root.join(".prod.vars")).unwrap();
+    assert!(prod_vars.starts_with("# Created by `ocre deploy`") && prod_vars.ends_with(&uploaded), "{prod_vars}");
+    let mode = std::os::unix::fs::PermissionsExt::mode(&fs::metadata(root.join(".prod.vars")).unwrap().permissions());
+    assert_eq!(mode & 0o777, 0o600);
 
     // No Worker yet: `cf workers secrets list` fails with API code 10007.
     sandbox.set("secret_list_fails");
@@ -897,6 +913,8 @@ fn deploy_creates_secret_key_base_only_when_the_worker_has_none() {
     assert_eq!(report["secret_created"], true);
     assert!(report.get("provisioned").is_none(), "the database exists now: {report}");
     assert_eq!(report.as_object().unwrap().len(), 4, "the secret itself is never reported: {report}");
+    assert!(report.get("secret_saved").is_none(), "the one of .prod.vars is uploaded again: {report}");
+    assert_eq!(fs::read_to_string(sandbox.work.join("../state/uploaded_secrets")).unwrap(), uploaded);
 
     // The Worker has one: never replaced.
     fs::remove_file(sandbox.work.join("../state/secret_list_fails")).unwrap();

@@ -79,6 +79,9 @@ pub struct Report {
     /// The deploy uploaded a new SECRET_KEY_BASE (the Worker had none).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub secret_created: bool,
+    /// `deploy`: the file the new SECRET_KEY_BASE was written to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret_saved: Option<&'static str>,
     /// `ocre deploy`: Cloudflare resources it created because they were
     /// missing, e.g. `queue shop-jobs`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -253,6 +256,9 @@ fn print_human(report: &Report) {
     }
     if report.secret_created {
         println!("Created the SECRET_KEY_BASE secret on Cloudflare");
+    }
+    if let Some(file) = report.secret_saved {
+        println!("Saved it in {file} (git-ignored): back it up, Cloudflare never gives it back");
     }
     for resource in &report.provisioned {
         println!("Created {resource} on Cloudflare");

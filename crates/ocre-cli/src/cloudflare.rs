@@ -296,9 +296,11 @@ impl<'a> Cloudflare<'a> {
 
     /// Deploys and returns the workers.dev URL. Ocre provisions everything
     /// first: the D1 database, queues, KV namespaces (ids written back) and
-    /// R2 buckets. A Worker without SECRET_KEY_BASE gets a new one with the
-    /// deploy; an existing one is never replaced, since that would sign
-    /// everyone out. Migrations run before the new code goes live.
+    /// R2 buckets. A Worker without SECRET_KEY_BASE gets the one of
+    /// `.prod.vars`, else a new one, which is also written to `.prod.vars`:
+    /// Cloudflare never gives a secret back, and losing it signs everyone
+    /// out and makes encrypted columns unreadable. An existing one is never
+    /// replaced. Migrations run before the new code goes live.
     pub fn deploy(&self, project: &Project) -> Result<Deployed, CliError> {
         require_install(self.root)?;
         let config = project.config()?;
@@ -312,7 +314,12 @@ impl<'a> Cloudflare<'a> {
         provisioned.extend(self.ensure_buckets(&config)?);
         provisioned.extend(self.ensure_kv_namespaces(config)?);
         let has_secret = self.secret_names(&worker)?.is_some_and(|names| names.iter().any(|n| n == SECRET_KEY_BASE));
-        let secrets = if has_secret { None } else { Some(PrivateFile::secret_key_base(self.root)?) };
+        let kept = crate::secrets::read_vars(self.root, PROD_VARS)?.remove(SECRET_KEY_BASE);
+        let new_secret = if has_secret { None } else { Some(kept.clone().unwrap_or_else(secret::generate)) };
+        let secrets = match &new_secret {
+            Some(value) => Some(PrivateFile::create(self.root, SECRETS_FILE, &format!("{SECRET_KEY_BASE}={value}\n"))?),
+            None => None,
+        };
         self.migrate_remote(&database)?;
         let mut deploy = vec!["deploy"];
         if secrets.is_some() {
@@ -323,7 +330,15 @@ impl<'a> Cloudflare<'a> {
             .split_whitespace()
             .find(|word| word.starts_with("https://") && word.contains(".workers.dev"))
             .map(str::to_owned);
-        Ok(Deployed { url, secret_created: secrets.is_some(), provisioned })
+        // A new secret is kept where the app's other production values live.
+        let secret_saved = match (&new_secret, &kept) {
+            (Some(value), None) => {
+                save_secret(self.root, value)?;
+                true
+            }
+            _ => false,
+        };
+        Ok(Deployed { url, secret_created: secrets.is_some(), secret_saved, provisioned })
     }
 
     /// Runs cf with its stdout routed by `echo`, and returns that stdout.
@@ -736,6 +751,7 @@ pub fn deploy(json: bool) -> CliResult {
     Ok(Report {
         url: deployed.url,
         secret_created: deployed.secret_created,
+        secret_saved: deployed.secret_saved.then_some(PROD_VARS),
         provisioned: deployed.provisioned,
         ..Report::new("deploy")
     })
@@ -747,8 +763,28 @@ pub struct Deployed {
     pub url: Option<String>,
     /// A new SECRET_KEY_BASE was uploaded with this deploy.
     pub secret_created: bool,
+    /// It was generated and written to `.prod.vars`.
+    pub secret_saved: bool,
     /// Resources created because they were missing, e.g. `queue shop-jobs`.
     pub provisioned: Vec<String>,
+}
+
+/// Git-ignored file of production values (`ocre secrets push --file .prod.vars`).
+const PROD_VARS: &str = ".prod.vars";
+
+/// Appends a generated SECRET_KEY_BASE to `.prod.vars` (created readable by its owner only).
+fn save_secret(root: &Path, value: &str) -> Result<(), CliError> {
+    let mut options = OpenOptions::new();
+    options.append(true).create(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let line = format!(
+        "# Created by `ocre deploy` and uploaded to the Worker, which never gives it back.\n\
+         # Back it up (a password manager): losing it signs everyone out and makes encrypted columns unreadable.\n\
+         {SECRET_KEY_BASE}={value}\n"
+    );
+    options.open(root.join(PROD_VARS))?.write_all(line.as_bytes())?;
+    Ok(())
 }
 
 /// A new SECRET_KEY_BASE for `cf deploy --secrets-file`, relative to the app root.
@@ -759,11 +795,6 @@ const SECRETS_FILE: &str = ".wrangler/ocre-secrets.env";
 struct PrivateFile(PathBuf);
 
 impl PrivateFile {
-    /// A new SECRET_KEY_BASE for `cf deploy --secrets-file`.
-    fn secret_key_base(root: &Path) -> Result<Self, CliError> {
-        Self::create(root, SECRETS_FILE, &format!("{SECRET_KEY_BASE}={}\n", secret::generate()))
-    }
-
     fn create(root: &Path, relative: &str, contents: &str) -> Result<Self, CliError> {
         let file = Self(root.join(relative));
         std::fs::create_dir_all(file.0.parent().expect("the path has a parent"))?;

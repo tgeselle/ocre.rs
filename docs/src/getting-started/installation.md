@@ -208,6 +208,8 @@ hint: use a rustup toolchain (Homebrew's `rust` has no wasm target) and run `rus
 
 Fix: `brew uninstall rust`, install rustup as above, then `rustup target add wasm32-unknown-unknown`. `which rustc` should print a path under `~/.cargo/bin` (or Homebrew's `rustup` prefix).
 
+With rustup installed but another Rust first in `PATH`, the hint says so (`this rustc is not rustup's but comes first in PATH ...`). `ocre dev` and `ocre deploy` stop before building, but a plain `cargo check --target wasm32-unknown-unknown` in that shell fails with `error[E0463]: can't find crate for `core``: the same cause. Put `export PATH="$HOME/.cargo/bin:$PATH"` last in your shell profile (Homebrew's `rustup` formula: `/opt/homebrew/opt/rustup/bin`), or uninstall Homebrew's `rust`; `ocre doctor` runs the same check.
+
 No Rust at all:
 
 ```text

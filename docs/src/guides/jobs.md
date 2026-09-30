@@ -324,22 +324,35 @@ Cloudflare runs several consumer invocations of a queue in parallel when message
 
 ## Long jobs: continue in steps
 
-Each consumer run has the CPU limit of a request (10 ms on the free plan), so a job over many rows does a slice and enqueues itself for the rest, with a cursor in its fields, like Rails' `ActiveJob::Continuable` steps:
+A queue batch has the limits of a request: 10 ms of CPU on the free plan, and 50 D1 queries and 50 subrequests (`fetch`) per invocation; past those, calls fail. A job over many rows does a slice, then enqueues itself with a cursor for the rest, like Rails' `ActiveJob::Continuable`. `ocre::jobs::Budget` counts the calls the job may still make, and `run_steps` runs steps while the budget covers them:
 
-```rust
-pub async fn perform(self, ctx: &Ctx) -> Result<()> {
-    let rows: Vec<Row> = ctx.db()?.all("SELECT id FROM posts WHERE id > ?1 ORDER BY id LIMIT 50", params![self.after]).await?;
-    for row in &rows {
-        // ... the work for one row
+```rust,ignore
+use ocre::jobs::{Budget, Step, run_steps};
+use ocre::{Ctx, Query, Result, bulk};
+
+impl Reindex {
+    pub async fn perform(self, ctx: &Ctx) -> Result<()> {
+        // 50 queries per invocation, 1 kept to enqueue the rest.
+        let budget = Budget::new(Budget::FREE_D1_QUERIES - 1);
+        // A step reads a page and writes it back: 2 queries.
+        let rest = run_steps(&budget, 2, self.after_id, |after_id| async move {
+            let db = ctx.db()?;
+            let page: Vec<Row> = Query::table("tracks").gt("id", after_id).order_asc("id").limit(200).all(&db).await?;
+            let Some(last) = page.last().map(|row| row.id) else { return Ok(Step::Done) };
+            let update = bulk::update("tracks", "id", &["slug"], &slugs(&page), true)?;
+            db.execute(&update.sql, update.params).await?;
+            Ok(Step::Next(last))
+        })
+        .await?;
+        if let Some(after_id) = rest {
+            ocre::jobs::enqueue(ctx, &Job::Reindex(Reindex { after_id })).await?; // the next invocation
+        }
+        Ok(())
     }
-    if let Some(last) = rows.last() {
-        Reindex { after: last.id }.perform_later(ctx).await?; // the next step
-    }
-    Ok(())
 }
 ```
 
-A retried step starts again from its own cursor, so steps must be safe to repeat.
+`run_steps` returns `Some(cursor)` when the budget ran out before a step said `Step::Done`. `budget.take(n)` spends calls outside steps (a `fetch` to another service, a lookup before the loop). Ocre does not count the calls itself: give each step the cost it really has, and keep a margin. A retried job starts again from the cursor it was enqueued with, so steps must be safe to repeat. Writing many rows per query ([`ocre::bulk`](models.md#many-rows-in-one-query)) keeps the number of steps down.
 
 ## Errors: retry or discard
 
