@@ -65,6 +65,18 @@ fn add_model(edits: &mut Edits, names: &ModelNames, fields: &[Field], command: &
             .hint(format!("rename the field, e.g. `{}_kind:enum:...`", field.name)));
         }
     }
+    for field in fields.iter().filter(|f| f.polymorphic.is_some()) {
+        let type_name = polymorphic_type(field);
+        let own = [names.model.clone(), format!("New{}", names.model), format!("{}Changes", names.model)];
+        let taken = fields.iter().filter_map(|f| f.enumeration.as_ref()).any(|e| e.type_name == type_name);
+        if TAKEN_TYPE_NAMES.contains(&type_name.as_str()) || own.contains(&type_name) || taken {
+            return Err(CliError::new(format!(
+                "polymorphic `{}` would be named `{type_name}`, a name the model already uses",
+                field.association()
+            ))
+            .hint(format!("rename it, e.g. `{}_owner:polymorphic:...`", field.association())));
+        }
+    }
     let references: Vec<&Field> = fields.iter().filter(|f| f.target.is_some()).collect();
     // A self join (`Employee manager:references:manager_id?`): the has-many side goes in the new file.
     let mut own_associations = String::new();
@@ -75,20 +87,22 @@ fn add_model(edits: &mut Edits, names: &ModelNames, fields: &[Field], command: &
             own_associations.push_str(&code);
             continue;
         }
-        let path = model_path(target);
-        let source = edits.read(&path)?.ok_or_else(|| {
-            CliError::new(format!("{path} does not exist"))
-                .hint(format!("generate the referenced model first, e.g. `ocre g model {} name:string`", target.model))
-        })?;
         // A join model (two references or more): each side reaches the others through it.
         for other in references.iter().filter(|other| other.name != field.name) {
             code.push_str(&has_many_through_fn(names, field, other));
         }
-        let updated = insert_after_marker(&source, ASSOCIATIONS_MARKER, &code).ok_or_else(|| {
-            CliError::new(format!("{path} is missing the `{ASSOCIATIONS_MARKER}` marker"))
-                .hint(format!("put `{ASSOCIATIONS_MARKER}` on its own line inside `impl {} {{ ... }}`", target.model))
-        })?;
-        edits.update(&path, updated);
+        add_association(edits, target, &code)?;
+    }
+    // The has-many side of a polymorphic reference, in each model it may point to.
+    for field in fields.iter().filter(|f| f.polymorphic.is_some()) {
+        for target in field.polymorphic.as_deref().unwrap_or_default() {
+            let code = has_many_polymorphic_fn(names, target, field);
+            if target.singular == names.singular {
+                own_associations.push_str(&code);
+            } else {
+                add_association(edits, target, &code)?;
+            }
+        }
     }
     register_model(edits, &names.singular)?;
     if fields.iter().any(Field::is_attachment) {
@@ -104,6 +118,21 @@ fn add_model(edits: &mut Edits, names: &ModelNames, fields: &[Field], command: &
     }
     edits.create(&model_path(names), source)?;
     super::test_files::add_factory(edits, names, fields, command)
+}
+
+/// Adds `code` after the associations marker of the existing model `target`.
+fn add_association(edits: &mut Edits, target: &ModelNames, code: &str) -> Result<(), CliError> {
+    let path = model_path(target);
+    let source = edits.read(&path)?.ok_or_else(|| {
+        CliError::new(format!("{path} does not exist"))
+            .hint(format!("generate the referenced model first, e.g. `ocre g model {} name:string`", target.model))
+    })?;
+    let updated = insert_after_marker(&source, ASSOCIATIONS_MARKER, code).ok_or_else(|| {
+        CliError::new(format!("{path} is missing the `{ASSOCIATIONS_MARKER}` marker"))
+            .hint(format!("put `{ASSOCIATIONS_MARKER}` on its own line inside `impl {} {{ ... }}`", target.model))
+    })?;
+    edits.update(&path, updated);
+    Ok(())
 }
 
 /// Adds `pub mod <module>;` to src/models/mod.rs, creating it (and `mod models;`
@@ -157,13 +186,17 @@ fn join_columns(fields: &[Field]) -> Option<Vec<&str>> {
     join.then(|| fields.iter().map(|f| f.name.as_str()).collect())
 }
 
-/// `CREATE [UNIQUE] INDEX` for unique and reference columns.
+/// `CREATE [UNIQUE] INDEX` for unique and reference columns; a polymorphic
+/// reference is looked up by type and id together.
 pub(super) fn index_sql(table: &str, field: &Field) -> String {
     let name = &field.name;
     if field.unique {
         format!("CREATE UNIQUE INDEX index_{table}_on_{name} ON {table} ({name});\n")
     } else if field.target.is_some() {
         format!("CREATE INDEX index_{table}_on_{name} ON {table} ({name});\n")
+    } else if field.polymorphic.is_some() {
+        let association = field.association();
+        format!("CREATE INDEX index_{table}_on_{association} ON {table} ({association}_type, {name});\n")
     } else {
         String::new()
     }
@@ -394,6 +427,10 @@ fn model_rs(names: &ModelNames, fields: &[Field], command: &str) -> String {
     for file in &files {
         methods.push_str(&attachment_fn(file, &lower));
     }
+    let polymorphic: Vec<&Field> = fields.iter().filter(|f| f.polymorphic.is_some()).collect();
+    for field in &polymorphic {
+        methods.push_str(&polymorphic_fn(field, &lower));
+    }
     let validator = |checks: String| {
         if checks.is_empty() {
             "        Validator::new()".to_owned()
@@ -404,6 +441,7 @@ fn model_rs(names: &ModelNames, fields: &[Field], command: &str) -> String {
     let new_validation = validator(validate_body(fields, false));
     let change_validation = validator(validate_body(fields, true));
     let mut create_checks = database_checks(names, fields, false);
+    create_checks.extend(polymorphic.iter().map(|field| polymorphic_check(field, false)));
     if let Some(columns) = join_columns(fields) {
         let conditions: String = columns.iter().map(|c| format!(".eq(\"{c}\", new.{c})")).collect();
         let last = columns.last().expect("a join has two columns or more");
@@ -413,7 +451,8 @@ fn model_rs(names: &ModelNames, fields: &[Field], command: &str) -> String {
         )
         .expect("writing to a String");
     }
-    let update_checks = database_checks(names, fields, true);
+    let mut update_checks = database_checks(names, fields, true);
+    update_checks.extend(polymorphic.iter().map(|field| polymorphic_check(field, true)));
     let create_validation = if create_checks.is_empty() {
         "    new.validate().finish()?;\n".to_owned()
     } else {
@@ -466,7 +505,8 @@ fn model_rs(names: &ModelNames, fields: &[Field], command: &str) -> String {
     let into_param = if files.is_empty() { "" } else { "IntoParam, " };
     let preloads: String = fields.iter().filter(|f| f.target.is_some()).map(|f| preload_fns(names, f)).collect();
     let singular = &names.singular;
-    let enums: String = fields.iter().filter_map(|f| Some(enum_rs(&f.name, f.enumeration.as_ref()?))).collect();
+    let mut enums: String = fields.iter().filter_map(|f| Some(enum_rs(&f.name, f.enumeration.as_ref()?))).collect();
+    enums.extend(polymorphic.iter().map(|field| polymorphic_rs(field, &lower)));
     let changed: String = fields
         .iter()
         .filter(|f| f.ty != FieldType::LockVersion)
@@ -482,6 +522,8 @@ fn model_rs(names: &ModelNames, fields: &[Field], command: &str) -> String {
         String::new()
     };
     let stale_doc = if lock { "; `Error::Conflict` (409) when `lock_version` is stale" } else { "" };
+    // Rails' `touch` bumps the lock version too: a form opened before it is stale.
+    let touch_lock = if lock { ", lock_version = lock_version + 1" } else { "" };
 
     format!(
         r#"//! {human_singular} model: the `{plural}` table. Generated by `{command}`.
@@ -589,6 +631,15 @@ pub async fn delete(ctx: &Ctx, id: i64) -> Result<bool> {{
     before_delete(ctx, id).await?;
 {delete_body}    after_delete(ctx, &record).await?;
     Ok(true)
+}}
+
+/// Sets `updated_at` to now, without validation or callbacks (Rails'
+/// `touch`): call it from another model's callbacks, e.g. a child's
+/// `after_create`, so cache keys built from this {lower}'s `updated_at`
+/// change. `false` when there is no {lower} with this id.
+pub async fn touch(ctx: &Ctx, id: i64) -> Result<bool> {{
+    let sql = "UPDATE {plural} SET updated_at = datetime('now'){touch_lock} WHERE id = ?1";
+    Ok(ctx.db()?.execute(sql, params![id]).await? > 0)
 }}
 
 // Callbacks: `create`, `update` and `delete` call these, so every controller
@@ -797,6 +848,96 @@ fn has_many_through_fn(join: &ModelNames, field: &Field, other: &Field) -> Strin
         "    /// {} of this {}, through {join_table}, most recently linked first.\n    pub async fn {far_table}(&self, ctx: &Ctx, page: ocre::Page) -> Result<Vec<crate::models::{far_singular}::{far_model}>> {{\n        ctx.db()?\n            .all(\n                \"SELECT {far_table}.* FROM {far_table} JOIN {join_table} ON {join_table}.{other_column} = {far_table}.id WHERE {join_table}.{column} = ?1 ORDER BY {join_table}.id DESC LIMIT ?2 OFFSET ?3\",\n                params![self.id, page.limit, page.offset],\n            )\n            .await\n    }}\n",
         far.human_plural,
         target.human_singular.to_lowercase(),
+    )
+}
+
+/// `Commentable`: the Rust enum of the records `commentable_id` may point to.
+fn polymorphic_type(field: &Field) -> String {
+    Enumeration::variant(field.association())
+}
+
+/// The enum of the records a polymorphic reference points to, and the table
+/// of each `<association>_type` value.
+fn polymorphic_rs(field: &Field, lower: &str) -> String {
+    let targets = field.polymorphic.as_deref().expect("polymorphic fields have targets");
+    let (association, type_name) = (field.association(), polymorphic_type(field));
+    let kind = Enumeration::variant(&format!("{association}_type"));
+    let (mut variants, mut tables) = (String::new(), String::new());
+    for target in targets {
+        let (variant, singular, model, plural) =
+            (Enumeration::variant(&target.singular), &target.singular, &target.model, &target.plural);
+        writeln!(variants, "    {variant}(crate::models::{singular}::{model}),").expect("writing to a String");
+        writeln!(tables, "        {kind}::{variant} => \"{plural}\",").expect("writing to a String");
+    }
+    format!(
+        r#"
+/// The record a {lower}'s `{association}` points to (`{association}_type` and `{association}_id`).
+#[derive(Debug, Clone)]
+pub enum {type_name} {{
+{variants}}}
+
+/// The table a `{association}_type` points into.
+fn {association}_table(kind: {kind}) -> &'static str {{
+    match kind {{
+{tables}    }}
+}}
+"#
+    )
+}
+
+/// `comment.commentable(ctx)`: the record a polymorphic reference points to.
+fn polymorphic_fn(field: &Field, lower: &str) -> String {
+    let targets = field.polymorphic.as_deref().expect("polymorphic fields have targets");
+    let (association, type_name) = (field.association(), polymorphic_type(field));
+    let kind = Enumeration::variant(&format!("{association}_type"));
+    let mut arms = String::new();
+    for target in targets {
+        let variant = Enumeration::variant(&target.singular);
+        write!(
+            arms,
+            "\n            {kind}::{variant} => crate::models::{}::find(ctx, id).await?.map({type_name}::{variant}),",
+            target.singular
+        )
+        .expect("writing to a String");
+    }
+    let names: Vec<String> = targets.iter().map(|t| t.human_singular.to_lowercase()).collect();
+    let bind = if field.optional {
+        format!(
+            "let (Some(kind), Some(id)) = (self.{association}_type, self.{association}_id) else {{\n            return Ok(None);\n        }};"
+        )
+    } else {
+        format!("let (kind, id) = (self.{association}_type, self.{association}_id);")
+    };
+    format!(
+        "\n    /// The {} this {lower} belongs to; `None` once it is deleted (a\n    /// polymorphic reference has no foreign key to clear it).\n    pub async fn {association}(&self, ctx: &Ctx) -> Result<Option<{type_name}>> {{\n        {bind}\n        Ok(match kind {{{arms}\n        }})\n    }}\n",
+        names.join(" or ")
+    )
+}
+
+/// The "must exist" check of a polymorphic reference: in `create`, and in
+/// `update` when the change sets both its type and its id.
+fn polymorphic_check(field: &Field, changes: bool) -> String {
+    let association = field.association();
+    let source = if changes { "changes" } else { "new" };
+    let check = format!(
+        "let sql = format!(\"SELECT 1 FROM {{}} WHERE id = ?1 LIMIT 1\", {association}_table(kind));\n        v.check(\"{association}_id\", !db.exists(&sql, params![id]).await?, \"must exist\");"
+    );
+    let pair = format!("({source}.{association}_type, {source}.{association}_id)");
+    match (changes, field.optional) {
+        (false, false) => format!("    {{\n        let (kind, id) = {pair};\n        {check}\n    }}\n"),
+        (true, true) => format!("    if let (Some(Some(kind)), Some(Some(id))) = {pair} {{\n        {check}\n    }}\n"),
+        _ => format!("    if let (Some(kind), Some(id)) = {pair} {{\n        {check}\n    }}\n"),
+    }
+}
+
+/// `comments(ctx, page)` on each model a polymorphic reference may point to.
+fn has_many_polymorphic_fn(names: &ModelNames, target: &ModelNames, field: &Field) -> String {
+    let (model, singular, plural, association) = (&names.model, &names.singular, &names.plural, field.association());
+    format!(
+        "    /// {} of this {} (their `{association}`), newest first.\n    pub async fn {plural}(&self, ctx: &Ctx, page: ocre::Page) -> Result<Vec<crate::models::{singular}::{model}>> {{\n        ctx.db()?\n            .all(\n                \"SELECT * FROM {plural} WHERE {association}_type = '{}' AND {association}_id = ?1 ORDER BY id DESC LIMIT ?2 OFFSET ?3\",\n                params![self.id, page.limit, page.offset],\n            )\n            .await\n    }}\n",
+        names.human_plural,
+        target.human_singular.to_lowercase(),
+        target.singular,
     )
 }
 

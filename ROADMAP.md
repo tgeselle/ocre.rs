@@ -4,7 +4,7 @@ Feature-level inventory of Rails 8.1 and Loco 1.2, with what Ocre has and how
 each part maps to Cloudflare's free plan. Collected from the official Rails
 guides and the Loco documentation source; every item links to its page.
 
-993 features: 634 done, 84 partial, 167 to do, 108 not applicable on Workers.
+993 features: 644 done, 86 partial, 154 to do, 109 not applicable on Workers.
 
 Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason given).
 (R) Rails, (L) Loco.
@@ -31,7 +31,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** D1 (SQLite): 5 GB and daily row read/write quotas on the free plan, so batch queries and avoid N+1. Migrations are forward-only SQL files applied by `ocre migrate` (the app's wrangler locally, `cf d1 migrations apply` in production); rollbacks need hand-written reverse SQL (D1 Time Travel restores a point in time). Several databases are several D1 bindings. Encryption uses WebCrypto AES-GCM. Everything here is Rust code over D1: feasible.
 
-246 features: 118 done, 24 partial, 83 to do, 21 not applicable.
+246 features: 128 done, 26 partial, 70 to do, 22 not applicable.
 
 ### Active Record
 
@@ -75,29 +75,29 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [ ] **Associations with composite keys** (R): Associations infer or accept composite foreign_key/query_constraints for models with composite primary keys. [association_basics](https://guides.rubyonrails.org/association_basics.html)
 - [x] **belongs_to** (R): Declares a foreign-key association to a parent, required by default (optional: true), adding reader/writer/build_/create_/reload_/changed? methods. *Ocre: `post.author(ctx)`, a "must exist" check in `create`/`update`, `?` for optional ones, and `preload_authors` for lists.* [association_basics](https://guides.rubyonrails.org/association_basics.html)
 - [x] **has_one** (R): One-to-one association where the other model holds the foreign key, with build_/create_ methods. *Ocre: a unique reference (`user:references^`) generates `user.profile(ctx)` on the target.* [association_basics](https://guides.rubyonrails.org/association_basics.html)
-- [~] **has_many** (R): One-to-many association with collection methods (<<, delete, destroy, ids, clear, empty?, size, find, where, exists?, build, create, reload). [association_basics](https://guides.rubyonrails.org/association_basics.html)
+- [x] **has_many** (R): One-to-many association with collection methods (<<, delete, destroy, ids, clear, empty?, size, find, where, exists?, build, create, reload). *Ocre: `post.comments(ctx, page)`, `comment::for_posts` to load a list's children in one query, and `comment::create` with `post_id` to add one.* [association_basics](https://guides.rubyonrails.org/association_basics.html)
 - [x] **has_many :through** (R): Many-to-many via a join model, including nested through associations. *Ocre: a model with two references or more (`ocre g model Tagging post:references tag:references`) generates `post.tags(ctx, page)` / `tag.posts(ctx, page)`, a unique index on the pair and a "has already been taken" check.* [association_basics](https://guides.rubyonrails.org/association_basics.html)
 - [ ] **has_one :through** (R): One-to-one via an intermediate model. [association_basics](https://guides.rubyonrails.org/association_basics.html)
-- [ ] **has_and_belongs_to_many** (R): Many-to-many via a bare join table without a model. [association_basics](https://guides.rubyonrails.org/association_basics.html)
-- [ ] **Polymorphic associations** (R): belongs_to polymorphic: true with *_id/*_type lets a model belong to multiple model types via as:. [association_basics](https://guides.rubyonrails.org/association_basics.html)
-- [ ] **Self joins** (R): A model associates with itself via class_name/foreign_key (e.g. manager/subordinates). [association_basics](https://guides.rubyonrails.org/association_basics.html)
+- [x] **has_and_belongs_to_many** (R): Many-to-many via a bare join table without a model. *Ocre: a join model (`ocre g model Tagging post:references tag:references`) with a unique pair index gives `post.tags(ctx, page)` and `tag.posts(ctx, page)`.* [association_basics](https://guides.rubyonrails.org/association_basics.html)
+- [x] **Polymorphic associations** (R): belongs_to polymorphic: true with *_id/*_type lets a model belong to multiple model types via as:. *Ocre: `commentable:polymorphic:post,photo[?]` stores `commentable_type` (an enum) and `commentable_id`, checks the record exists, gives `comment.commentable(ctx)` returning a `Commentable` enum, and `post.comments(ctx, page)` on each model.* [association_basics](https://guides.rubyonrails.org/association_basics.html)
+- [x] **Self joins** (R): A model associates with itself via class_name/foreign_key (e.g. manager/subordinates). *Ocre: `ocre g model Employee manager:references:manager_id?` gives `employee.manager(ctx)` and `employee.employees(ctx, page)`.* [association_basics](https://guides.rubyonrails.org/association_basics.html)
 - [ ] **Single Table Inheritance** (R): Subclasses share a table distinguished by a type column, with automatic type-scoped queries. [association_basics](https://guides.rubyonrails.org/association_basics.html)
 - [ ] **STI inheritance column override/disable** (R): inheritance_column customizes or disables (nil) the STI type column. [association_basics](https://guides.rubyonrails.org/association_basics.html)
-- [ ] **Delegated types** (R): delegated_type provides class hierarchy across separate tables with shared superclass table, type predicates and scopes. [association_basics](https://guides.rubyonrails.org/association_basics.html)
-- [ ] **Association caching / reload** (R): Loaded associations are cached; reload_* and reload refresh them. [association_basics](https://guides.rubyonrails.org/association_basics.html)
-- [ ] **Bi-directional associations / inverse_of** (R): Automatic and explicit inverse detection keeps in-memory objects consistent. [association_basics](https://guides.rubyonrails.org/association_basics.html)
-- [ ] **:class_name option** (R): Specify associated model class name when not inferable. [association_basics](https://guides.rubyonrails.org/association_basics.html)
+- [~] **Delegated types** (R): delegated_type provides class hierarchy across separate tables with shared superclass table, type predicates and scopes. *Ocre: a polymorphic reference's `Commentable` enum holds the typed record; no shared superclass table.* [association_basics](https://guides.rubyonrails.org/association_basics.html)
+- [x] **Association caching / reload** (R): Loaded associations are cached; reload_* and reload refresh them. *Ocre: an accessor queries each time it is called; keep the result in a variable, so there is no stale cache to reload.* [association_basics](https://guides.rubyonrails.org/association_basics.html)
+- [-] **Bi-directional associations / inverse_of** (R): Automatic and explicit inverse detection keeps in-memory objects consistent. *Not applicable: rows are plain values without an identity map; each accessor loads its own copy.* [association_basics](https://guides.rubyonrails.org/association_basics.html)
+- [x] **:class_name option** (R): Specify associated model class name when not inferable. *Ocre: `writer:references` names the association, and `author:references:writer_id` points a differently named column at `authors`.* [association_basics](https://guides.rubyonrails.org/association_basics.html)
 - [x] **:dependent option** (R): Control child fate on destroy: destroy, delete, delete_all, destroy_async, nullify, restrict_with_exception, restrict_with_error. *Ocre: required references `ON DELETE CASCADE`, optional ones `ON DELETE SET NULL`; restrict with an error in the generated `before_delete` hook.* [association_basics](https://guides.rubyonrails.org/association_basics.html)
-- [ ] **:foreign_key / :primary_key options** (R): Override FK and referenced key columns. [association_basics](https://guides.rubyonrails.org/association_basics.html)
-- [ ] **:touch option** (R): Updates the parent's updated_at when the child is saved or destroyed. [association_basics](https://guides.rubyonrails.org/association_basics.html)
-- [ ] **:validate / :autosave options** (R): Control whether associated objects are validated and saved with the owner. [association_basics](https://guides.rubyonrails.org/association_basics.html)
+- [x] **:foreign_key / :primary_key options** (R): Override FK and referenced key columns. *Ocre: `author:references:writer_id` names the foreign key column; primary keys are always `id`.* [association_basics](https://guides.rubyonrails.org/association_basics.html)
+- [~] **:touch option** (R): Updates the parent's updated_at when the child is saved or destroyed. *Ocre: every model has `touch(ctx, id)` (sets `updated_at`, bumps `lock_version`); call it from a child's `after_*` callbacks. Not declared on the reference.* [association_basics](https://guides.rubyonrails.org/association_basics.html)
+- [~] **:validate / :autosave options** (R): Control whether associated objects are validated and saved with the owner. *Ocre: references are checked ("must exist") by `create`/`update`; saving children is an explicit `create` call.* [association_basics](https://guides.rubyonrails.org/association_basics.html)
 - [ ] **:source / :source_type options** (R): Pick source association and type for has_many :through polymorphic. [association_basics](https://guides.rubyonrails.org/association_basics.html)
 - [-] **:strict_loading association option** (R): Raise when the association is lazily loaded. *Not applicable: Ocre has no lazy loading; every association is an explicit `async` function call.* [association_basics](https://guides.rubyonrails.org/association_basics.html)
-- [ ] **:association_foreign_key / :join_table** (R): Customize HABTM join table name and the other side's key. [association_basics](https://guides.rubyonrails.org/association_basics.html)
+- [x] **:association_foreign_key / :join_table** (R): Customize HABTM join table name and the other side's key. *Ocre: the join model is named like any model, and each side's column with `:column` (`post:references:article_id`).* [association_basics](https://guides.rubyonrails.org/association_basics.html)
 - [ ] **:deprecated option** (R): Mark an association deprecated so usage is reported (log/raise/notify) to aid removal. [association_basics](https://guides.rubyonrails.org/association_basics.html)
-- [ ] **Association scopes** (R): Lambda scopes (where, includes, readonly, select, distinct, order, limit, offset) customize association queries, including using the owner record. [association_basics](https://guides.rubyonrails.org/association_basics.html)
+- [x] **Association scopes** (R): Lambda scopes (where, includes, readonly, select, distinct, order, limit, offset) customize association queries, including using the owner record. *Ocre: start from the child's `query()` with the parent's id: `comment::query().eq("post_id", post.id).eq("approved", true)`.* [association_basics](https://guides.rubyonrails.org/association_basics.html)
 - [ ] **Counter cache** (R): counter_cache: true maintains a *_count column on the parent, with custom column names. [association_basics](https://guides.rubyonrails.org/association_basics.html)
-- [ ] **Association extensions** (R): Add custom methods to association proxies via a block or extend: module. [association_basics](https://guides.rubyonrails.org/association_basics.html)
+- [x] **Association extensions** (R): Add custom methods to association proxies via a block or extend: module. *Ocre: add methods to the generated `impl` block after the `// ocre:associations` marker.* [association_basics](https://guides.rubyonrails.org/association_basics.html)
 
 ### Querying
 

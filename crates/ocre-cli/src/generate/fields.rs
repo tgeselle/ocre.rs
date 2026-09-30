@@ -1,7 +1,9 @@
 //! Field language shared by `model`, `scaffold` and `api`:
 //! `name:type`, with `?` for optional (NULL allowed) and `^` for unique,
 //! e.g. `title:string^ summary:text? author:references avatar:attachment? settings:json`.
-//! `author:references:writer_id` names the foreign key column.
+//! `author:references:writer_id` names the foreign key column, and
+//! `commentable:polymorphic:post,photo` belongs to one of several models
+//! (two fields: the enum `commentable_type` and the integer `commentable_id`).
 
 use crate::{
     names::{ModelNames, humanize, is_identifier},
@@ -80,7 +82,7 @@ pub(super) const RESERVED: &[&str] = &[
     "values",
 ];
 
-pub(super) const TYPES: &str = "string, text, rich_text, integer (int, small_int, big_int), float (double), decimal, boolean (bool), date, time, datetime (date_time), uuid, references, attachment, json (jsonb), enum:<value>,<value>...; `lock_version:integer` turns on optimistic locking";
+pub(super) const TYPES: &str = "string, text, rich_text, integer (int, small_int, big_int), float (double), decimal, boolean (bool), date, time, datetime (date_time), uuid, references, attachment, json (jsonb), enum:<value>,<value>..., polymorphic:<model>,<model>...; `lock_version:integer` turns on optimistic locking";
 
 /// Content types an attachment accepts until the app edits its `Rules`:
 /// common images, PDF and plain text, all safe to display inline.
@@ -182,6 +184,10 @@ pub(super) struct Field {
     pub target: Option<ModelNames>,
     /// Rust enum of `enum` fields: `Status` with values `draft`, `published`.
     pub enumeration: Option<Enumeration>,
+    /// The models `commentable_id` may point to, for the id field of
+    /// `commentable:polymorphic:post,photo`; its `commentable_type` field
+    /// is an enum of their singular names.
+    pub polymorphic: Option<Vec<ModelNames>>,
 }
 
 /// The Rust enum generated for `status:enum:draft,published`, stored as TEXT.
@@ -308,12 +314,47 @@ impl Field {
             }
             (_, None) => (name.to_owned(), None, None),
         };
-        Ok(Self { name, ty, optional, unique, target, enumeration })
+        Ok(Self { name, ty, optional, unique, target, enumeration, polymorphic: None })
     }
 
-    /// `Published at`; `Author` for `author_id`.
+    /// `commentable:polymorphic:post,photo[?]`: the fields `commentable_type`
+    /// (an enum of `post`, `photo`) and `commentable_id`. `None` for other types.
+    fn parse_polymorphic(spec: &str) -> Option<Result<[Self; 2], CliError>> {
+        let (name, rest) = spec.split_once(':')?;
+        let (ty, targets) = rest.split_once(':').unwrap_or((rest, ""));
+        (ty.trim_end_matches(['?', '^']) == "polymorphic").then(|| Self::polymorphic_fields(spec, name, targets))
+    }
+
+    fn polymorphic_fields(spec: &str, name: &str, targets: &str) -> Result<[Self; 2], CliError> {
+        // Names and model names are identifiers: any `?` or `^` is a modifier.
+        if spec.contains('^') {
+            return Err(CliError::new(format!("polymorphic `{name}` cannot be unique"))
+                .hint("many rows may belong to the same record; drop the `^`"));
+        }
+        let targets = targets.trim_end_matches(['?', '^']);
+        if targets.is_empty() {
+            return Err(CliError::new(format!("polymorphic `{name}` has no models"))
+                .hint(format!("list the models it may belong to, e.g. `{name}:polymorphic:post,photo`")));
+        }
+        let optional = if spec.contains('?') { "?" } else { "" };
+        let targets = targets.split(',').map(ModelNames::parse).collect::<Result<Vec<_>, _>>()?;
+        let values: Vec<&str> = targets.iter().map(|target| target.singular.as_str()).collect();
+        let kind = Self::parse(&format!("{name}_type:enum:{}{optional}", values.join(",")))?;
+        let mut id = Self::parse(&format!("{name}_id:integer{optional}"))?;
+        id.polymorphic = Some(targets);
+        Ok([kind, id])
+    }
+
+    /// `commentable` for the fields of `commentable:polymorphic:...`, `author` for `author_id`.
+    pub(super) fn association(&self) -> &str {
+        let base = self.name.strip_suffix("_id").or_else(|| self.name.strip_suffix("_type"));
+        base.unwrap_or(&self.name)
+    }
+
+    /// `Published at`; `Author` for `author_id`, `Commentable` for `commentable_id`.
     pub(super) fn label(&self) -> String {
-        humanize(self.name.strip_suffix("_id").filter(|_| self.target.is_some()).unwrap_or(&self.name))
+        let reference = self.target.is_some() || self.polymorphic.is_some();
+        humanize(self.name.strip_suffix("_id").filter(|_| reference).unwrap_or(&self.name))
     }
 
     /// askama expression printing this field of `record` (`{{ post.title }}`);
@@ -453,7 +494,13 @@ impl Field {
 }
 
 pub(super) fn parse_fields(specs: &[String]) -> Result<Vec<Field>, CliError> {
-    let fields = specs.iter().map(|spec| Field::parse(spec)).collect::<Result<Vec<_>, _>>()?;
+    let mut fields = Vec::with_capacity(specs.len());
+    for spec in specs {
+        match Field::parse_polymorphic(spec) {
+            Some(pair) => fields.extend(pair?),
+            None => fields.push(Field::parse(spec)?),
+        }
+    }
     let mut columns: Vec<String> = Vec::new();
     for field in &fields {
         for (column, _) in field.columns() {

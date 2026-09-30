@@ -104,6 +104,8 @@ impl<'a> FactoryField<'a> {
             FieldType::String | FieldType::Text | FieldType::RichText => {
                 ("String", format!("format!(\"{} {{n}}\")", humanize(name)))
             }
+            // A polymorphic id: `with_parents` creates a record of the first type, like a reference.
+            FieldType::Integer if field.polymorphic.is_some() => ("i64", "None".to_owned()),
             FieldType::Integer => ("i64", "n as i64".to_owned()),
             FieldType::Float => ("f64", "n as f64".to_owned()),
             FieldType::Decimal => ("String", "format!(\"{n}.99\")".to_owned()),
@@ -119,7 +121,7 @@ impl<'a> FactoryField<'a> {
             }
             FieldType::References => ("i64", "None".to_owned()),
         };
-        let optional = field.optional || field.ty == FieldType::References;
+        let optional = field.optional || field.ty == FieldType::References || field.polymorphic.is_some();
         let sequenced = !field.optional && (default.contains("{n") || default.starts_with("n as"));
         Some(Self {
             field,
@@ -158,9 +160,9 @@ fn factory_rs(
     for factory_field in &factory_fields {
         let field = factory_field.field;
         let name = &field.name;
-        if field.ty == FieldType::References && !field.optional {
+        let parent = field.target.as_ref().or_else(|| field.polymorphic.as_ref().and_then(|targets| targets.first()));
+        if let Some(target) = parent.filter(|_| !field.optional) {
             writeln!(declarations, "    /// `None`: `with_parents` sets it.").expect("writing to a String");
-            let target = field.target.as_ref().expect("references have a target");
             if has_factory(target) && target.singular != *singular {
                 creates_parents = true;
                 write!(

@@ -99,6 +99,8 @@ jobs:
           ocre g scaffold Article title:string body:rich_text summary:rich_text? lock_version:integer cover:attachment? --json
           ocre g api Wiki name:string content:rich_text lock_version:integer --graphql --json
           ocre g model Employee name:string employee:references:manager_id? --json
+          ocre g scaffold Remark body:text subject:polymorphic:book,review --json
+          ocre g model Sticker label:string owner:polymorphic:book,sticker? --json
           ocre g migration add_lock_version_to_books lock_version:integer --json
           # CI workflow, PWA files, a custom domain (type-checked by tsc below).
           ocre g ci --json

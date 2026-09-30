@@ -119,3 +119,29 @@ fn lock_version_and_rich_text_rules() {
     assert_eq!(Field::parse("body:rich_text").unwrap().ty, FieldType::RichText);
     assert_eq!(Field::parse("body:rich_text^").unwrap_err().message, "rich_text field `body` cannot be unique");
 }
+
+#[test]
+fn polymorphic_fields_expand_to_a_type_and_an_id() {
+    let specs = |specs: &[&str]| parse_fields(&specs.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>());
+    let fields = specs(&["commentable:polymorphic:post,blog_post?"]).unwrap();
+    assert_eq!(
+        (fields[0].name.as_str(), fields[0].ty, fields[0].optional),
+        ("commentable_type", FieldType::Enum, true)
+    );
+    assert_eq!(fields[0].enumeration.as_ref().unwrap().values, ["post", "blog_post"]);
+    assert_eq!((fields[1].name.as_str(), fields[1].ty), ("commentable_id", FieldType::Integer));
+    assert_eq!(fields[1].polymorphic.as_ref().unwrap()[1].plural, "blog_posts");
+    assert_eq!(
+        (fields[1].association(), fields[0].association(), fields[1].label()),
+        ("commentable", "commentable", "Commentable".to_owned())
+    );
+    let error = |spec: &str| specs(&[spec]).unwrap_err().message;
+    assert_eq!(error("owner:polymorphic:post^"), "polymorphic `owner` cannot be unique");
+    assert_eq!(error("owner:polymorphic"), "polymorphic `owner` has no models");
+    assert_eq!(error("owner:polymorphic:1post"), "invalid model name `1post`");
+    assert_eq!(error("owner:polymorphic:post,post"), "invalid values `post,post` for enum `owner_type`");
+    assert_eq!(
+        specs(&["owner:polymorphic:post", "owner_id:integer"]).unwrap_err().message,
+        "field `owner_id` is listed twice"
+    );
+}

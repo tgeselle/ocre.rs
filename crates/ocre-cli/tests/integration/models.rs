@@ -213,3 +213,59 @@ fn a_model_can_reference_itself() {
         assert!(model.contains(expected), "missing {expected}\n{model}");
     }
 }
+
+#[test]
+fn polymorphic_references_point_to_one_of_several_models() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    let (report, ok) = sandbox.json(&["g", "model", "Comment", "commentable:polymorphic:post,photo"], &root);
+    assert!(!ok);
+    assert_eq!(report["error"], "src/models/post.rs does not exist", "the models it points to come first");
+    for model in [["Post", "title:string"], ["Photo", "url:string"]] {
+        assert!(sandbox.json(&["g", "model", model[0], model[1]], &root).1);
+    }
+    let (report, ok) =
+        sandbox.json(&["g", "model", "Comment", "body:text", "commentable:polymorphic:post,photo"], &root);
+    assert!(ok, "{report}");
+    assert_eq!(
+        report["updated"],
+        json!(["src/models/post.rs", "src/models/photo.rs", "src/models/mod.rs", "tests/factories/mod.rs"])
+    );
+    let read = |path: &str| fs::read_to_string(root.join(path)).unwrap();
+    let migration = read("migrations/0003_create_comments.sql");
+    assert!(migration.contains("    commentable_type TEXT NOT NULL CHECK (commentable_type IN ('post', 'photo')),\n    commentable_id INTEGER NOT NULL,\n"), "{migration}");
+    assert!(
+        migration
+            .contains("CREATE INDEX index_comments_on_commentable ON comments (commentable_type, commentable_id);")
+    );
+    let model = read("src/models/comment.rs");
+    for expected in [
+        "pub enum Commentable {\n    Post(crate::models::post::Post),\n    Photo(crate::models::photo::Photo),\n}",
+        "        CommentableType::Photo => \"photos\",",
+        "        let (kind, id) = (self.commentable_type, self.commentable_id);",
+        "            CommentableType::Post => crate::models::post::find(ctx, id).await?.map(Commentable::Post),",
+        "        let (kind, id) = (new.commentable_type, new.commentable_id);\n        let sql = format!(\"SELECT 1 FROM {} WHERE id = ?1 LIMIT 1\", commentable_table(kind));",
+        "    if let (Some(kind), Some(id)) = (changes.commentable_type, changes.commentable_id) {",
+    ] {
+        assert!(model.contains(expected), "missing {expected}\n{model}");
+    }
+    assert!(read("src/models/photo.rs").contains("\"SELECT * FROM comments WHERE commentable_type = 'photo' AND commentable_id = ?1 ORDER BY id DESC LIMIT ?2 OFFSET ?3\""));
+    assert!(read("tests/factories/comment.rs").contains("self.commentable_id = Some(super::post::post().insert());"));
+
+    // Optional, and pointing to its own model: both sides in one file.
+    let (report, ok) = sandbox.json(&["g", "model", "Note", "subject:polymorphic:note,post?"], &root);
+    assert!(ok, "{report}");
+    let note = read("src/models/note.rs");
+    for expected in [
+        "    pub async fn notes(&self, ctx: &Ctx, page: ocre::Page)",
+        "        let (Some(kind), Some(id)) = (self.subject_type, self.subject_id) else {\n            return Ok(None);\n        };",
+        "    if let (Some(kind), Some(id)) = (new.subject_type, new.subject_id) {",
+        "    if let (Some(Some(kind)), Some(Some(id))) = (changes.subject_type, changes.subject_id) {",
+    ] {
+        assert!(note.contains(expected), "missing {expected}\n{note}");
+    }
+
+    let (report, ok) = sandbox.json(&["g", "model", "Pin", "status:enum:a,b", "status:polymorphic:post"], &root);
+    assert!(!ok);
+    assert_eq!(report["error"], "polymorphic `status` would be named `Status`, a name the model already uses");
+}
