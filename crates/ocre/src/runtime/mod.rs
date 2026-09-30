@@ -117,11 +117,15 @@ pub async fn serve(routes: Router<Ctx>, req: HttpRequest, env: Env) -> worker::R
         allowed_origins: protect::parse_origins(var(protect::ALLOWED_ORIGINS)),
         allowed_hosts: protect::parse_hosts(var(protect::ALLOWED_HOSTS)),
     };
+    let replicas = crate::replicas::enabled(var(crate::replicas::REPLICAS_VAR).as_deref());
     let started = crate::clock::now_millis();
     let dev = cfg!(debug_assertions);
     let request_id = crate::request::request_id(req.headers());
     let details = crate::errors::RequestDetails::new(&request_id, req.method().as_str(), req.uri(), req.headers(), dev);
     let ctx = Ctx::new(env).with_log(details.logger());
+    if replicas {
+        ctx.memo().start_replicas(req.method(), req.headers());
+    }
     let mut req = req;
     req.extensions_mut().insert(ctx.clone());
     req.extensions_mut().insert(crate::RequestId(request_id));
@@ -130,6 +134,12 @@ pub async fn serve(routes: Router<Ctx>, req: HttpRequest, env: Env) -> worker::R
     let total_ms = crate::clock::now_millis() - started;
     let mut response = crate::errors::finish(response, &details, ctx.errors(), ctx.timings(), total_ms, dev).await;
     errors::flush(&ctx).await;
+    // After a write, the visitor's next requests resume from its bookmark.
+    for (binding, bookmark) in ctx.memo().bookmarks() {
+        if let Some(cookie) = crate::replicas::bookmark_cookie(&binding, &bookmark) {
+            response.headers_mut().append(axum::http::header::SET_COOKIE, cookie);
+        }
+    }
     match response.extensions_mut().remove::<storage::R2Stream>() {
         Some(stream) => storage::into_js_response(response, stream),
         None => worker::response_to_wasm(response),

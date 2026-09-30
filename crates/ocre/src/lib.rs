@@ -72,6 +72,7 @@
     not(feature = "realtime"),
     doc = "| `realtime` | WebSocket channels on a Durable Object (feature `realtime`, off in this build) |"
 )]
+//! | [`replicas`] | D1 read replicas: reads from a nearby copy, each visitor still reading their own writes (`D1_REPLICAS=on`) |
 //! | [`security`] | Content-Security-Policy (nonces), Permissions-Policy, rate limits, safe redirects, `sanitize` / `strip_tags`, log filtering, HTTP Basic auth |
 //! | [`sse`] | Server-Sent Events: stream events to the browser as they happen |
 //! | [`storage`] | Files in Cloudflare R2: multipart uploads, attachments, streamed downloads |
@@ -161,6 +162,7 @@ mod query;
 #[cfg(feature = "realtime")]
 #[cfg_attr(docsrs, doc(cfg(feature = "realtime")))]
 pub mod realtime;
+pub mod replicas;
 mod request;
 mod runtime;
 pub mod security;

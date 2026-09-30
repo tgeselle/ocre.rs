@@ -4,7 +4,7 @@ Feature-level inventory of Rails 8.1 and Loco 1.2, with what Ocre has and how
 each part maps to Cloudflare's free plan. Collected from the official Rails
 guides and the Loco documentation source; every item links to its page.
 
-993 features: 671 done, 73 partial, 137 to do, 112 not applicable on Workers.
+993 features: 674 done, 75 partial, 130 to do, 114 not applicable on Workers.
 
 Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason given).
 (R) Rails, (L) Loco.
@@ -31,7 +31,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** D1 (SQLite): 5 GB and daily row read/write quotas on the free plan, so batch queries and avoid N+1. Migrations are forward-only SQL files applied by `ocre migrate` (the app's wrangler locally, `cf d1 migrations apply` in production); rollbacks need hand-written reverse SQL (D1 Time Travel restores a point in time). Several databases are several D1 bindings. Encryption uses WebCrypto AES-GCM. Everything here is Rust code over D1: feasible.
 
-246 features: 155 done, 13 partial, 53 to do, 25 not applicable.
+246 features: 158 done, 15 partial, 46 to do, 27 not applicable.
 
 ### Active Record
 
@@ -256,15 +256,15 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 ### Multiple databases
 
 - [~] **Multi-database configuration** (R): database.yml supports multiple primary/replica databases per environment, with connects_to in abstract classes. *Ocre: extra `bindings.d1(...)` entries in cloudflare.config.ts reached with `ctx.db_named("ANALYTICS")`; no generator support yet.* [active_record_multiple_databases](https://guides.rubyonrails.org/active_record_multiple_databases.html)
-- [ ] **Databases without managed schema** (R): database_tasks: false connects to external DBs without migrations/schema. [active_record_multiple_databases](https://guides.rubyonrails.org/active_record_multiple_databases.html)
+- [x] **Databases without managed schema** (R): database_tasks: false connects to external DBs without migrations/schema. *Ocre: `ctx.db_named("LEGACY")` reaches any D1 database bound in cloudflare.config.ts, whatever manages its tables.* [active_record_multiple_databases](https://guides.rubyonrails.org/active_record_multiple_databases.html)
 - [ ] **Per-database generators and migrations** (R): --database flag and migrations_paths target a specific database; db:migrate:<name> tasks. [active_record_multiple_databases](https://guides.rubyonrails.org/active_record_multiple_databases.html)
-- [ ] **Automatic role switching** (R): Middleware routes GET/HEAD to replicas and writes to primary with read-your-writes delay. [active_record_multiple_databases](https://guides.rubyonrails.org/active_record_multiple_databases.html)
-- [ ] **Manual connection switching** (R): connected_to(role:, prevent_writes:) switches reading/writing roles in a block. [active_record_multiple_databases](https://guides.rubyonrails.org/active_record_multiple_databases.html)
-- [ ] **Horizontal sharding** (R): connects_to shards: with connected_to(shard:) to route queries to shards. [active_record_multiple_databases](https://guides.rubyonrails.org/active_record_multiple_databases.html)
-- [ ] **Automatic shard switching** (R): ShardSelector middleware picks the shard per request via a resolver. [active_record_multiple_databases](https://guides.rubyonrails.org/active_record_multiple_databases.html)
+- [x] **Automatic role switching** (R): Middleware routes GET/HEAD to replicas and writes to primary with read-your-writes delay. *Ocre: with `D1_REPLICAS=on` (and replication on the database), each request uses a D1 session: `GET`/`HEAD` may read from a nearby replica, other methods start on the primary, and a bookmark cookie after writes keeps each visitor reading their own writes (`ocre::replicas`).* [active_record_multiple_databases](https://guides.rubyonrails.org/active_record_multiple_databases.html)
+- [~] **Manual connection switching** (R): connected_to(role:, prevent_writes:) switches reading/writing roles in a block. *Ocre: `ctx.db_named(..)` picks a database; with replicas on, the request's session picks primary or replica, with no manual override.* [active_record_multiple_databases](https://guides.rubyonrails.org/active_record_multiple_databases.html)
+- [x] **Horizontal sharding** (R): connects_to shards: with connected_to(shard:) to route queries to shards. *Ocre: one D1 database per shard, each a binding, picked by code: `ctx.db_named(shard_binding(tenant))`.* [active_record_multiple_databases](https://guides.rubyonrails.org/active_record_multiple_databases.html)
+- [~] **Automatic shard switching** (R): ShardSelector middleware picks the shard per request via a resolver. *Ocre: a middleware or extractor picks the binding from the request and hands it to the handlers; not built in.* [active_record_multiple_databases](https://guides.rubyonrails.org/active_record_multiple_databases.html)
 - [ ] **Granular connection switching** (R): connected_to on a specific abstract class switches only that connection; connected_to_many for several. [active_record_multiple_databases](https://guides.rubyonrails.org/active_record_multiple_databases.html)
-- [ ] **Cross-database association joins** (R): disable_joins: true on has_many :through/has_one :through queries across databases without SQL joins. [active_record_multiple_databases](https://guides.rubyonrails.org/active_record_multiple_databases.html)
-- [ ] **Per-database schema cache** (R): schema_cache_path per database config for schema caches. [active_record_multiple_databases](https://guides.rubyonrails.org/active_record_multiple_databases.html)
+- [-] **Cross-database association joins** (R): disable_joins: true on has_many :through/has_one :through queries across databases without SQL joins. *Not applicable: D1 cannot join across databases; load ids from one and `find_many` in the other.* [active_record_multiple_databases](https://guides.rubyonrails.org/active_record_multiple_databases.html)
+- [-] **Per-database schema cache** (R): schema_cache_path per database config for schema caches. *Not applicable: nothing reads the schema at runtime.* [active_record_multiple_databases](https://guides.rubyonrails.org/active_record_multiple_databases.html)
 
 ### Encryption
 

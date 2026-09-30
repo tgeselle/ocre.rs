@@ -3,10 +3,11 @@ use std::{
     sync::{Arc, Mutex, PoisonError},
 };
 
+use axum::http::{HeaderMap, Method, header};
 use serde::de::DeserializeOwned;
-use worker::{Env, js_sys::Array, send::SendWrapper};
+use worker::{D1Database, D1DatabaseSession, Env, js_sys::Array, send::SendWrapper};
 
-use super::Db;
+use super::{Db, d1::Handle};
 use crate::{Error, Result, cache::QUERY_CACHE_LIMIT, errors::Reporter, instrument::Timings, log::Logger};
 
 /// Name of the D1 binding every Ocre app uses for its main database.
@@ -56,12 +57,25 @@ pub struct Ctx {
     timings: Timings,
 }
 
-/// What one request remembers: KV texts read or written (the local cache)
-/// and `SELECT` results (the query cache).
+/// What one request remembers: KV texts read or written (the local cache),
+/// `SELECT` results (the query cache) and, with read replicas on, its D1
+/// sessions.
 #[derive(Default)]
 pub(crate) struct Memo {
     kv: Mutex<HashMap<String, Option<String>>>,
     queries: Mutex<HashMap<String, SendWrapper<Array>>>,
+    replicas: Mutex<Option<Replicas>>,
+}
+
+/// The D1 sessions of a request ([`crate::replicas`]).
+struct Replicas {
+    method: Method,
+    /// The request's `Cookie` headers, holding the visitor's bookmarks.
+    cookies: HeaderMap,
+    /// One session per binding, opened on first use.
+    sessions: Vec<(String, Arc<D1DatabaseSession>)>,
+    /// Bindings that ran a statement that may write.
+    wrote: Vec<String>,
 }
 
 impl Memo {
@@ -90,6 +104,49 @@ impl Memo {
     /// Forgets every `SELECT` result, after a statement that may write.
     pub(crate) fn clear_queries(&self) {
         self.queries.lock().unwrap_or_else(PoisonError::into_inner).clear();
+    }
+
+    /// Queries of this request go through D1 sessions ([`crate::replicas`]).
+    pub(crate) fn start_replicas(&self, method: &Method, headers: &HeaderMap) {
+        let mut cookies = HeaderMap::new();
+        for value in headers.get_all(header::COOKIE) {
+            cookies.append(header::COOKIE, value.clone());
+        }
+        let replicas = Replicas { method: method.clone(), cookies, sessions: Vec::new(), wrote: Vec::new() };
+        *self.replicas.lock().unwrap_or_else(PoisonError::into_inner) = Some(replicas);
+    }
+
+    /// The request's session on `binding` (opened on first use), or `None`
+    /// when replicas are off: then queries go to the database itself.
+    fn session(&self, binding: &str, db: &D1Database) -> Option<worker::Result<Arc<D1DatabaseSession>>> {
+        let mut replicas = self.replicas.lock().unwrap_or_else(PoisonError::into_inner);
+        let replicas = replicas.as_mut()?;
+        if let Some((_, session)) = replicas.sessions.iter().find(|(name, _)| name == binding) {
+            return Some(Ok(Arc::clone(session)));
+        }
+        let start = crate::replicas::session_start(&replicas.cookies, &replicas.method, binding);
+        Some(db.with_session(Some(&start)).map(|session| {
+            let session = Arc::new(session);
+            replicas.sessions.push((binding.to_owned(), Arc::clone(&session)));
+            session
+        }))
+    }
+
+    /// Notes that `binding` ran a statement that may write.
+    pub(crate) fn wrote(&self, binding: &str) {
+        if let Some(replicas) = self.replicas.lock().unwrap_or_else(PoisonError::into_inner).as_mut()
+            && !replicas.wrote.iter().any(|name| name == binding)
+        {
+            replicas.wrote.push(binding.to_owned());
+        }
+    }
+
+    /// The bookmark of each session that wrote, for the response's cookies.
+    pub(crate) fn bookmarks(&self) -> Vec<(String, String)> {
+        let replicas = self.replicas.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(replicas) = replicas.as_ref() else { return Vec::new() };
+        let wrote = replicas.sessions.iter().filter(|(name, _)| replicas.wrote.contains(name));
+        wrote.filter_map(|(name, session)| Some((name.clone(), session.get_bookmark().ok()??))).collect()
     }
 }
 
@@ -291,7 +348,11 @@ impl Ctx {
     /// # let _ = track;
     /// ```
     pub fn db_named(&self, binding: &str) -> Result<Db> {
-        let db = self.env.d1(binding).map(|db| Db::new(db, binding, Some(Arc::clone(&self.memo))));
+        let handle = self.env.d1(binding).and_then(|db| match self.memo.session(binding, &db) {
+            Some(session) => session.map(Handle::Session),
+            None => Ok(Handle::Database(Arc::new(db))),
+        });
+        let db = handle.map(|handle| Db::new(handle, binding, Some(Arc::clone(&self.memo))));
         db.map(|db| db.probed(self.log.clone(), self.timings.clone())).map_err(|err| {
             Error::internal(format!(
                 "D1 binding `{binding}` is missing ({err}). Fix: add `{binding}: bindings.d1({{ name: \"<database>\" }}),` to worker.env in cloudflare.config.ts"

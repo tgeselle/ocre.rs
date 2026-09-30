@@ -3,7 +3,7 @@ use std::sync::Arc;
 use serde::de::DeserializeOwned;
 use wasm_bindgen::{JsCast, JsValue};
 use worker::{
-    D1Database, D1PreparedStatement,
+    D1Database, D1DatabaseSession, D1PreparedStatement,
     js_sys::{Array, Reflect},
     send::{SendFuture, SendWrapper},
     wasm_bindgen_futures::JsFuture,
@@ -68,12 +68,35 @@ use crate::{instrument::Timings, log::Logger};
 /// # let _ = show;
 /// ```
 pub struct Db {
-    inner: SendWrapper<D1Database>,
+    inner: SendWrapper<Handle>,
     binding: String,
     memo: Option<Arc<Memo>>,
     /// Whether `SELECT`s may be served from `memo` (false after [`Db::uncached`]).
     cached: bool,
     probe: Option<Probe>,
+}
+
+/// The database itself, or the request's session on it (read replicas).
+#[derive(Clone)]
+pub(crate) enum Handle {
+    Database(Arc<D1Database>),
+    Session(Arc<D1DatabaseSession>),
+}
+
+impl Handle {
+    fn prepare(&self, sql: &str) -> D1PreparedStatement {
+        match self {
+            Self::Database(db) => db.prepare(sql),
+            Self::Session(session) => session.prepare(sql),
+        }
+    }
+
+    async fn batch(&self, statements: Vec<D1PreparedStatement>) -> worker::Result<Vec<worker::D1Result>> {
+        match self {
+            Self::Database(db) => db.batch(statements).await,
+            Self::Session(session) => session.batch(statements).await,
+        }
+    }
 }
 
 /// Where a handle reports its statements: the request's logger (a `debug`
@@ -85,7 +108,7 @@ struct Probe {
 }
 
 impl Db {
-    pub(crate) fn new(db: D1Database, binding: &str, memo: Option<Arc<Memo>>) -> Self {
+    pub(crate) fn new(db: Handle, binding: &str, memo: Option<Arc<Memo>>) -> Self {
         Self { inner: SendWrapper::new(db), binding: binding.to_owned(), memo, cached: true, probe: None }
     }
 
@@ -129,6 +152,7 @@ impl Db {
         let memo = self.memo.as_ref()?;
         if !is_read_query(sql) {
             memo.clear_queries();
+            memo.wrote(&self.binding);
             return None;
         }
         self.cached.then(|| (Arc::clone(memo), query_key(&self.binding, sql, params)))
@@ -379,6 +403,7 @@ impl Db {
         let memo = self.memo.clone();
         if let Some(memo) = &memo {
             memo.clear_queries();
+            memo.wrote(&self.binding);
         }
         let probe = self.probe.clone();
         SendFuture::new(async move {
