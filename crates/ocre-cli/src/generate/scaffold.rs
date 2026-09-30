@@ -28,8 +28,8 @@ pub fn scaffold(project: &Project, name: &str, specs: &[String], realtime: bool)
     let mut edits = Edits::new(project);
     ensure_model(&mut edits, &names, &fields, &many, &command)?;
     let plural = &names.plural;
-    edits.create(&format!("src/{plural}.rs"), controller_rs(&names, &fields, &command, realtime))?;
-    for (file, contents) in views(&edits, &names, &fields, realtime)? {
+    edits.create(&format!("src/{plural}.rs"), controller_rs(&names, &fields, &many, &command, realtime))?;
+    for (file, contents) in views(&edits, &names, &fields, &many, realtime)? {
         edits.create(&format!("templates/{plural}/{file}"), contents)?;
     }
     register_routes(&mut edits, plural)?;
@@ -88,7 +88,7 @@ fn to_form(field: &Field, record: &str) -> String {
     }
 }
 
-fn controller_rs(names: &ModelNames, fields: &[Field], command: &str, realtime: bool) -> String {
+fn controller_rs(names: &ModelNames, fields: &[Field], many: &[String], command: &str, realtime: bool) -> String {
     let ModelNames { model, singular, plural, human_singular, human_plural } = names;
     let mut form_fields = String::new();
     let mut new_values = String::new();
@@ -136,8 +136,22 @@ fn controller_rs(names: &ModelNames, fields: &[Field], command: &str, realtime: 
     if !files.is_empty() {
         record_values.push_str("            ..Self::default()\n");
     }
-    let Files { form_import, http_import, storage_import, extractor, binding, routes, items, handlers } =
-        Files::new(names, &files);
+    let Files {
+        form_import,
+        mut http_import,
+        mut storage_import,
+        extractor,
+        binding,
+        mut routes,
+        mut items,
+        mut handlers,
+    } = Files::new(names, &files);
+    let Many { show_fields, show_loads, show_values, paths: many_paths } =
+        Many::add(names, many, &mut routes, &mut items, &mut handlers);
+    if files.is_empty() && !many.is_empty() {
+        http_import = "http::{HeaderMap, StatusCode}";
+        storage_import = ", storage::{self, Disposition, Multipart}";
+    }
     let live = if realtime { Live::new(names) } else { Live::default() };
     let Live { import, views, on_create, on_update, on_delete } = live;
     let file_paths: String = files
@@ -203,7 +217,7 @@ pub mod paths {{
     pub fn delete(id: impl Display) -> String {{
         format!("/{plural}/{{id}}/delete")
     }}
-{file_paths}}}
+{file_paths}{many_paths}}}
 {items}
 /// What the new and edit forms submit, as typed: numbers stay text until
 /// validated, so a typo shows a field error instead of a failed request.
@@ -250,7 +264,7 @@ struct IndexView {{
 #[template(path = "{plural}/show.html")]
 struct ShowView {{
     flash: Flash,
-    {singular}: {model},
+    {singular}: {model},{show_fields}
 }}
 
 #[derive(Template)]
@@ -273,7 +287,8 @@ async fn index(State(ctx): State<Ctx>, flash: Flash, page: Page) -> Result<Html<
 }}
 
 async fn show(State(ctx): State<Ctx>, flash: Flash, Path(id): Path<i64>) -> Result<Html<String>> {{
-    render(&ShowView {{ flash, {singular}: {singular}::find(&ctx, id).await?.or_404()? }})
+    let record = {singular}::find(&ctx, id).await?.or_404()?;{show_loads}
+    render(&ShowView {{ flash, {singular}: record{show_values} }})
 }}
 
 async fn new() -> Result<Html<String>> {{
@@ -417,6 +432,115 @@ async fn {name}_file(State(ctx): State<Ctx>, Path(id): Path<i64>, headers: Heade
     }
 }
 
+/// The show page's lists of `photos:attachments` files, with the routes to
+/// add files, open one and delete one. Empty strings without them.
+#[derive(Default)]
+struct Many {
+    show_fields: String,
+    show_loads: String,
+    show_values: String,
+    paths: String,
+}
+
+impl Many {
+    fn add(
+        names: &ModelNames,
+        many: &[String],
+        routes: &mut String,
+        items: &mut String,
+        handlers: &mut String,
+    ) -> Self {
+        let ModelNames { singular, plural, .. } = names;
+        let mut out = Self::default();
+        for name in many {
+            let one = crate::names::singularize(name).expect("checked when parsed");
+            let child = ModelNames::parse(&format!("{singular}_{one}")).expect("a valid model name");
+            let (module, model, limit) = (&child.singular, &child.model, format!("{}_LIMIT", name.to_uppercase()));
+            let human = humanize(name);
+            write!(out.show_fields, "\n    {name}: Vec<crate::models::{module}::{model}>,")
+                .expect("writing to a String");
+            write!(
+                out.show_loads,
+                "\n    let {name} = crate::models::{module}::query().eq(\"{singular}_id\", id).order_asc(\"id\").all(&ctx.db()?).await?;"
+            )
+            .expect("writing to a String");
+            write!(out.show_values, ", {name}").expect("writing to a String");
+            write!(
+                out.paths,
+                "\n    /// Where the show page adds {name}.\n    pub fn {name}(id: impl Display) -> String {{\n        format!(\"/{plural}/{{id}}/{name}\")\n    }}\n\n    /// One of the {name}.\n    pub fn {one}(id: impl Display, file_id: impl Display) -> String {{\n        format!(\"/{plural}/{{id}}/{name}/{{file_id}}\")\n    }}\n\n    /// Deletes one of the {name}.\n    pub fn delete_{one}(id: impl Display, file_id: impl Display) -> String {{\n        format!(\"/{plural}/{{id}}/{name}/{{file_id}}/delete\")\n    }}\n"
+            )
+            .expect("writing to a String");
+            write!(
+                routes,
+                "\n        .route(\"/{plural}/{{id}}/{name}\", post(attach_{name}))\n        .route(\"/{plural}/{{id}}/{name}/{{file_id}}\", get({one}_file))\n        .route(\"/{plural}/{{id}}/{name}/{{file_id}}/delete\", post(delete_{one}))"
+            )
+            .expect("writing to a String");
+            write!(
+                items,
+                "\n/// Largest request adding {name}: ten files at their limit, plus room for the multipart framing.\nconst {limit}: usize = 10 * crate::models::{module}::FILE.max_bytes + 64 * 1024;\n"
+            )
+            .expect("writing to a String");
+            write!(
+                handlers,
+                r#"
+/// Stores the chosen files (the show page's form); an error names the file in an alert.
+async fn attach_{name}(
+    State(ctx): State<Ctx>,
+    session: Session,
+    Path(id): Path<i64>,
+    Multipart(mut form): Multipart<{limit}>,
+) -> Result<Redirect> {{
+    let record = {singular}::find(&ctx, id).await?.or_404()?;
+    let uploads = form.files("{name}");
+    if uploads.is_empty() {{
+        session.flash("alert", "Choose at least one file.")?;
+        return Ok(Redirect::to(&paths::show(id)));
+    }}
+    match record.attach_{name}(&ctx, uploads).await {{
+        Ok(_) => session.flash("notice", "{human} were added.")?,
+        Err(Error::Invalid(errors)) => {{
+            let messages: Vec<String> = errors.iter().map(FieldError::full_message).collect();
+            session.flash("alert", messages.join(" "))?;
+        }}
+        Err(err) => return Err(err),
+    }}
+    Ok(Redirect::to(&paths::show(id)))
+}}
+
+/// The row of file `file_id` of record `id`.
+async fn find_{one}(ctx: &Ctx, id: i64, file_id: i64) -> Result<crate::models::{module}::{model}> {{
+    let query = crate::models::{module}::query().eq("id", file_id).eq("{singular}_id", id);
+    query.first(&ctx.db()?).await?.or_404()
+}}
+
+/// One of the {name}: shown in the browser when its type is safe to display, downloaded otherwise.
+async fn {one}_file(
+    State(ctx): State<Ctx>,
+    Path((id, file_id)): Path<(i64, i64)>,
+    headers: HeaderMap,
+) -> Result<Response> {{
+    let row = find_{one}(&ctx, id, file_id).await?;
+    storage::serve(&ctx, &row.file(), &headers, Disposition::Inline).await
+}}
+
+async fn delete_{one}(
+    State(ctx): State<Ctx>,
+    session: Session,
+    Path((id, file_id)): Path<(i64, i64)>,
+) -> Result<Redirect> {{
+    let row = find_{one}(&ctx, id, file_id).await?;
+    crate::models::{module}::delete(&ctx, row.id).await?;
+    session.flash("notice", format!("{{}} was deleted.", row.file_filename))?;
+    Ok(Redirect::to(&paths::show(id)))
+}}
+"#
+            )
+            .expect("writing to a String");
+        }
+        out
+    }
+}
+
 /// The controller code `--realtime` adds: a row partial, and a broadcast
 /// after each change. Empty strings without `--realtime`.
 #[derive(Default)]
@@ -497,6 +621,20 @@ struct ViewContext<'a> {
     fields: Vec<ViewField>,
     /// Some field is `rich_text`: forms load the Trix editor.
     rich_text: bool,
+    /// `photos:attachments` lists on the show page.
+    many: Vec<ManyView>,
+}
+
+#[derive(Serialize)]
+struct ManyView {
+    /// `photos`
+    name: String,
+    /// `photo`
+    one: String,
+    /// `Photos`
+    label: String,
+    /// `photos`, in sentences.
+    lower: String,
 }
 
 /// Renders `templates/<plural>/*.html` from the `scaffold/` templates (the
@@ -505,6 +643,7 @@ fn views(
     edits: &Edits,
     names: &ModelNames,
     fields: &[Field],
+    many: &[String],
     realtime: bool,
 ) -> Result<Vec<(String, String)>, CliError> {
     let ModelNames { model, singular, plural, human_singular, human_plural } = names;
@@ -531,6 +670,15 @@ fn views(
             })
             .collect(),
         rich_text: fields.iter().any(|f| f.ty == FieldType::RichText),
+        many: many
+            .iter()
+            .map(|name| ManyView {
+                name: name.clone(),
+                one: crate::names::singularize(name).expect("checked when parsed"),
+                label: humanize(name),
+                lower: humanize(name).to_lowercase(),
+            })
+            .collect(),
     };
     let values = Value::from_serialize(&context);
     let mut out = Vec::new();

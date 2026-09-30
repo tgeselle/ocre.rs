@@ -305,6 +305,20 @@ fn many_attachments_get_a_child_model_and_api_routes() {
     ] {
         assert!(api.contains(expected), "missing {expected}\n{api}");
     }
+    let (report, ok) = sandbox.json(&["g", "scaffold", "Portfolio", "name:string", "shots:attachments"], &root);
+    assert!(ok, "{report}");
+    let pages = read("src/portfolios.rs");
+    for expected in [
+        ".route(\"/portfolios/{id}/shots\", post(attach_shots))",
+        ".route(\"/portfolios/{id}/shots/{file_id}/delete\", post(delete_shot))",
+        "let shots = crate::models::portfolio_shot::query().eq(\"portfolio_id\", id).order_asc(\"id\").all(&ctx.db()?).await?;",
+        "render(&ShowView { flash, portfolio: record, shots })",
+        ", storage::{self, Disposition, Multipart}",
+    ] {
+        assert!(pages.contains(expected), "missing {expected}\n{pages}");
+    }
+    assert!(read("templates/portfolios/show.html").contains("<input type=\"file\" name=\"shots\" multiple required>"));
+
     let (report, ok) = sandbox.json(&["g", "model", "Shelf", "photos:attachments?"], &root);
     assert!(!ok);
     assert_eq!(report["error"], "`photos:attachments` takes no `?` or `^`");

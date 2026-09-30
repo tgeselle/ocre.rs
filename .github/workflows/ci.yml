@@ -104,6 +104,7 @@ jobs:
           ocre g scaffold Remark body:text subject:polymorphic:book,review --json
           ocre g model Sticker label:string owner:polymorphic:book,sticker? --json
           ocre g api Album title:string photos:attachments --json
+          ocre g scaffold Portfolio name:string shots:attachments --json
           ocre g model Gallery name:string images:attachments scans:attachments --json
           ocre g migration add_lock_version_to_books lock_version:integer --json
           # CI workflow, PWA files, a custom domain (type-checked by tsc below).

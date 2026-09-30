@@ -14,6 +14,22 @@
   <dt>Created at</dt><dd>{{ <%= singular %>.created_at }}</dd>
   <dt>Updated at</dt><dd>{{ <%= singular %>.updated_at }}</dd>
 </dl>
+<% for files in many %>
+
+<h2><%= files.label %></h2>
+<ul>
+{% for file in <%= files.name %> %}
+  <li>
+    <a href="{{ paths::<%= files.one %>(<%= singular %>.id, file.id) }}" hx-boost="false">{{ file.file_filename }}</a> ({{ file.file().human_size() }})
+    <form action="{{ paths::delete_<%= files.one %>(<%= singular %>.id, file.id) }}" method="post" hx-boost="true" hx-confirm="Delete {{ file.file_filename }}?"><button type="submit">Delete</button></form>
+  </li>
+{% endfor %}
+</ul>
+<form action="{{ paths::<%= files.name %>(<%= singular %>.id) }}" method="post" enctype="multipart/form-data">
+  <input type="file" name="<%= files.name %>" multiple required>
+  <button type="submit">Add <%= files.lower %></button>
+</form>
+<% endfor %>
 
 <p><a href="{{ paths::edit(<%= singular %>.id) }}">Edit</a> · <a href="{{ paths::index() }}">Back</a></p>
 
