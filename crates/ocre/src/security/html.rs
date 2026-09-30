@@ -28,6 +28,8 @@ pub const SANITIZE_TAGS: &[&str] = &[
     "dl",
     "dt",
     "em",
+    "figcaption",
+    "figure",
     "h1",
     "h2",
     "h3",

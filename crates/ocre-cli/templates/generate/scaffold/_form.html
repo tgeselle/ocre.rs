@@ -2,7 +2,8 @@
 {# Trix, Action Text's editor (https://trix-editor.org): the model sanitizes its HTML when saving. #}
 <link rel="stylesheet" href="https://unpkg.com/trix@2.1.19/dist/trix.css">
 <script src="https://unpkg.com/trix@2.1.19/dist/trix.umd.min.js" crossorigin="anonymous"></script>
-<style>trix-toolbar [data-trix-button-group="file-tools"] { display: none; }</style>
+{# Uploads the images dropped into the editor (`ocre::storage::direct_upload_script()` in routes()). #}
+<script src="/ocre/direct-upload.js" defer></script>
 <% endif %>
 {% if !errors.is_empty() %}
   <ul class="errors">

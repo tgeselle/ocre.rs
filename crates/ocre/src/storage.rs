@@ -717,7 +717,8 @@ pub fn send_data(data: impl Into<Bytes>, filename: &str, content_type: &str, dis
 /// [`direct_upload`]), then `PUT` to R2 with progress events
 /// (`direct-upload:start|progress|error|end`); the form then submits
 /// `<name>_key` and `<name>_filename` for [`attach_direct_upload`] instead
-/// of the file. Serve it with [`direct_upload_script`].
+/// of the file. It also uploads the files dropped into a Trix editor with
+/// `data-embeds-url` (Action Text attachments). Serve it with [`direct_upload_script`].
 pub const DIRECT_UPLOAD_JS: &str = include_str!("storage/direct_upload.js");
 
 /// Serves [`DIRECT_UPLOAD_JS`] at `GET /ocre/direct-upload.js`: merge it into

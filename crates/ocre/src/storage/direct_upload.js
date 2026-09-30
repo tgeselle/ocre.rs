@@ -1,4 +1,5 @@
-// Ocre direct uploads (Active Storage's `direct_upload: true`), served at
+// Ocre direct uploads (Active Storage's `direct_upload: true`) and rich text
+// embeds (Action Text attachments), served at
 // /ocre/direct-upload.js by `ocre::storage::direct_upload_script()`.
 //
 // <input type="file" name="video" data-direct-upload-url="/videos/uploads">
@@ -55,6 +56,33 @@
     field.dataset.directUpload = "";
     form.append(field);
   };
+
+  // Files dropped into a Trix editor with data-embeds-url="/posts/embeds"
+  // (Action Text attachments): POSTed as `file`, then shown from the `url`
+  // the app answers; a refused file is removed with an alert.
+  document.addEventListener("trix-attachment-add", (event) => {
+    const url = event.target.dataset.embedsUrl;
+    const attachment = event.attachment;
+    if (!url || !attachment.file) return;
+    const body = new FormData();
+    body.append("file", attachment.file);
+    const request = new XMLHttpRequest();
+    request.open("POST", url);
+    request.setRequestHeader("accept", "application/json");
+    request.upload.addEventListener("progress", (progress) => {
+      if (progress.lengthComputable) attachment.setUploadProgress((progress.loaded / progress.total) * 100);
+    });
+    request.addEventListener("load", () => {
+      if (request.status === 200) {
+        const { url: src } = JSON.parse(request.responseText);
+        attachment.setAttributes({ url: src, href: src });
+      } else {
+        attachment.remove();
+        alert(`${attachment.file.name} could not be added (${request.status}).`);
+      }
+    });
+    request.send(body);
+  });
 
   document.addEventListener("submit", async (event) => {
     const form = event.target;

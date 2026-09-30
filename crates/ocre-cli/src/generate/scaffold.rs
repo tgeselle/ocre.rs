@@ -7,8 +7,9 @@ use minijinja::Value;
 use serde::Serialize;
 
 use super::{
-    Edits,
+    Edits, ROUTES_MARKER,
     fields::{ATTACHMENT_TYPES, Field, FieldType, parse_model_fields},
+    insert_after_marker,
     model::ensure_model,
     realtime::add_channel,
     register_routes,
@@ -20,6 +21,9 @@ use crate::{
     output::CliError,
     project::Project,
 };
+
+/// The route serving the editor's upload script.
+const DIRECT_UPLOAD_ROUTES: &str = ".merge(ocre::storage::direct_upload_script())";
 
 pub fn scaffold(project: &Project, name: &str, specs: &[String], realtime: bool) -> CliResult {
     let names = ModelNames::parse(name)?;
@@ -33,6 +37,15 @@ pub fn scaffold(project: &Project, name: &str, specs: &[String], realtime: bool)
         edits.create(&format!("templates/{plural}/{file}"), contents)?;
     }
     register_routes(&mut edits, plural)?;
+    if fields.iter().any(|f| f.ty == FieldType::RichText) {
+        // Serves /ocre/direct-upload.js, which uploads the images dropped into the editor; once per app.
+        let lib = edits.read("src/lib.rs")?.unwrap_or_default();
+        if !lib.contains(DIRECT_UPLOAD_ROUTES) {
+            let lib = insert_after_marker(&lib, ROUTES_MARKER, DIRECT_UPLOAD_ROUTES)
+                .expect("register_routes found the marker");
+            edits.update("src/lib.rs", lib);
+        }
+    }
     super::test_files::scaffold_tests(&mut edits, &names, &fields, &command)?;
     if realtime {
         add_channel(&mut edits, plural, &command)?;
@@ -148,7 +161,11 @@ fn controller_rs(names: &ModelNames, fields: &[Field], many: &[String], command:
     } = Files::new(names, &files);
     let Many { show_fields, show_loads, show_values, paths: many_paths } =
         Many::add(names, many, &mut routes, &mut items, &mut handlers);
-    if files.is_empty() && !many.is_empty() {
+    let rich_text = fields.iter().any(|f| f.ty == FieldType::RichText);
+    if rich_text {
+        add_embeds(names, &mut routes, &mut items, &mut handlers);
+    }
+    if files.is_empty() && (!many.is_empty() || rich_text) {
         http_import = "http::{HeaderMap, StatusCode}";
         storage_import = ", storage::{self, Disposition, Multipart}";
     }
@@ -541,6 +558,56 @@ async fn delete_{one}(
     }
 }
 
+/// Routes of the files dropped into a `rich_text` field's editor (Action
+/// Text attachments): stored in R2 under `<plural>/embeds/`, then shown in
+/// the text from their route.
+fn add_embeds(names: &ModelNames, routes: &mut String, items: &mut String, handlers: &mut String) {
+    let plural = &names.plural;
+    write!(
+        routes,
+        "\n        .route(\"/{plural}/embeds\", post(upload_embed))\n        .route(\"/{plural}/embeds/{{name}}\", get(embed))"
+    )
+    .expect("writing to a String");
+    items.push_str(
+        r#"
+/// Files the rich text editor accepts: images, up to 10 MB each.
+const EMBED: ocre::storage::Rules = ocre::storage::Rules {
+    max_bytes: 10 * 1024 * 1024,
+    content_types: &["image/png", "image/jpeg", "image/gif", "image/webp"],
+};
+
+/// Largest embed request: the image at its limit, plus room for the multipart framing.
+const EMBED_LIMIT: usize = EMBED.max_bytes + 64 * 1024;
+"#,
+    );
+    write!(
+        handlers,
+        r#"
+/// Stores an image dropped into the editor (Action Text attachments); the
+/// editor then shows it from the `url` answered.
+async fn upload_embed(
+    State(ctx): State<Ctx>,
+    Multipart(mut form): Multipart<EMBED_LIMIT>,
+) -> Result<axum::Json<ocre::serde_json::Value>> {{
+    let upload = form.file("file").ok_or_else(|| Error::bad_request("no `file` in the form"))?;
+    let mut v = Validator::new();
+    v.file("file", &upload, &EMBED);
+    v.finish()?;
+    let stored = storage::store(&ctx, "{plural}/embeds", upload).await?;
+    let name = stored.key.rsplit('/').next().unwrap_or_default();
+    Ok(axum::Json(ocre::serde_json::json!({{ "url": format!("/{plural}/embeds/{{name}}") }})))
+}}
+
+/// An image of the rich text.
+async fn embed(State(ctx): State<Ctx>, Path(name): Path<String>, headers: HeaderMap) -> Result<Response> {{
+    let object = storage::head(&ctx, &format!("{plural}/embeds/{{name}}")).await?.or_404()?;
+    storage::serve(&ctx, &object.attachment(&name), &headers, Disposition::Inline).await
+}}
+"#
+    )
+    .expect("writing to a String");
+}
+
 /// The controller code `--realtime` adds: a row partial, and a broadcast
 /// after each change. Empty strings without `--realtime`.
 #[derive(Default)]
@@ -665,7 +732,7 @@ fn views(
                 optional: field.optional,
                 display: field.display(singular),
                 show: if field.is_attachment() { file_link(field, singular) } else { field.display_full(singular) },
-                input: input(field, singular),
+                input: input(field, singular, plural),
                 hidden: field.ty == FieldType::LockVersion,
             })
             .collect(),
@@ -703,7 +770,7 @@ fn file_link(field: &Field, singular: &str) -> String {
 }
 
 /// The form widget of a field, bound to `form.<name>`.
-fn input(field: &Field, singular: &str) -> String {
+fn input(field: &Field, singular: &str, plural: &str) -> String {
     let name = &field.name;
     let required = if field.optional { "" } else { " required" };
     match field.ty {
@@ -714,7 +781,7 @@ fn input(field: &Field, singular: &str) -> String {
         // Trix edits a hidden input (`required` would not reach the editor):
         // the model checks presence on the text.
         FieldType::RichText => format!(
-            r#"<input type="hidden" id="{singular}_{name}" name="{name}" value="{{{{ form.{name} }}}}"><trix-editor input="{singular}_{name}"></trix-editor>"#
+            r#"<input type="hidden" id="{singular}_{name}" name="{name}" value="{{{{ form.{name} }}}}"><trix-editor input="{singular}_{name}" data-embeds-url="/{plural}/embeds"></trix-editor>"#
         ),
         FieldType::LockVersion => {
             format!(r#"<input type="hidden" name="{name}" value="{{{{ form.{name} }}}}">"#)

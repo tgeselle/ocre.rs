@@ -165,10 +165,24 @@ fn lock_version_rich_text_and_changed_fields() {
         "            lock_version: Some(v.number(\"lock_version\", &self.lock_version).unwrap_or_default()),"
     ));
     assert!(!controller.contains("            lock_version: v.number"), "{controller}");
+    for expected in [
+        ".route(\"/articles/embeds\", post(upload_embed))",
+        ".route(\"/articles/embeds/{name}\", get(embed))",
+        "let stored = storage::store(&ctx, \"articles/embeds\", upload).await?;",
+    ] {
+        assert!(controller.contains(expected), "missing {expected}\n{controller}");
+    }
+    let lib = fs::read_to_string(root.join("src/lib.rs")).unwrap();
+    assert_eq!(lib.matches(".merge(ocre::storage::direct_upload_script())").count(), 1, "{lib}");
+    assert!(sandbox.json(&["g", "scaffold", "Page", "text:rich_text"], &root).1);
+    let lib = fs::read_to_string(root.join("src/lib.rs")).unwrap();
+    assert_eq!(lib.matches(".merge(ocre::storage::direct_upload_script())").count(), 1, "once per app");
+
     let form = fs::read_to_string(root.join("templates/articles/_form.html")).unwrap();
     for expected in [
         "<script src=\"https://unpkg.com/trix@2.1.19/dist/trix.umd.min.js\" crossorigin=\"anonymous\"></script>",
-        "<label>Body <input type=\"hidden\" id=\"article_body\" name=\"body\" value=\"{{ form.body }}\"><trix-editor input=\"article_body\"></trix-editor></label>",
+        "<label>Body <input type=\"hidden\" id=\"article_body\" name=\"body\" value=\"{{ form.body }}\"><trix-editor input=\"article_body\" data-embeds-url=\"/articles/embeds\"></trix-editor></label>",
+        "<script src=\"/ocre/direct-upload.js\" defer></script>",
         "\n  <input type=\"hidden\" name=\"lock_version\" value=\"{{ form.lock_version }}\">\n",
     ] {
         assert!(form.contains(expected), "missing {expected}\n{form}");
@@ -191,7 +205,7 @@ fn lock_version_rich_text_and_changed_fields() {
 
     let (report, ok) = sandbox.json(&["g", "migration", "add_lock_version_to_wikis", "lock_version:integer"], &root);
     assert!(ok, "{report}");
-    let sql = fs::read_to_string(root.join("migrations/0003_add_lock_version_to_wikis.sql")).unwrap();
+    let sql = fs::read_to_string(root.join("migrations/0004_add_lock_version_to_wikis.sql")).unwrap();
     assert!(sql.ends_with("ALTER TABLE wikis ADD COLUMN lock_version INTEGER NOT NULL DEFAULT 0;\n"), "{sql}");
 }
 
