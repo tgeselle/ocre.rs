@@ -20,6 +20,39 @@ fn adapter_is_explicit() {
 }
 
 #[test]
+fn delivery_method_overrides_the_adapter_except_in_log_mode() {
+    let email = |method: Option<&str>| {
+        let email = Email::new("ada@example.com", "Hi", "x");
+        match method {
+            Some(method) => email.delivery_method(method),
+            None => email,
+        }
+    };
+    assert_eq!(adapter_for(Some("resend"), &email(None)).unwrap(), Adapter::Resend);
+    assert_eq!(adapter_for(Some("resend"), &email(Some(" cloudflare"))).unwrap(), Adapter::Cloudflare);
+    assert_eq!(adapter_for(Some("cloudflare"), &email(Some("resend"))).unwrap(), Adapter::Resend);
+    assert_eq!(adapter_for(Some("log"), &email(Some("resend"))).unwrap(), Adapter::Log, "development never sends");
+    let unknown = internal(adapter_for(Some("log"), &email(Some("smtp"))).unwrap_err());
+    assert!(unknown.contains("unknown delivery_method \"smtp\""), "{unknown}");
+    assert!(adapter_for(None, &email(Some("resend"))).is_err(), "MAIL_ADAPTER is still required");
+    let json = serde_json::to_value(email(Some("resend"))).unwrap();
+    assert_eq!(json["delivery_method"], "resend", "kept in deliver_later messages");
+    assert!(serde_json::to_value(email(None)).unwrap().get("delivery_method").is_none());
+}
+
+#[test]
+fn absolute_urls_join_app_url_and_a_path() {
+    let base = || Some("https://shop.example.com/ ".to_owned());
+    assert_eq!(absolute_url(base(), "/posts/1").unwrap(), "https://shop.example.com/posts/1");
+    assert_eq!(absolute_url(base(), "logo.png").unwrap(), "https://shop.example.com/logo.png");
+    assert_eq!(absolute_url(None, "http://cdn.example.com/a.png").unwrap(), "http://cdn.example.com/a.png");
+    for bad in [None, Some("shop.example.com".to_owned())] {
+        let message = internal(absolute_url(bad, "/").unwrap_err());
+        assert!(message.contains("APP_URL is not set to an http(s) address. Fix: add APP_URL"), "{message}");
+    }
+}
+
+#[test]
 fn resend_needs_its_key() {
     assert_eq!(resend_key(Some("re_123".into())).unwrap(), "re_123");
     for missing in [None, Some(" ".to_owned())] {

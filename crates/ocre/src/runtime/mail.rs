@@ -11,8 +11,8 @@ use crate::{
     Error, Result,
     jobs::{DEFAULT_QUEUE, Payload},
     mail::{
-        Adapter, Attachment, EMAIL_BINDING, Email, LOG_PREFIX, MAIL_ADAPTER, MAIL_FROM, Message, Outgoing,
-        RESEND_API_KEY, RESEND_URL, adapter, cloudflare_error, resend_error, resend_key,
+        APP_URL, Adapter, Attachment, EMAIL_BINDING, Email, LOG_PREFIX, MAIL_ADAPTER, MAIL_FROM, Message, Outgoing,
+        RESEND_API_KEY, RESEND_URL, absolute_url, adapter_for, cloudflare_error, resend_error, resend_key,
     },
 };
 
@@ -129,7 +129,7 @@ pub fn deliver_later(ctx: &Ctx, email: Email) -> impl Future<Output = Result<()>
 /// ```
 pub fn deliver_in(ctx: &Ctx, email: Email, delay: Duration) -> impl Future<Output = Result<()>> + Send + use<> {
     let env = ctx.env();
-    let checked = adapter(var(env, MAIL_ADAPTER).as_deref())
+    let checked = adapter_for(var(env, MAIL_ADAPTER).as_deref(), &email)
         .and_then(|_| Outgoing::new(var(env, MAIL_FROM), email))
         .map(|outgoing| Payload::Mail(Box::new(outgoing.email)));
     super::jobs::send(env.clone(), DEFAULT_QUEUE, checked, delay)
@@ -139,8 +139,37 @@ fn var(env: &Env, name: &str) -> Option<String> {
     env.var(name).ok().map(|value| value.to_string())
 }
 
+/// An absolute URL for `path` on the app's public address, the [`APP_URL`](crate::mail::APP_URL) variable (Rails' `_url` helpers in mailers).
+///
+/// For links and images in emails, which mail clients open outside the app:
+/// `url(ctx, "/posts/1")` is `https://shop.example.com/posts/1`. A `path`
+/// that is already absolute is returned as is. It reads a variable, no
+/// binding call, so mailers and jobs can use it outside any request.
+///
+/// # Errors
+///
+/// [`Error::Internal`](crate::Error::Internal) (500) when `APP_URL` is unset
+/// or not an `http(s)` address, naming the fix.
+///
+/// # Examples
+///
+/// ```no_run
+/// use ocre::{Ctx, Result, mail::{self, Email}};
+///
+/// fn reset_email(ctx: &Ctx, to: &str, token: &str) -> Result<Email> {
+///     let link = mail::url(ctx, &format!("/password/reset/{token}"))?;
+///     let logo = mail::url(ctx, "/images/logo.png")?;
+///     Ok(Email::new(to, "Reset your password", format!("Open {link}"))
+///         .html(format!("<img src=\"{logo}\" alt=\"\"><p><a href=\"{link}\">Reset your password</a></p>")))
+/// }
+/// # let _ = reset_email;
+/// ```
+pub fn url(ctx: &Ctx, path: &str) -> Result<String> {
+    absolute_url(var(ctx.env(), APP_URL), path)
+}
+
 pub(crate) async fn deliver(env: &Env, email: Email) -> Result<()> {
-    let adapter = adapter(var(env, MAIL_ADAPTER).as_deref())?;
+    let adapter = adapter_for(var(env, MAIL_ADAPTER).as_deref(), &email)?;
     let outgoing = Outgoing::new(var(env, MAIL_FROM), email)?;
     match adapter {
         Adapter::Log => {
@@ -510,9 +539,12 @@ where
     let parsed = Message::parse(&raw);
     let email = InboundEmail { from: message.from(), to: message.to(), raw, message: parsed, inner: message.clone() };
     worker::console_log!("{LOG_PREFIX} received from {} to {}: {}", email.from(), email.to(), email.subject());
-    if let Err(err) = handler(Ctx::new(env), email).await {
+    let ctx = Ctx::new(env);
+    if let Err(err) = handler(ctx.clone(), email).await {
         worker::console_error!("{LOG_PREFIX} the mailbox failed: {err}");
+        super::jobs::report(&ctx, "ocre.mailbox", &err, []);
         message.set_reject("The message could not be processed");
     }
+    super::errors::flush(&ctx).await;
     Ok(())
 }

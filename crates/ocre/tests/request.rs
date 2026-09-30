@@ -47,6 +47,7 @@ fn format_follows_the_highest_quality_accept_entry() {
     assert_eq!(format("application/json;q=0.5, text/xml"), Format::Xml);
     assert_eq!(format("application/atom+xml"), Format::Xml);
     assert_eq!(format("text/plain"), Format::Text);
+    assert_eq!(format("text/markdown;q=0.9, text/html;q=0.5"), Format::Markdown);
     assert_eq!(format("*/*"), Format::Html);
     assert_eq!(format("application/pdf"), Format::Other);
     // q=0 means "not acceptable"; ties keep the first entry.
@@ -84,4 +85,31 @@ fn request_id_reuses_the_one_serve_picked() {
     p.extensions.insert(RequestId("0123456789abcdef".into()));
     let Ok(RequestId(id)) = block_on(RequestId::from_request_parts(&mut p, &()));
     assert_eq!(id, "0123456789abcdef");
+}
+
+#[test]
+fn markdown_answers_text_markdown() {
+    let response = Markdown("# Title\n".to_owned()).into_response();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["content-type"], "text/markdown; charset=utf-8");
+    let body = block_on(axum::body::to_bytes(response.into_body(), 1024)).unwrap();
+    assert_eq!(&body[..], b"# Title\n");
+}
+
+#[test]
+fn encode_path_escapes_what_browsers_escape() {
+    assert_eq!(encode_path("/日本/{id} x"), "/%E6%97%A5%E6%9C%AC/{id}%20x");
+    assert_eq!(encode_path("/plain-ascii_~/"), "/plain-ascii_~/");
+}
+
+#[test]
+fn encoded_unicode_routes_match_browser_requests() {
+    use tower_service::Service as _;
+    let mut app: axum::Router = axum::Router::new().route(
+        &encode_path("/über/{name}"),
+        axum::routing::get(|axum::extract::Path(name): axum::extract::Path<String>| async move { name }),
+    );
+    let req = Request::builder().uri("/%C3%BCber/caf%C3%A9").body(axum::body::Body::empty()).unwrap();
+    let response = block_on(app.call(req)).unwrap();
+    assert_eq!(crate::support::body_text(response), "café");
 }

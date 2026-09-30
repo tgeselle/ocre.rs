@@ -61,7 +61,7 @@ mod parse;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-pub use crate::runtime::mail::{InboundEmail, deliver_in, deliver_later, receive, send};
+pub use crate::runtime::mail::{InboundEmail, deliver_in, deliver_later, receive, send, url};
 pub(crate) use dev::capture;
 pub use dev::{Preview, dev_routes};
 pub(crate) use parse::Message;
@@ -129,6 +129,40 @@ pub const EMAIL_BINDING: &str = "EMAIL";
 /// ```
 pub const LOG_PREFIX: &str = "[ocre mail]";
 
+/// Name of the Worker variable holding the app's public address, `https://shop.example.com`, for links in emails.
+///
+/// Rails' `default_url_options[:host]` (and `asset_host`): [`url`] joins it
+/// with a path, so mailers and jobs, which may run outside any request,
+/// build absolute links and image URLs. Set it as
+/// `APP_URL: bindings.text("https://shop.example.com")` in worker.env of
+/// cloudflare.config.ts, and `APP_URL=http://localhost:8787` in `.dev.vars`.
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(ocre::mail::APP_URL, "APP_URL");
+/// ```
+pub const APP_URL: &str = "APP_URL";
+
+/// `base` (the `APP_URL` value) joined with `path`; an absolute `path` is kept.
+pub(crate) fn absolute_url(base: Option<String>, path: &str) -> Result<String> {
+    if path.starts_with("https://") || path.starts_with("http://") {
+        return Ok(path.to_owned());
+    }
+    let base = base
+        .map(|base| base.trim().trim_end_matches('/').to_owned())
+        .filter(|base| base.starts_with("https://") || base.starts_with("http://"))
+        .ok_or_else(|| {
+            Error::internal(format!(
+                "cannot build an absolute URL: {APP_URL} is not set to an http(s) address. Fix: add \
+                 {APP_URL}: bindings.text(\"https://your.domain\") to worker.env in cloudflare.config.ts and \
+                 {APP_URL}=http://localhost:8787 to .dev.vars"
+            ))
+        })?;
+    let slash = if path.starts_with('/') { "" } else { "/" };
+    Ok(format!("{base}{slash}{path}"))
+}
+
 /// An outgoing email: recipients, a subject, a plain-text body, and optionally HTML, headers and attachments.
 ///
 /// Build it with [`Email::new`] (one recipient), then add more with
@@ -190,6 +224,10 @@ pub struct Email {
     /// Files attached to the email, and inline images the HTML shows with `cid:`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Attachment>,
+    /// Adapter for this email instead of `MAIL_ADAPTER` (`resend` or `cloudflare`), set by
+    /// [`delivery_method`](Email::delivery_method); ignored while `MAIL_ADAPTER` is `log`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_method: Option<String>,
 }
 
 /// A file attached to an [`Email`], or an inline image shown by its HTML.
@@ -244,6 +282,7 @@ impl Email {
             reply_to: None,
             headers: Vec::new(),
             attachments: Vec::new(),
+            delivery_method: None,
         }
     }
 
@@ -303,6 +342,27 @@ impl Email {
     /// ```
     pub fn from(mut self, address: impl Into<String>) -> Self {
         self.from = Some(address.into());
+        self
+    }
+
+    /// Sends this email with another adapter than `MAIL_ADAPTER`: `"resend"` or `"cloudflare"` (Rails' `delivery_method`).
+    ///
+    /// For an app that uses both providers, e.g. Cloudflare Email Service
+    /// (free, to the team's verified addresses) for internal alerts and
+    /// Resend for customer mail. The adapter's own configuration applies
+    /// (the `RESEND_API_KEY` secret or the `EMAIL` binding). While
+    /// `MAIL_ADAPTER` is `log` (development), the email is still only
+    /// logged, so a development machine never sends by accident. An unknown
+    /// name is a 500 when sending, naming the fix.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let alert = ocre::mail::Email::new("ops@example.com", "Disk almost full", "...").delivery_method("cloudflare");
+    /// assert_eq!(alert.delivery_method.as_deref(), Some("cloudflare"));
+    /// ```
+    pub fn delivery_method(mut self, adapter: impl Into<String>) -> Self {
+        self.delivery_method = Some(adapter.into());
         self
     }
 
@@ -485,6 +545,23 @@ pub(crate) fn adapter(value: Option<&str>) -> Result<Adapter> {
             "cannot send email: unknown {MAIL_ADAPTER} \"{other}\" (expected log, resend or cloudflare). {ADAPTER_FIX}"
         ))),
     }
+}
+
+/// The adapter for `email`: `MAIL_ADAPTER`, or the email's own
+/// [`delivery_method`](Email::delivery_method) unless `MAIL_ADAPTER` is `log`.
+pub(crate) fn adapter_for(configured: Option<&str>, email: &Email) -> Result<Adapter> {
+    let configured = adapter(configured)?;
+    let own = match email.delivery_method.as_deref().map(str::trim) {
+        None => None,
+        Some(name @ ("resend" | "cloudflare")) => Some(adapter(Some(name))?),
+        Some(other) => {
+            return Err(Error::internal(format!(
+                "cannot send email: unknown delivery_method \"{other}\" (expected resend or cloudflare). Fix: \
+                 call `.delivery_method(\"resend\")` or `.delivery_method(\"cloudflare\")` on the Email"
+            )));
+        }
+    };
+    Ok(if configured == Adapter::Log { Adapter::Log } else { own.unwrap_or(configured) })
 }
 
 /// The Resend key, from the `RESEND_API_KEY` secret.

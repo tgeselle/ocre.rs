@@ -1,12 +1,13 @@
 //! Request helpers: the client's IP address, a request id, the response
-//! format a client asks for, and redirecting back to the previous page.
+//! format a client asks for, Markdown responses, and redirecting back to
+//! the previous page.
 
 use std::{convert::Infallible, net::IpAddr};
 
 use axum::{
     extract::FromRequestParts,
-    http::{HeaderMap, header, request::Parts},
-    response::Redirect,
+    http::{HeaderMap, HeaderValue, header, request::Parts},
+    response::{IntoResponse, Redirect, Response},
 };
 
 /// Extractor for the client's IP address, from Cloudflare's `CF-Connecting-IP` header.
@@ -63,7 +64,9 @@ pub fn remote_ip(headers: &HeaderMap) -> Option<IpAddr> {
 /// is also shown in the Cloudflare dashboard and in Workers Logs; otherwise
 /// the client's `X-Request-Id` when it is 1 to 64 letters, digits, `-` or
 /// `_` (Loco's `request_id`); otherwise 16 random hex characters. Never
-/// rejects; no binding call.
+/// rejects; no binding call. [`serve`](crate::serve) picks it once per
+/// request: the same id is in every line of [`Ctx::log`](crate::Ctx::log),
+/// in error reports and in the `X-Request-Id` response header.
 ///
 /// # Examples
 ///
@@ -106,8 +109,9 @@ pub(crate) fn request_id(headers: &HeaderMap) -> String {
 /// `text/html` and `application/xhtml+xml` are [`Html`](Self::Html),
 /// `application/json` and any `+json` type [`Json`](Self::Json),
 /// `application/xml`, `text/xml` and `+xml` types [`Xml`](Self::Xml),
-/// `text/plain` [`Text`](Self::Text), `*/*` and `text/*` the first format
-/// of the list above. A missing or empty `Accept` header is `Html`, like
+/// `text/plain` [`Text`](Self::Text), `text/markdown` [`Markdown`](Self::Markdown),
+/// `*/*` and `text/*` the first format of the list above. A missing or empty
+/// `Accept` header is `Html`, like
 /// Rails; types Ocre does not know are [`Other`](Self::Other), usually
 /// answered with `406 Not Acceptable`. Never rejects; no binding call.
 ///
@@ -137,6 +141,8 @@ pub enum Format {
     Xml,
     /// `text/plain`.
     Text,
+    /// `text/markdown`, e.g. for LLM clients (Rails' `format.md`); answer with [`Markdown`].
+    Markdown,
     /// Only types Ocre does not know, e.g. `application/pdf`.
     Other,
 }
@@ -187,6 +193,7 @@ impl Format {
             "application/json" => Self::Json,
             "application/xml" | "text/xml" => Self::Xml,
             "text/plain" => Self::Text,
+            "text/markdown" => Self::Markdown,
             _ if media.ends_with("+json") => Self::Json,
             _ if media.ends_with("+xml") => Self::Xml,
             _ => Self::Other,
@@ -199,6 +206,37 @@ impl<S: Send + Sync> FromRequestParts<S> for Format {
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         Ok(Self::from_headers(&parts.headers))
+    }
+}
+
+/// A Markdown response: `text/markdown; charset=utf-8` (Rails' `render markdown:`).
+///
+/// Pairs with [`Format::Markdown`] to offer a page as Markdown to clients
+/// that ask for it, such as LLM agents; build the text with `format!` or an
+/// askama template (`templates/posts/show.md`). No binding call.
+///
+/// # Examples
+///
+/// ```
+/// use axum::response::{Html, IntoResponse, Response};
+/// use ocre::{Format, Markdown};
+///
+/// fn show(format: Format, title: &str, body: &str) -> Response {
+///     match format {
+///         Format::Markdown => Markdown(format!("# {title}\n\n{body}\n")).into_response(),
+///         _ => Html(format!("<h1>{title}</h1><p>{body}</p>")).into_response(),
+///     }
+/// }
+///
+/// let response = show(Format::Markdown, "Hello", "World");
+/// assert_eq!(response.headers()["content-type"], "text/markdown; charset=utf-8");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Markdown(pub String);
+
+impl IntoResponse for Markdown {
+    fn into_response(self) -> Response {
+        ([(header::CONTENT_TYPE, HeaderValue::from_static("text/markdown; charset=utf-8"))], self.0).into_response()
     }
 }
 
@@ -237,6 +275,40 @@ pub fn redirect_back(headers: &HeaderMap, fallback: &str) -> Redirect {
         (referer_host.eq_ignore_ascii_case(host) && !path.starts_with("//")).then_some(path)
     })();
     Redirect::to(back.unwrap_or(fallback))
+}
+
+/// A route path with its non-ASCII characters percent-encoded, so Unicode routes match (Rails' Unicode routes).
+///
+/// Browsers send `/über-uns` as `/%C3%BCber-uns`, and axum matches the path
+/// as sent. Write the route in Unicode and wrap it:
+/// `.route(&ocre::encode_path("/über-uns"), get(about))`. Bytes outside
+/// printable ASCII (UTF-8 multibyte characters, spaces) become `%XX` with
+/// uppercase hex, as browsers send them; `{id}` captures and `/` are kept,
+/// and axum decodes captured values (`Path<String>`) back to Unicode. Pure
+/// CPU, once when the router is built.
+///
+/// # Examples
+///
+/// ```
+/// use axum::{Router, routing::get};
+///
+/// assert_eq!(ocre::encode_path("/über-uns"), "/%C3%BCber-uns");
+/// assert_eq!(ocre::encode_path("/café/{id}"), "/caf%C3%A9/{id}");
+///
+/// let app: Router = Router::new().route(&ocre::encode_path("/über-uns"), get(|| async { "Über uns" }));
+/// # let _ = app;
+/// ```
+pub fn encode_path(path: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        if (0x21..=0x7E).contains(&byte) {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.extend(['%', char::from(HEX[usize::from(byte >> 4)]), char::from(HEX[usize::from(byte & 15)])]);
+        }
+    }
+    encoded
 }
 
 #[cfg(test)]
