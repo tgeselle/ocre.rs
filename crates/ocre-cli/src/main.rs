@@ -449,6 +449,14 @@ enum GenerateCommand {
     ///
     /// Example: `ocre g cache`.
     Cache,
+    /// Read-only data shipped with the Worker: data/<name>.json, parsed once
+    /// per Worker instance by src/data/<name>.rs (`crate::data::<name>::all()`).
+    ///
+    /// Example: `ocre g data countries`.
+    Data {
+        /// Name in snake_case (e.g. `countries`).
+        name: String,
+    },
     /// `.github/workflows/ci.yml`: the checks of `ocre ci` on every push and
     /// pull request, then `ocre deploy` on pushes to main (needs the
     /// CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID repository secrets).
@@ -791,6 +799,7 @@ fn generate_command(args: GenerateArgs) -> CliResult {
         GenerateCommand::Job { name, fields, queue } => generate::job(project, &name, &fields, queue.as_deref()),
         GenerateCommand::Schedule { name, cron } => generate::schedule(project, &name, &cron),
         GenerateCommand::Cache => generate::cache(project),
+        GenerateCommand::Data { name } => generate::data(project, &name),
         GenerateCommand::Ci => generate::ci(project),
         GenerateCommand::Pwa => generate::pwa(project),
         GenerateCommand::Locale { codes } => generate::locale(project, &codes),

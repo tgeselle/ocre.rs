@@ -4,7 +4,7 @@ Feature-level inventory of Rails 8.1 and Loco 1.2, with what Ocre has and how
 each part maps to Cloudflare's free plan. Collected from the official Rails
 guides and the Loco documentation source; every item links to its page.
 
-993 features: 702 done, 72 partial, 86 to do, 133 not applicable on Workers.
+993 features: 703 done, 74 partial, 83 to do, 133 not applicable on Workers.
 
 Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason given).
 (R) Rails, (L) Loco.
@@ -310,7 +310,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [x] **cargo loco db seed** (L): Seeds the database from fixtures, with --reset to clear data first and --from to read a different folder. *Ocre: `ocre db seed` loads db/fixtures then db/seeds.sql; `--replant` empties the tables first and `--from <dir>` reads another folder.* [loco/how-to/seed-data](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/seed-data.md)
 - [x] **Dump data to fixtures** (L): `db seed --dump` or `--dump-tables` exports live tables to YAML through Hooks::dump, which can be overridden with the typed, streaming db::dump. *Ocre: `ocre db dump` writes db/fixtures/<table>.yml.* [loco/how-to/seed-data](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/seed-data.md)
 - [~] **Truncate hook** (L): Hooks::truncate chooses which tables to clear (with truncate_table) when dangerously_truncate runs, for example before tests. *Ocre: `ocre db truncate` empties every app table of the local database; no per-table hook.* [loco/how-to/model-tests](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/model-tests.md)
-- [x] **Static data loaders** (L): Read-only JSON data in data/<name> is loaded once into memory (get), or re-read from disk (read), via load_json_file, and the folder can be changed with LOCO_DATA. *Ocre: ship data with the Worker via `include_str!("../data/x.json")`, parsed once into a `LazyLock` (a Worker has no disk to re-read).* [loco/how-to/load-data](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/load-data.md)
+- [x] **Static data loaders** (L): Read-only JSON data in data/<name> is loaded once into memory (get), or re-read from disk (read), via load_json_file, and the folder can be changed with LOCO_DATA. *Ocre: `ocre g data <name>`: data/<name>.json compiled into the Worker with `include_str!` and parsed once per instance (a Worker has no disk to re-read).* [loco/how-to/load-data](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/load-data.md)
 
 ## Controllers, routing and views
 
@@ -969,7 +969,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** `ocre` CLI: non-interactive with `--json`, wizard in a terminal. Cloudflare commands wrap Cloudflare's `cf` CLI; local D1 commands still run the app's wrangler (see the last section).
 
-118 features: 68 done, 16 partial, 5 to do, 29 not applicable.
+118 features: 69 done, 18 partial, 2 to do, 29 not applicable.
 
 ### CLI
 
@@ -1061,11 +1061,11 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [~] **Migration generator with name inference** (L): `generate migration <Name>` works out the operation from the name: Create<Table>, Add<Cols>To<Table>, Remove<Cols>From<Table>, Add<Ref>RefTo<Table>, Rename<Old>To<New>On<Table>, CreateJoinTable<A>And<B>, and otherwise an empty stub whose up() is todo!(). *Ocre: `create_`, `add_..._to_`, `remove_..._from_`, `add_index_to_`, `add_unique_index_to_`, `remove_index_from_`, `rename_..._to_..._in_`, `rename_<table>_to_`, `drop_`, `rebuild_` (from `db/schema.sql`), else empty; no join-table form (references need a field).* [loco/reference/generators](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/generators.md)
 - [~] **Auth on generated routes (--no-auth / --auth)** (L): Scaffolded handlers require a JWT unless --no-auth is passed; generated controllers are public unless --auth is passed. *Ocre: `ocre g controller --auth` (`CurrentUser` or `BearerUser`); scaffolds and APIs are public.* [loco/reference/generators](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/generators.md)
 - [x] **Controller generator** (L): `generate controller <name> [actions...]` creates a JSON controller with index plus one handler per action, registers its routes in app.rs, and adds a request test. *Ocre: `ocre g controller` (HTML pages, JSON with `--api` or in API-only apps), registered in `src/lib.rs`; no request test.* [loco/how-to/add-controller](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/add-controller.md)
-- [ ] **Task generator** (L): `generate task <name>` creates a Task stub and registers it in register_tasks. [loco/how-to/write-task](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/write-task.md)
+- [~] **Task generator** (L): `generate task <name>` creates a Task stub and registers it in register_tasks. *Ocre: `ocre g schedule <task> "<when>"` creates a task module, run by its cron or on demand with `ocre schedules run <task>` on `ocre dev`.* [loco/how-to/write-task](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/write-task.md)
 - [x] **Scheduler generator** (L): `generate scheduler` writes a starter config/scheduler.yaml. *Ocre: `ocre g schedule <name> "<when>"` adds the task and its Cron Trigger.* [loco/how-to/schedule-jobs](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/schedule-jobs.md)
 - [x] **Worker generator** (L): `generate worker <name>` creates a BackgroundWorker stub with a WorkerArgs struct, registers it in connect_workers, and adds a worker test. *Ocre: `ocre g job <Name> [field:type...] [--queue]`, registered in `src/jobs/mod.rs`; no test.* [loco/how-to/add-worker](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/add-worker.md)
 - [x] **Mailer generator** (L): `generate mailer <name>` creates a mailer struct with a welcome/ template directory (subject, html, text) and shared partials. [loco/how-to/send-email](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/send-email.md)
-- [ ] **Data loader generator** (L): `generate data <name>` creates a typed data-loader module plus a data/<name>/data.json file. [loco/how-to/load-data](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/load-data.md)
+- [x] **Data loader generator** (L): `generate data <name>` creates a typed data-loader module plus a data/<name>/data.json file. *Ocre: `ocre g data <name>` writes data/<name>.json and src/data/<name>.rs, which compiles the file into the Worker and parses it once (`crate::data::<name>::all()`).* [loco/how-to/load-data](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/load-data.md)
 - [~] **Field-type mini-language** (L): `name:type` field specs cover about 50 base types (string, text, int=i64, small_int, unsigned, float, double, decimal, decimal_len, money, bool, tstz, date, time, date_time, uuid, json, jsonb, blob, binary_len, var_binary...), where no suffix means nullable, `!` means required and `^` means unique. *Ocre: string, text, integer (int, small_int, big_int), float (double), decimal, boolean (bool), date, time, datetime (date_time), uuid, references, attachment, json (jsonb), enum; required by default, `?` optional, `^` unique; no binary or sized types.* [loco/reference/generators](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/generators.md)
 - [x] **Enum field type** (L): `status:enum:draft,published` stores a string column and generates a Rust enum with serde and ts-rs support, rendered as a <select> in scaffolded forms. *Ocre: a Rust enum with serde, stored as text with a `CHECK`, a `<select>` in forms; no ts-rs, not with `--graphql`.* [loco/reference/generators](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/generators.md)
 - [-] **Array field type** (L): `tags:array:string` style fields create array columns with string, int, big_int, float, double or bool elements. *Not applicable: SQLite (D1) has no array columns; a `json` field stores a list.* [loco/reference/generators](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/generators.md)
@@ -1093,7 +1093,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [x] **route** (R): Adds a route to config/routes.rb. *Ocre: an app generator's `[[insert]]` after the `// ocre:routes` marker of `src/lib.rs`.* [generators](https://guides.rubyonrails.org/generators.html)
 - [-] **inside** (R): Runs commands inside a given directory. *Not applicable: template lines run at the app root; generators write under it.* [generators](https://guides.rubyonrails.org/generators.html)
 - [-] **ask / yes? / no?** (R): Asks the user for input or a yes/no answer while a template or generator runs. *Not applicable: templates run without prompts (the CLI never prompts without a TTY); variations are separate template files.* [generators](https://guides.rubyonrails.org/generators.html)
-- [ ] **Generator testing** (R): Rails::Generators::TestCase provides run_generator, assert_file, assert_migration and helpers for the destination directory. [generators](https://guides.rubyonrails.org/generators.html)
+- [~] **Generator testing** (R): Rails::Generators::TestCase provides run_generator, assert_file, assert_migration and helpers for the destination directory. *Ocre: `ocre g ... --pretend` shows what an app generator would write without writing; no test case helpers.* [generators](https://guides.rubyonrails.org/generators.html)
 
 ## Testing
 

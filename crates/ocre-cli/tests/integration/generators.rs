@@ -561,3 +561,39 @@ fn model_factories_need_a_one_line_ocre_dependency_and_the_marker() {
     assert_eq!(report["error"], "tests/factories/mod.rs is missing the `// ocre:factories` marker");
     assert!(!root.join("src/models/tag.rs").exists(), "nothing written");
 }
+
+#[test]
+fn data_loaders_compile_a_json_file_into_the_worker() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    let (report, ok) = sandbox.json(&["g", "data", "countries"], &root);
+    assert!(ok, "{report}");
+    assert_eq!(
+        report["created"],
+        serde_json::json!(["src/data/mod.rs", "data/countries.json", "src/data/countries.rs"])
+    );
+    assert!(fs::read_to_string(root.join("src/lib.rs")).unwrap().contains("mod data;"));
+    let loader = fs::read_to_string(root.join("src/data/countries.rs")).unwrap();
+    assert!(loader.contains("include_str!(\"../../data/countries.json\")"), "{loader}");
+    let (report, ok) = sandbox.json(&["g", "data", "currencies"], &root);
+    assert!(ok, "{report}");
+    assert_eq!(report["updated"], serde_json::json!(["src/data/mod.rs"]));
+    assert!(
+        fs::read_to_string(root.join("src/data/mod.rs")).unwrap().contains("pub mod currencies;\npub mod countries;")
+    );
+
+    let (report, ok) = sandbox.json(&["g", "data", "Bad-Name"], &root);
+    assert!(!ok);
+    assert_eq!(report["error"], "invalid data name `Bad-Name`");
+    fs::write(root.join("src/data/mod.rs"), "").unwrap();
+    assert_eq!(
+        sandbox.json(&["g", "data", "rates"], &root).0["error"],
+        "src/data/mod.rs is missing the `// ocre:data` marker"
+    );
+    fs::remove_file(root.join("src/data/mod.rs")).unwrap();
+    fs::write(root.join("src/lib.rs"), "").unwrap();
+    assert_eq!(
+        sandbox.json(&["g", "data", "rates"], &root).0["error"],
+        "src/lib.rs is missing the `// ocre:modules` marker"
+    );
+}
