@@ -15,6 +15,7 @@
 //! | [`json_escape`], [`escape_javascript`] | `json_escape`, `escape_javascript` |
 //! | [`filter_parameters`], [`filter_json`], [`FILTERED_PARAMETERS`] | `filter_parameters` |
 //! | [`BasicAuth`] | `http_basic_authenticate_with` |
+//! | [`AllowBrowser`] | `allow_browser versions: :modern` |
 //!
 //! ```
 //! use axum::{Router, routing::get};
@@ -27,6 +28,7 @@
 //! # let _ = app;
 //! ```
 
+mod browser;
 mod html;
 mod policy;
 
@@ -39,6 +41,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::Value;
 
 pub use self::{
+    browser::{AllowBrowser, AllowBrowserService, Browser},
     html::{SANITIZE_ATTRIBUTES, SANITIZE_TAGS, escape_javascript, json_escape, sanitize, sanitize_with, strip_tags},
     policy::{
         BLOB, ContentSecurityPolicy, CspNonce, DATA, HTTPS, NONCE, NONE, PermissionsPolicy, PolicyService, SELF,

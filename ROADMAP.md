@@ -4,7 +4,7 @@ Feature-level inventory of Rails 8.1 and Loco 1.2, with what Ocre has and how
 each part maps to Cloudflare's free plan. Collected from the official Rails
 guides and the Loco documentation source; every item links to its page.
 
-993 features: 687 done, 74 partial, 104 to do, 128 not applicable on Workers.
+993 features: 691 done, 73 partial, 101 to do, 128 not applicable on Workers.
 
 Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason given).
 (R) Rails, (L) Loco.
@@ -316,7 +316,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** axum handlers and routers, askama templates compiled into the binary, htmx instead of Turbo/Stimulus, Workers Static Assets for files (free, not counted as Worker requests). tower middlewares that do not need tokio compile to WebAssembly.
 
-202 features: 179 done, 4 partial, 8 to do, 11 not applicable.
+202 features: 183 done, 3 partial, 5 to do, 11 not applicable.
 
 ### Controllers
 
@@ -352,7 +352,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [x] **Request object** (R): Access host, method, format, headers, remote_ip, url and query/request/path parameters. *Ocre: extractors `HeaderMap`, `OriginalUri`, `Method`, `ocre::RemoteIp`, `ocre::RequestId`, `ocre::Format`.* [action_controller_overview](https://guides.rubyonrails.org/action_controller_overview.html)
 - [x] **Response object** (R): Set body, status, content type, charset, location and custom headers. *Ocre: axum `Response` and response parts.* [action_controller_overview](https://guides.rubyonrails.org/action_controller_overview.html)
 - [x] **CSRF protection** (R): protect_from_forgery with authenticity tokens in forms and csrf_meta_tags for JS requests. [action_controller_advanced_topics](https://guides.rubyonrails.org/action_controller_advanced_topics.html)
-- [ ] **allow_browser** (R): Restrict access to modern/specified browser versions, returning 406 otherwise. [action_controller_advanced_topics](https://guides.rubyonrails.org/action_controller_advanced_topics.html)
+- [x] **allow_browser** (R): Restrict access to modern/specified browser versions, returning 406 otherwise. *Ocre: `.layer(ocre::security::AllowBrowser::modern())` (Rails' `:modern` versions), `.minimum(Browser::Safari, 16, 4)`, `.deny(..)`, `.page(html)`; unknown clients pass.* [action_controller_advanced_topics](https://guides.rubyonrails.org/action_controller_advanced_topics.html)
 - [x] **HTTP Basic authentication** (R): http_basic_authenticate_with or authenticate_or_request_with_http_basic. *Ocre: `ocre::security::BasicAuth`.* [action_controller_advanced_topics](https://guides.rubyonrails.org/action_controller_advanced_topics.html)
 - [-] **HTTP Digest authentication** (R): authenticate_or_request_with_http_digest for digest auth. *Not applicable: MD5-based and superseded; use HTTP Basic over HTTPS or tokens.* [action_controller_advanced_topics](https://guides.rubyonrails.org/action_controller_advanced_topics.html)
 - [x] **HTTP Token authentication** (R): authenticate_or_request_with_http_token for bearer-token APIs. *Ocre: `BearerUser` from `ocre g auth` and `ocre::jwt`.* [action_controller_advanced_topics](https://guides.rubyonrails.org/action_controller_advanced_topics.html)
@@ -474,7 +474,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [x] **Checkboxes and radio buttons** (R): checkbox and radio_button helpers with hidden unchecked-value inputs. *Ocre: `value="true"` checkboxes with `#[serde(default)] bool`; no hidden input needed.* [form_helpers](https://guides.rubyonrails.org/form_helpers.html)
 - [x] **Model-bound forms** (R): form_with model: binds fields to an object, pre-filling values and scoping param names. *Ocre: the scaffold's `<Model>Form` with `from_record`.* [form_helpers](https://guides.rubyonrails.org/form_helpers.html)
 - [x] **Composite primary key forms** (R): Model forms work with composite-primary-key records to build correct URLs. *Ocre: `paths` functions take every key.* [form_helpers](https://guides.rubyonrails.org/form_helpers.html)
-- [~] **fields_for** (R): Render fields for an additional/associated object inside the same form. *Ocre: fields of several structs in one flat form struct, saved in the handler; no helper.* [form_helpers](https://guides.rubyonrails.org/form_helpers.html)
+- [x] **fields_for** (R): Render fields for an additional/associated object inside the same form. *Ocre: bracketed field names (`post[title]`, `comments[0][body]`) written in the template and read into nested structs by `ocre::NestedForm`.* [form_helpers](https://guides.rubyonrails.org/form_helpers.html)
 - [x] **Record identification** (R): Infer form URL and method (create vs update) from the record's persisted state. *Ocre: generated `new.html` and `edit.html` post to `paths::index()` and `paths::show(id)`.* [form_helpers](https://guides.rubyonrails.org/form_helpers.html)
 - [x] **Namespaced forms** (R): Pass arrays like [:admin, @article] to target namespaced routes. *Ocre: the namespaced module's `paths`.* [form_helpers](https://guides.rubyonrails.org/form_helpers.html)
 - [x] **Method override for PATCH/PUT/DELETE** (R): Hidden _method field lets HTML forms send non-GET/POST verbs. *Ocre: HTML routes use `POST /x/{id}` and `POST /x/{id}/delete` instead of `_method`.* [form_helpers](https://guides.rubyonrails.org/form_helpers.html)
@@ -484,8 +484,8 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [x] **Collection helpers** (R): collection_select, collection_radio_buttons and collection_checkboxes build inputs from object collections. *Ocre: `{% for %}` over records to build options, radios or checkboxes.* [form_helpers](https://guides.rubyonrails.org/form_helpers.html)
 - [x] **File uploads** (R): file_field with automatic multipart encoding; uploaded files accessible as objects in params. *Ocre: `ocre::storage::Multipart` and attachment fields.* [form_helpers](https://guides.rubyonrails.org/form_helpers.html)
 - [x] **Custom form builders** (R): Subclass FormBuilder and use builder: or default_form_builder to add custom field methods. *Ocre: askama macros (the `errors_for` example).* [form_helpers](https://guides.rubyonrails.org/form_helpers.html)
-- [ ] **Input naming conventions to params** (R): Bracketed names (a[b], a[], a[0][b]) map to nested hashes/arrays in params. [form_helpers](https://guides.rubyonrails.org/form_helpers.html)
-- [ ] **Nested attributes forms** (R): accepts_nested_attributes_for with fields_for to create/update/destroy associated records, _destroy flag and reject_if. [form_helpers](https://guides.rubyonrails.org/form_helpers.html)
+- [x] **Input naming conventions to params** (R): Bracketed names (a[b], a[], a[0][b]) map to nested hashes/arrays in params. *Ocre: the `ocre::NestedForm<T>` extractor (body, or query on GET) with Rails' rules, into serde structs, `Vec`s and maps.* [form_helpers](https://guides.rubyonrails.org/form_helpers.html)
+- [x] **Nested attributes forms** (R): accepts_nested_attributes_for with fields_for to create/update/destroy associated records, _destroy flag and reject_if. *Ocre: documented pattern in guides/views.md: `lines[i][id|_destroy|...]` read by `NestedForm`, turned into INSERT/UPDATE/DELETE statements applied with `db.batch`; reject_if is a `match` arm.* [form_helpers](https://guides.rubyonrails.org/form_helpers.html)
 - [x] **Forms to external resources** (R): Custom authenticity_token handling for forms posting to external URLs. *Ocre: no authenticity token exists; CSRF is checked by origin.* [form_helpers](https://guides.rubyonrails.org/form_helpers.html)
 - [x] **Standalone *_tag helpers** (R): text_field_tag, checkbox_tag etc. to build inputs without a form builder. *Ocre: plain HTML inputs.* [form_helpers](https://guides.rubyonrails.org/form_helpers.html)
 
