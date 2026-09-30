@@ -117,3 +117,93 @@ fn fresh_when_skips_rendering_for_current_copies() {
     let failed = stale.fresh_when(tag, CacheControl::no_cache(), || -> Result<&str> { Err(Error::NotFound) });
     assert!(matches!(failed, Err(Error::NotFound)));
 }
+
+#[test]
+fn keys_join_parts_and_hash_long_ones() {
+    assert_eq!(key(&[&"posts", &12, &"2026-09-29 14:05:00"]), "posts/12/2026-09-29 14:05:00");
+    assert_eq!(key(&[]), "");
+    let plain = "p".repeat(256);
+    assert_eq!(key(&[&plain]), plain);
+    let hashed = key(&[&"p".repeat(257)]);
+    assert!(hashed.starts_with("sha256/") && hashed.len() == 71, "{hashed}");
+    assert_ne!(hashed, key(&[&"q".repeat(257)]));
+}
+
+#[test]
+fn store_is_kv_unless_null() {
+    assert_eq!(store_kind(None).unwrap(), Store::Kv);
+    assert_eq!(store_kind(Some("kv")).unwrap(), Store::Kv);
+    assert_eq!(store_kind(Some(" null ")).unwrap(), Store::Null);
+    let err = store_kind(Some("redis")).unwrap_err().to_string();
+    assert!(err.contains("CACHE_STORE is `redis`") && err.contains("\"null\""), "{err}");
+}
+
+#[test]
+fn fragments_live_under_views_and_render_as_is() {
+    assert_eq!(fragment_key("posts/1").unwrap(), "views/posts/1");
+    assert!(fragment_key(&"k".repeat(507)).is_err());
+    let fragment = Fragment::new("<li>A &amp; B</li>".to_owned());
+    assert_eq!(fragment.as_str(), "<li>A &amp; B</li>");
+    assert_eq!(fragment.to_string(), "<li>A &amp; B</li>");
+    assert_eq!(fragment.into_string(), "<li>A &amp; B</li>");
+}
+
+#[cfg(feature = "html")]
+#[test]
+fn templates_write_fragments_unescaped() {
+    use askama::Template;
+
+    #[derive(Template)]
+    #[template(source = "<ul>{{ row }}</ul>", ext = "html")]
+    struct List {
+        row: Fragment,
+    }
+
+    let list = List { row: Fragment::new("<li>A &amp; B</li>".to_owned()) };
+    assert_eq!(list.render().unwrap(), "<ul><li>A &amp; B</li></ul>");
+}
+
+#[test]
+fn only_selects_are_served_from_the_query_cache() {
+    for sql in [
+        "SELECT * FROM posts",
+        "  select id from posts",
+        "-- recent\nSELECT 1",
+        "/* by id */ SELECT 1",
+        "SELECT\n1",
+        "select(1)",
+    ] {
+        assert!(is_read_query(sql), "{sql}");
+    }
+    for sql in [
+        "INSERT INTO posts (title) VALUES (?1) RETURNING *",
+        "UPDATE posts SET title = ?1",
+        "WITH x AS (SELECT 1) DELETE FROM posts",
+        "SELECTED",
+        "select_all",
+        "SEL",
+        "-- only a comment",
+        "/* unterminated",
+        "",
+    ] {
+        assert!(!is_read_query(sql), "{sql}");
+    }
+}
+
+#[test]
+fn query_keys_tell_bindings_sql_and_values_apart() {
+    let key = query_key("DB", "SELECT ?1", &crate::params![1]);
+    assert_eq!(key, query_key("DB", "SELECT ?1", &crate::params![1]));
+    assert_ne!(key, query_key("DB", "SELECT ?1", &crate::params!["1"]));
+    assert_ne!(key, query_key("ANALYTICS", "SELECT ?1", &crate::params![1]));
+    assert_ne!(key, query_key("DB", "SELECT ?1 ", &crate::params![1]));
+}
+
+#[test]
+fn strong_etags_have_no_weak_prefix_and_still_match() {
+    let strong = ETag::strong("v1");
+    assert!(strong.is_strong() && strong.as_str().starts_with('"'));
+    assert!(!ETag::new("v1").is_strong());
+    assert_eq!(&ETag::new("v1").as_str()[2..], strong.as_str());
+    assert!(conditional("GET", Some(strong.as_str())).is_fresh(&ETag::new("v1")));
+}

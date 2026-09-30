@@ -73,14 +73,17 @@ use axum::{{
 }};
 use ocre::{{Ctx, Error, Result, realtime::WebSocketUpgrade}};
 
+/// `/ocre/dev/realtime/sent.json` lists recent broadcasts in `ocre dev` (for
+/// tests); it is a 404 in deployed builds.
 pub fn routes() -> Router<Ctx> {{
-    Router::new().route("/realtime/{{channel}}", get(connect))
+    Router::new().route("/realtime/{{channel}}", get(connect)).merge(ocre::realtime::dev_routes())
 }}
 
 /// Opens a WebSocket on `channel` for whoever may listen to it. Everyone may
 /// listen to the channels below. To restrict one, extract the user here
 /// (`crate::auth::CurrentUser` after `ocre g auth`) and return
-/// `Err(Error::Forbidden)`. Unknown channels are a 404.
+/// `Err(Error::Forbidden)`; `upgrade.identified_by(user.id.to_string())`
+/// names the subscriber. Unknown channels are a 404.
 async fn connect(State(ctx): State<Ctx>, Path(channel): Path<String>, upgrade: WebSocketUpgrade) -> Result<Response> {{
     match channel.as_str() {{
         {CHANNELS_MARKER}

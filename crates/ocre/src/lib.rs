@@ -73,6 +73,7 @@
     doc = "| `realtime` | WebSocket channels on a Durable Object (feature `realtime`, off in this build) |"
 )]
 //! | [`security`] | Content-Security-Policy (nonces), Permissions-Policy, rate limits, safe redirects, `sanitize` / `strip_tags`, log filtering, HTTP Basic auth |
+//! | [`sse`] | Server-Sent Events: stream events to the browser as they happen |
 //! | [`storage`] | Files in Cloudflare R2: multipart uploads, attachments, streamed downloads |
 //! | [`token`] | Random tokens for emailed links and API keys, stored as SHA-256 digests |
 //!
@@ -165,6 +166,7 @@ mod runtime;
 pub mod security;
 mod session;
 mod sql;
+pub mod sse;
 pub mod storage;
 #[cfg(test)]
 #[path = "../tests/support.rs"]
@@ -187,7 +189,7 @@ pub use htmx::{Htmx, HxRedirect};
 pub use protect::{ALLOWED_HOSTS, ALLOWED_ORIGINS};
 pub use query::{Batches, Direction, Paginated, Query, escape_like};
 pub use request::{Format, RemoteIp, RequestId, redirect_back, remote_ip};
-pub use runtime::{Ctx, Db, serve};
+pub use runtime::{Ctx, Db, serve, sleep};
 /// JSON values (`serde_json::Value`, the `json!` macro) for `json` fields,
 /// without adding `serde_json` to the app.
 pub use serde_json;

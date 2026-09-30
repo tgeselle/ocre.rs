@@ -325,6 +325,7 @@ pub(crate) fn discards(err: &Error) -> bool {
             | Error::Forbidden
             | Error::Invalid(_)
             | Error::PayloadTooLarge(_)
+            | Error::Conflict(_)
     )
 }
 

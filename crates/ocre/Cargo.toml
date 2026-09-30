@@ -45,6 +45,9 @@ futures-util = { version = "0.3", default-features = false }
 # by HKDF from SECRET_KEY_BASE; both crates already come with `cookie`.
 aes-gcm = { version = "0.10.3", default-features = false, features = ["aes", "alloc"] }
 hkdf = "0.12.4"
+# The per-request query cache keeps D1 rows as JavaScript values and
+# deserializes them like `worker` does (already one of its dependencies).
+serde-wasm-bindgen = "0.6.5"
 
 [features]
 default = ["html"]

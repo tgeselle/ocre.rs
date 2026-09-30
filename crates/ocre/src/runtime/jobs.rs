@@ -382,7 +382,7 @@ where
             Payload::Job(value) => {
                 let name = job_name(&value).to_owned();
                 match decode_job::<J>(value) {
-                    Ok(job) => (name, perform(ctx.clone(), job).await),
+                    Ok(job) => (name, perform(ctx.fresh(), job).await),
                     Err(reason) => {
                         worker::console_error!("{LOG_PREFIX} dropped message {}: {reason}", message.id());
                         message.ack();

@@ -95,6 +95,19 @@ jobs:
           ocre g api Document name:string file:attachment? --graphql --json
           ocre g cache --json
           ocre g locale en fr --json
+          # Rich text (Trix), optimistic locking and a self join.
+          ocre g scaffold Article title:string body:rich_text summary:rich_text? lock_version:integer cover:attachment? --json
+          ocre g api Wiki name:string content:rich_text lock_version:integer --graphql --json
+          ocre g model Employee name:string employee:references:manager_id? --json
+          ocre g migration add_lock_version_to_books lock_version:integer --json
+          # CI workflow, PWA files, a custom domain (type-checked by tsc below).
+          ocre g ci --json
+          test -f .github/workflows/ci.yml
+          ocre g pwa --json
+          test -f public/manifest.webmanifest && grep -q manifest.webmanifest templates/layout.html
+          ocre domains add app.example.com --json
+          ocre domains --json
+          ocre secrets fetch MAIL_ADAPTER --json
           # Every field type and alias; enums in forms and JSON.
           ocre g scaffold Task title:string status:enum:todo,doing,done priority:small_int views:big_int? due_at:time? cost:decimal? token:uuid?^ weight:double? done:bool starts_at:date_time? meta:jsonb? author:references:writer_id? --json
           ocre g api Ticket state:enum:open,closed price:decimal code:uuid opens_at:time? --json

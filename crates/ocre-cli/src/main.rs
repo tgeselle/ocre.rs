@@ -6,12 +6,14 @@
 //! output (cf, wrangler, cargo, npm) goes to stderr.
 
 mod about;
+mod ci;
 mod cloudflare;
 mod config;
 mod db;
 mod db_admin;
 mod destroy;
 mod doctor;
+mod domains;
 mod fixtures;
 mod generate;
 mod i18n;
@@ -148,9 +150,17 @@ enum Command {
         remote: bool,
     },
     /// Apply local migrations, then run the app with `cf dev`.
+    ///
+    /// Example: `ocre dev --no-cache` to see every `ocre::cache` value computed (like `bin/rails dev:cache`).
     Dev {
         #[arg(long, default_value_t = 8787)]
         port: u16,
+        /// Turn `ocre::cache` back on (removes CACHE_STORE from .dev.vars); stays on for later runs.
+        #[arg(long, overrides_with = "no_cache")]
+        cache: bool,
+        /// Turn `ocre::cache` off (CACHE_STORE=null in .dev.vars); stays off for later runs.
+        #[arg(long)]
+        no_cache: bool,
     },
     /// Deploy to Cloudflare and apply remote migrations.
     Deploy,
@@ -221,6 +231,27 @@ enum Command {
     /// production settings, and the executables in .ocre/doctor/).
     /// Exits with an error when a check fails.
     Doctor,
+    /// Run the app's CI steps locally, in order, stopping at the first
+    /// failure: `cargo fmt --check`, `cargo clippy --all-targets -- -D
+    /// warnings`, `cargo test`, `cargo check --target wasm32-unknown-unknown`,
+    /// and `ocre i18n missing` when the app has locales. The same steps as
+    /// the workflow of `ocre g ci`.
+    ///
+    /// Example: `ocre ci --signoff`.
+    Ci {
+        /// After a green run, `gh signoff` marks the pushed commit as passing
+        /// (needs the GitHub CLI and `gh extension install basecamp/gh-signoff`).
+        #[arg(long)]
+        signoff: bool,
+    },
+    /// The Worker's custom domains (`worker.domains` of cloudflare.config.ts);
+    /// `ocre deploy` publishes it on them. Without a subcommand, list them.
+    ///
+    /// Example: `ocre domains add www.example.com`, then `ocre deploy`.
+    Domains {
+        #[command(subcommand)]
+        action: Option<DomainsCommand>,
+    },
     /// Lines of code per part of the app (models, controllers, templates, tests...).
     ///
     /// Example: `ocre stats lib` also counts lib/.
@@ -418,6 +449,17 @@ enum GenerateCommand {
     ///
     /// Example: `ocre g cache`.
     Cache,
+    /// `.github/workflows/ci.yml`: the checks of `ocre ci` on every push and
+    /// pull request, then `ocre deploy` on pushes to main (needs the
+    /// CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID repository secrets).
+    ///
+    /// Example: `ocre g ci`.
+    Ci,
+    /// Progressive Web App: manifest.webmanifest, service-worker.js, pwa.js and
+    /// icon.svg in the assets directory, linked from templates/layout.html.
+    ///
+    /// Example: `ocre g pwa`.
+    Pwa,
     /// `locales/<code>.yml` for each code, declared in `ocre::locales!(...)`
     /// in src/lib.rs. The first run sets up translations: its first code is
     /// the default locale, and routes() gets the `I18n` extractor's layer.
@@ -517,6 +559,25 @@ enum SecretsCommand {
         #[arg(long, default_value = ".dev.vars")]
         file: String,
     },
+    /// Print one value of a local `NAME=value` file (like `rails credentials:fetch`),
+    /// for scripts. Deployed values cannot be read back.
+    ///
+    /// Example: `ocre secrets fetch STRIPE_KEY --file .prod.vars`.
+    Fetch {
+        /// Name of the value.
+        name: String,
+        /// `NAME=value` file to read.
+        #[arg(long, default_value = ".dev.vars")]
+        file: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum DomainsCommand {
+    /// Add a custom domain, e.g. `www.example.com` (its zone must be on the account).
+    Add { host: String },
+    /// Remove a custom domain.
+    Remove { host: String },
 }
 
 #[derive(Subcommand)]
@@ -645,7 +706,6 @@ fn main() -> ExitCode {
         Command::Migrate { remote, status: true } => db::status(remote, json),
         Command::Migrate { remote, status: false } => cloudflare::migrate(remote, json),
         Command::Db(DbCommand::Seed { remote, replant, from }) => db::seed(remote, replant, from.as_deref(), json),
-        Command::Db(DbCommand::Dump { tables, dir, force, remote }) => db::dump(&tables, &dir, force, remote),
         Command::Db(DbCommand::Create { remote }) => db_admin::create(remote, json),
         Command::Db(DbCommand::Drop { remote }) => db_admin::drop(remote),
         Command::Db(DbCommand::Version { remote }) => db_admin::version(remote),
@@ -655,6 +715,15 @@ fn main() -> ExitCode {
         Command::Version => about::version(),
         Command::About => about::about(),
         Command::Doctor => doctor::doctor(),
+        Command::Ci { signoff } => Project::find().and_then(|project| ci::run(&project, signoff, json)),
+        Command::Domains { action } => Project::find().and_then(|project| {
+            let action = match action {
+                None => domains::Action::List,
+                Some(DomainsCommand::Add { host }) => domains::Action::Add(host),
+                Some(DomainsCommand::Remove { host }) => domains::Action::Remove(host),
+            };
+            domains::run(&project, action)
+        }),
         Command::Stats { dirs } => Project::find().and_then(|project| stats::run(&project, &dirs)),
         Command::Notes { annotations } => Project::find().and_then(|project| notes::run(&project, &annotations)),
         Command::Test { e2e, port, cargo_args } => {
@@ -662,14 +731,18 @@ fn main() -> ExitCode {
         }
         Command::Db(DbCommand::Reset) => db::reset(json),
         Command::Db(DbCommand::Schema { remote }) => db::schema(remote, json),
+        Command::Db(DbCommand::Dump { tables, dir, force, remote }) => db::dump(&tables, &dir, force, remote),
         Command::Sql { query, remote } => db::sql(&query, remote, json),
-        Command::Dev { port } => cloudflare::dev(port, json),
+        Command::Dev { port, cache, no_cache } => cloudflare::dev(port, toggle(cache, no_cache), json),
         Command::Deploy => cloudflare::deploy(json),
         Command::Logs { format, status, search } => cloudflare::logs(&format, &status, search.as_deref(), json),
         Command::Secret => secret::run(),
         Command::Secrets(SecretsCommand::List) => Project::find().and_then(|project| secrets::list(&project, json)),
         Command::Secrets(SecretsCommand::Push { names, file }) => {
             Project::find().and_then(|project| secrets::push(&project, &names, &file, json))
+        }
+        Command::Secrets(SecretsCommand::Fetch { name, file }) => {
+            Project::find().and_then(|project| secrets::fetch(&project, &name, &file))
         }
         Command::Routes { filter } => Project::find().and_then(|project| routes::run(&project, filter.as_deref())),
         Command::Schedules { action: None } => Project::find().and_then(|project| schedules::list(&project)),
@@ -718,6 +791,8 @@ fn generate_command(args: GenerateArgs) -> CliResult {
         GenerateCommand::Job { name, fields, queue } => generate::job(project, &name, &fields, queue.as_deref()),
         GenerateCommand::Schedule { name, cron } => generate::schedule(project, &name, &cron),
         GenerateCommand::Cache => generate::cache(project),
+        GenerateCommand::Ci => generate::ci(project),
+        GenerateCommand::Pwa => generate::pwa(project),
         GenerateCommand::Locale { codes } => generate::locale(project, &codes),
         GenerateCommand::Controller { name, actions, api, auth } => {
             generate::controller(project, &name, &actions, api, auth)

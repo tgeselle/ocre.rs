@@ -64,17 +64,6 @@ use crate::{protect, session};
 /// stream, so the Worker spends no CPU copying them and `Content-Length` is
 /// kept.
 ///
-/// # Errors
-///
-/// Returns a [`worker::Error`] only when the response cannot be converted to a
-/// JavaScript `Response`. Handler errors are responses (an HTML page or JSON),
-/// not `Err`.
-///
-/// # Free plan
-///
-/// One call per Worker request (100,000 a day); the middleware itself reads no
-/// D1 rows and no KV keys: sessions live in the cookie.
-///
 /// Around the router, `serve` picks the request id ([`RequestId`](crate::RequestId))
 /// and tags [`Ctx::log`] with it, the method and the path; answers with an
 /// `X-Request-Id` header; reports an [`Error::Internal`](crate::Error::Internal)
@@ -86,6 +75,17 @@ use crate::{protect, session};
 /// page: a 500 page with the internal message, the request's details
 /// (secrets filtered) and the D1 statements it ran, or `error.detail` in a
 /// JSON error. Release builds (`ocre deploy`) never show internal details.
+///
+/// # Errors
+///
+/// Returns a [`worker::Error`] only when the response cannot be converted to a
+/// JavaScript `Response`. Handler errors are responses (an HTML page or JSON),
+/// not `Err`.
+///
+/// # Free plan
+///
+/// One call per Worker request (100,000 a day); the middleware itself reads no
+/// D1 rows and no KV keys: sessions live in the cookie.
 ///
 /// # Examples
 ///
@@ -134,4 +134,28 @@ pub async fn serve(routes: Router<Ctx>, req: HttpRequest, env: Env) -> worker::R
         Some(stream) => storage::into_js_response(response, stream),
         None => worker::response_to_wasm(response),
     }
+}
+
+/// Waits `duration` without using CPU (JavaScript's `setTimeout`): pacing for [`sse`](crate::sse) streams and polling.
+///
+/// On Workers, time spent waiting is not CPU time: the free plan's 10 ms
+/// per request only counts the work between waits. An HTTP request may wait
+/// as long as its client stays connected; a queue or scheduled invocation
+/// is limited to 15 minutes of wall time. The returned future is `Send`, so
+/// it can be awaited in handlers and in [`sse::stream`](crate::sse::stream)
+/// steps. Only runs on Workers (natively it panics, like every binding).
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::time::Duration;
+///
+/// async fn slow() -> &'static str {
+///     ocre::sleep(Duration::from_millis(500)).await;
+///     "done"
+/// }
+/// # let _ = slow;
+/// ```
+pub fn sleep(duration: std::time::Duration) -> impl Future<Output = ()> + Send {
+    worker::send::SendFuture::new(worker::Delay::from(duration))
 }

@@ -69,6 +69,9 @@ use sha2::{Digest, Sha256};
 use crate::{Error, Result};
 
 pub use crate::runtime::cache::{delete, fetch, read, write};
+#[cfg(feature = "html")]
+#[cfg_attr(docsrs, doc(cfg(feature = "html")))]
+pub use crate::runtime::cache::{fragment, fragments};
 
 /// Name of the KV namespace binding holding cached values: `CACHE`.
 ///
@@ -155,6 +158,212 @@ pub(crate) fn binding_error(err: &dyn fmt::Display) -> Error {
 /// value from an older deploy...).
 pub(crate) fn log_failure(operation: &str, key: &str, err: &dyn fmt::Display) {
     crate::error::log_internal(&format!("{LOG_PREFIX} {operation} `{key}` failed: {err}"));
+}
+
+/// Name of the Worker variable choosing the cache store: `CACHE_STORE`.
+///
+/// `"kv"` (or no variable) stores values in the `CACHE` KV namespace;
+/// `"null"` turns caching off without code changes (Rails' `:null_store`):
+/// [`fetch`] and [`fragment`] always compute, [`read`] finds nothing,
+/// [`write`](fn@write) and [`delete`] do nothing, and no KV operation is
+/// made. Set it in `.dev.vars` (`CACHE_STORE=null`) to develop without the
+/// cache, like Rails' `bin/rails dev:cache`; any other value is an
+/// [`Error::Internal`] naming the two valid ones.
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(ocre::cache::STORE_VAR, "CACHE_STORE");
+/// ```
+pub const STORE_VAR: &str = "CACHE_STORE";
+
+/// The store [`STORE_VAR`] selects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Store {
+    Kv,
+    Null,
+}
+
+/// Reads the value of [`STORE_VAR`] (`None` when the variable is absent).
+pub(crate) fn store_kind(value: Option<&str>) -> Result<Store> {
+    match value.map(str::trim) {
+        None | Some("kv") => Ok(Store::Kv),
+        Some("null") => Ok(Store::Null),
+        Some(other) => Err(Error::internal(format!(
+            "{STORE_VAR} is `{other}`; it must be \"kv\" (the CACHE namespace, the default) or \"null\" (caching off). \
+             Fix: change it in .dev.vars or in worker.env of cloudflare.config.ts"
+        ))),
+    }
+}
+
+/// Prefix of the KV keys holding [`fragment`]s: `views/`, as in Rails.
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(ocre::cache::FRAGMENT_PREFIX, "views/");
+/// ```
+pub const FRAGMENT_PREFIX: &str = "views/";
+
+/// Keys longer than this are hashed by [`key`].
+const MAX_PLAIN_KEY: usize = 256;
+
+/// Builds a cache key from its parts joined by `/`, like Rails' `cache_key_with_version`.
+///
+/// Put in it everything the cached value depends on: the table, the id and
+/// `updated_at` of each record (so an update makes a new key and the old
+/// value expires with its TTL, no delete needed), the locale when the text
+/// is translated, and a version (`v1`) to bump when the template or type
+/// changes. Nested fragments compose keys (Russian doll caching): the outer
+/// key includes the newest `updated_at` of the records inside.
+///
+/// Keys longer than 256 bytes become `sha256/<64 hex characters>`, so any
+/// key fits KV's 512-byte limit. Pure: no KV operation. Parts are `Sync`,
+/// so a key built inline in an awaited call keeps handler futures `Send`.
+///
+/// # Examples
+///
+/// ```
+/// use ocre::cache::key;
+///
+/// let (id, updated_at) = (12, "2026-09-29 14:05:00");
+/// assert_eq!(key(&[&"posts", &id, &updated_at, &"v1"]), "posts/12/2026-09-29 14:05:00/v1");
+///
+/// let long = "x".repeat(300);
+/// assert!(key(&[&long]).starts_with("sha256/"));
+/// assert_eq!(key(&[&long]).len(), 7 + 64);
+/// ```
+pub fn key(parts: &[&(dyn fmt::Display + Sync)]) -> String {
+    let mut key = String::new();
+    for (index, part) in parts.iter().enumerate() {
+        if index > 0 {
+            key.push('/');
+        }
+        key.push_str(&part.to_string());
+    }
+    if key.len() <= MAX_PLAIN_KEY {
+        return key;
+    }
+    let mut hashed = String::from("sha256/");
+    push_hex(&mut hashed, &Sha256::digest(key.as_bytes()));
+    hashed
+}
+
+fn push_hex(out: &mut String, bytes: &[u8]) {
+    for byte in bytes {
+        out.push(char::from_digit(u32::from(byte >> 4), 16).expect("a nibble is a hex digit"));
+        out.push(char::from_digit(u32::from(byte & 0xf), 16).expect("a nibble is a hex digit"));
+    }
+}
+
+/// A cached piece of HTML, from [`fragment`] or [`fragments`].
+///
+/// It was rendered by an askama template, which escaped its values, so
+/// templates write it as is: `{{ row }}` needs no `|safe` (it implements
+/// askama's `HtmlSafe` with feature `html`). [`Display`](fmt::Display)
+/// writes the HTML.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::time::Duration;
+///
+/// use askama::Template;
+/// use ocre::{Ctx, Result, cache::{self, Fragment}};
+///
+/// #[derive(Template)]
+/// #[template(source = "<li>{{ title }}</li>", ext = "html")]
+/// struct Row<'a> {
+///     title: &'a str,
+/// }
+///
+/// async fn row(ctx: &Ctx) -> Result<Fragment> {
+///     let key = cache::key(&[&"posts", &12, &"2026-09-29 14:05:00", &"v1"]);
+///     cache::fragment(ctx, &key, Duration::from_secs(86_400), || Row { title: "Hello" }).await
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fragment(String);
+
+impl Fragment {
+    #[cfg_attr(not(feature = "html"), allow(dead_code))]
+    pub(crate) fn new(html: String) -> Self {
+        Self(html)
+    }
+
+    /// The HTML.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn row(ctx: &ocre::Ctx) -> ocre::Result<ocre::cache::Fragment> { unimplemented!() }
+    /// # async fn example(ctx: &ocre::Ctx) -> ocre::Result<()> {
+    /// let row = row(ctx).await?;
+    /// assert!(row.as_str().starts_with('<'));
+    /// # Ok(()) }
+    /// ```
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The HTML as a `String`, e.g. for a [`realtime`](crate::realtime) broadcast.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn row(ctx: &ocre::Ctx) -> ocre::Result<ocre::cache::Fragment> { unimplemented!() }
+    /// # async fn example(ctx: &ocre::Ctx) -> ocre::Result<()> {
+    /// let html: String = row(ctx).await?.into_string();
+    /// # let _ = html; Ok(()) }
+    /// ```
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl fmt::Display for Fragment {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Fragments are HTML rendered (and escaped) by askama templates.
+#[cfg(feature = "html")]
+impl askama::filters::HtmlSafe for Fragment {}
+
+/// The KV key of the fragment `key`.
+#[cfg_attr(not(feature = "html"), allow(dead_code))]
+pub(crate) fn fragment_key(key: &str) -> Result<String> {
+    let full = format!("{FRAGMENT_PREFIX}{key}");
+    check_key(&full)?;
+    Ok(full)
+}
+
+/// Most results the per-request query cache keeps; it is emptied when full.
+pub(crate) const QUERY_CACHE_LIMIT: usize = 100;
+
+/// Whether the query cache may serve `sql`: a statement starting with
+/// `SELECT` (case-insensitive, after whitespace and `--`/`/* */` comments).
+/// Anything else may write, so it empties the cache.
+pub(crate) fn is_read_query(sql: &str) -> bool {
+    let mut rest = sql;
+    loop {
+        rest = rest.trim_start();
+        if let Some(line) = rest.strip_prefix("--") {
+            rest = line.split_once('\n').map_or("", |(_, next)| next);
+        } else if let Some(block) = rest.strip_prefix("/*") {
+            rest = block.split_once("*/").map_or("", |(_, next)| next);
+        } else {
+            break;
+        }
+    }
+    rest.get(..6).is_some_and(|word| word.eq_ignore_ascii_case("select"))
+        && !rest[6..].starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// The query cache key of a statement: binding, SQL and parameter values.
+pub(crate) fn query_key(binding: &str, sql: &str, params: &[crate::Param]) -> String {
+    format!("{binding}\u{0}{sql}\u{0}{params:?}")
 }
 
 /// A `Cache-Control` response header, built from one of four policies.
@@ -309,13 +518,14 @@ impl IntoResponseParts for CacheControl {
     }
 }
 
-/// A weak entity tag (`W/"<hash>"`) naming the version of what a page shows.
+/// An entity tag naming the version of what a page shows: weak (`W/"<hash>"`, the default) or strong (`"<hash>"`).
 ///
 /// Build it from everything the page displays, so it changes when the page
 /// would: the records, plus the locale, the signed-in user and the flash when
 /// the page shows them. The value is the first 128 bits of a SHA-256, as 32
 /// hex characters. It implements [`IntoResponseParts`] (sets `ETag`); pass it
-/// to [`Conditional::fresh_when`] to answer 304s.
+/// to [`Conditional::fresh_when`] to answer 304s. Like Rails, tags are weak
+/// unless built with [`strong`](Self::strong).
 ///
 /// # Examples
 ///
@@ -342,15 +552,50 @@ impl ETag {
     /// assert_eq!(etag.as_str().len(), 36); // W/" + 32 hex + "
     /// ```
     pub fn new(version: impl AsRef<[u8]>) -> Self {
-        let digest = Sha256::digest(version.as_ref());
+        Self::hashed("W/", version.as_ref())
+    }
+
+    /// A strong tag (`"<hash>"`, Rails' `strong_etag:`) for a version string you build.
+    ///
+    /// A strong tag promises that two responses with the same tag are
+    /// byte-for-byte identical, which caches and range requests rely on; use
+    /// it for a file or an exact body, not for a page whose HTML may vary
+    /// (nonces, CSRF tokens). `If-None-Match` compares weakly, so a strong
+    /// tag also answers 304s through [`Conditional`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ocre::cache::ETag;
+    ///
+    /// let etag = ETag::strong("report-2026-09.csv");
+    /// assert!(etag.as_str().starts_with('"'));
+    /// assert_eq!(etag.as_str().len(), 34); // " + 32 hex + "
+    /// assert!(etag.is_strong() && !ETag::new("x").is_strong());
+    /// ```
+    pub fn strong(version: impl AsRef<[u8]>) -> Self {
+        Self::hashed("", version.as_ref())
+    }
+
+    fn hashed(prefix: &str, version: &[u8]) -> Self {
+        let digest = Sha256::digest(version);
         let mut tag = String::with_capacity(36);
-        tag.push_str("W/\"");
-        for byte in &digest[..16] {
-            tag.push(char::from_digit(u32::from(byte >> 4), 16).expect("a nibble is a hex digit"));
-            tag.push(char::from_digit(u32::from(byte & 0xf), 16).expect("a nibble is a hex digit"));
-        }
+        tag.push_str(prefix);
+        tag.push('"');
+        push_hex(&mut tag, &digest[..16]);
         tag.push('"');
         Self(tag)
+    }
+
+    /// Whether the tag is strong (built with [`strong`](Self::strong)).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// assert!(!ocre::cache::ETag::new("v1").is_strong());
+    /// ```
+    pub fn is_strong(&self) -> bool {
+        !self.0.starts_with("W/")
     }
 
     /// A tag for any serializable data, hashed as its JSON: `ETag::of(&(&posts, i18n.locale()))?`.
@@ -378,7 +623,7 @@ impl ETag {
         Ok(Self::new(json))
     }
 
-    /// The header value, `W/"<32 hex characters>"`.
+    /// The header value, `W/"<32 hex characters>"` (weak) or `"<32 hex characters>"` (strong).
     ///
     /// # Examples
     ///

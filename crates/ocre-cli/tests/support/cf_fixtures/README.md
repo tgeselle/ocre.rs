@@ -79,3 +79,4 @@ Commands run from the app root (`cloudflare.config.ts`, `wrangler.config.ts`, `p
 | `workers_delete_queue_consumer` | `cf workers delete ocre-cfcheck-demo --force` | 1 | Worker consuming a queue → `[10064]` 403. |
 | `workers_delete` | `cf workers delete ocre-cfcheck-demo --force` | 0 | by NAME, --force, after consumer removed. |
 | `secrets_list_deleted_worker` | `cf workers secrets list --worker ocre-cfcheck-demo` | 1 | after delete → `[10007]`. |
+| `wrangler_tail_auth` | `wrangler tail <worker> --format pretty` (wrangler 4.144.0, local, proxy blocked) | 1 | recorded 2026-09-29 without network: wrangler keeps its own login, separate from cf; an expired login it cannot refresh fails before any API call. The tail stream itself is not recorded (fake_cf.sh prints wrangler's documented pretty format). |

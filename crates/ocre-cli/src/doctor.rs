@@ -248,6 +248,7 @@ fn production_check(project: &Project, config: &Config) -> Check {
     }
     let unsafe_values = [
         ("MAIL_ADAPTER", "log", "production only logs emails instead of sending them"),
+        ("CACHE_STORE", "null", "production caches nothing"),
         ("LOG_LEVEL", "debug", "production logs every debug line (Workers Logs: 200,000 events a day)"),
         ("LOG_LEVEL", "trace", "production logs every trace line (Workers Logs: 200,000 events a day)"),
     ];

@@ -69,6 +69,12 @@ pub struct Config {
     pub triggers: Vec<Call>,
     /// `worker.exports` entries that are `exports.*` calls.
     pub exports: Vec<Call>,
+    /// `worker.domains` (custom domains) when a list of string literals.
+    domains: Option<Vec<String>>,
+    /// Byte range of the `worker.domains` value, when present.
+    domains_at: Option<Range<usize>>,
+    /// Byte range of the `worker.name` value, when present.
+    name_at: Option<Range<usize>>,
 }
 
 impl Config {
@@ -90,15 +96,25 @@ impl Config {
             env: Vec::new(),
             triggers: Vec::new(),
             exports: Vec::new(),
+            domains: None,
+            domains_at: None,
+            name_at: None,
             text: String::new(),
         };
         for (key, value) in reader.properties(worker) {
             match key.as_str() {
-                "name" => config.name = reader.string(value),
+                "name" => {
+                    config.name = reader.string(value.clone());
+                    config.name_at = Some(value);
+                }
                 "compatibilityDate" => config.compatibility_date = reader.string(value),
                 "env" => config.env = reader.calls_in_object(value, "bindings")?,
                 "exports" => config.exports = reader.calls_in_object(value, "exports")?,
                 "triggers" => config.triggers = reader.calls_in_array(value, "triggers"),
+                "domains" => {
+                    config.domains = json5::from_str::<Vec<String>>(&text[value.clone()]).ok();
+                    config.domains_at = Some(value);
+                }
                 _ => {}
             }
         }
@@ -248,6 +264,37 @@ impl Config {
             _ => return Err(unreadable(binding, &canonical)),
         };
         Ok(format!("{}{replacement}{}", &self.text[..call.args.start], &self.text[call.args.end..]))
+    }
+
+    /// `worker.domains`: the Worker's custom domains (none when absent).
+    pub fn domains(&self) -> Result<Vec<String>, CliError> {
+        match (&self.domains, &self.domains_at) {
+            (Some(domains), _) => Ok(domains.clone()),
+            (None, None) => Ok(Vec::new()),
+            (None, Some(_)) => Err(CliError::new(format!("{FILE} has a `domains` entry Ocre cannot read"))
+                .hint("write it as a list of string literals: `domains: [\"www.example.com\"],`")),
+        }
+    }
+
+    /// The text with `worker.domains` set to `domains`: the list replaced,
+    /// or added on the line after `worker.name` when the file has none.
+    pub fn with_domains(&self, domains: &[String]) -> Result<String, CliError> {
+        let list = format!("[{}]", domains.iter().map(|d| format!("\"{d}\"")).collect::<Vec<_>>().join(", "));
+        if let Some(at) = &self.domains_at {
+            self.domains()?;
+            return Ok(format!("{}{list}{}", &self.text[..at.start], &self.text[at.end..]));
+        }
+        let Some(name) = &self.name_at else { return Err(self.worker_name().expect_err("no name entry")) };
+        let line_start = self.text[..name.start].rfind('\n').map_or(0, |at| at + 1);
+        let indent: String = self.text[line_start..].chars().take_while(|c| c.is_whitespace()).collect();
+        let line_end = self.text[name.end..].find('\n').map_or(self.text.len(), |at| name.end + at);
+        Ok(format!(
+            "{}\n{indent}// Custom domains (`ocre domains add`): `ocre deploy` publishes the Worker on\n\
+             {indent}// them; Cloudflare creates the DNS record and certificate (zone on this account).\n\
+             {indent}domains: {list},{}",
+            &self.text[..line_end],
+            &self.text[line_end..]
+        ))
     }
 }
 

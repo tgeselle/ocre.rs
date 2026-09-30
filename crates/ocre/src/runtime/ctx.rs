@@ -1,8 +1,13 @@
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, PoisonError},
+};
+
 use serde::de::DeserializeOwned;
-use worker::{Env, send::SendWrapper};
+use worker::{Env, js_sys::Array, send::SendWrapper};
 
 use super::Db;
-use crate::{Error, Result, errors::Reporter, instrument::Timings, log::Logger};
+use crate::{Error, Result, cache::QUERY_CACHE_LIMIT, errors::Reporter, instrument::Timings, log::Logger};
 
 /// Name of the D1 binding every Ocre app uses for its main database.
 const DB_BINDING: &str = "DB";
@@ -18,6 +23,12 @@ const DB_BINDING: &str = "DB";
 /// Creating a `Ctx` costs nothing on the free plan; each binding call
 /// ([`db`](Self::db), `ocre::cache`, `ocre::storage`...) only looks the
 /// binding up.
+///
+/// A `Ctx` and its clones share two per-request memories, like Rails' query
+/// cache and local cache: identical `SELECT`s through [`db`](Self::db) are
+/// answered from memory until a write (see [`Db`]), and `ocre::cache`
+/// reads each KV key at most once. Each request, queued job and cron run
+/// gets its own.
 ///
 /// # Examples
 ///
@@ -39,9 +50,47 @@ const DB_BINDING: &str = "DB";
 #[derive(Clone)]
 pub struct Ctx {
     env: SendWrapper<Env>,
+    memo: Arc<Memo>,
     log: Logger,
     errors: Reporter,
     timings: Timings,
+}
+
+/// What one request remembers: KV texts read or written (the local cache)
+/// and `SELECT` results (the query cache).
+#[derive(Default)]
+pub(crate) struct Memo {
+    kv: Mutex<HashMap<String, Option<String>>>,
+    queries: Mutex<HashMap<String, SendWrapper<Array>>>,
+}
+
+impl Memo {
+    /// The text of a KV key this request already read or wrote.
+    pub(crate) fn kv(&self, key: &str) -> Option<Option<String>> {
+        self.kv.lock().unwrap_or_else(PoisonError::into_inner).get(key).cloned()
+    }
+
+    pub(crate) fn remember_kv(&self, key: &str, text: Option<String>) {
+        self.kv.lock().unwrap_or_else(PoisonError::into_inner).insert(key.to_owned(), text);
+    }
+
+    /// The rows of a `SELECT` this request already ran.
+    pub(crate) fn query(&self, key: &str) -> Option<Array> {
+        self.queries.lock().unwrap_or_else(PoisonError::into_inner).get(key).map(|rows| Array::clone(rows))
+    }
+
+    pub(crate) fn remember_query(&self, key: String, rows: Array) {
+        let mut queries = self.queries.lock().unwrap_or_else(PoisonError::into_inner);
+        if queries.len() >= QUERY_CACHE_LIMIT {
+            queries.clear();
+        }
+        queries.insert(key, SendWrapper::new(rows));
+    }
+
+    /// Forgets every `SELECT` result, after a statement that may write.
+    pub(crate) fn clear_queries(&self) {
+        self.queries.lock().unwrap_or_else(PoisonError::into_inner).clear();
+    }
 }
 
 impl Ctx {
@@ -52,7 +101,13 @@ impl Ctx {
         crate::log::configure(var(crate::log::LOG_LEVEL).as_deref(), var(crate::log::LOG_FORMAT).as_deref());
         install_panic_hook();
         let log = Logger::new();
-        Self { env: SendWrapper::new(env), errors: Reporter::new(log.clone()), log, timings: Timings::default() }
+        Self {
+            env: SendWrapper::new(env),
+            memo: Arc::default(),
+            errors: Reporter::new(log.clone()),
+            log,
+            timings: Timings::default(),
+        }
     }
 
     /// The same context whose log lines and error reports carry `log`'s fields (the request id...).
@@ -60,6 +115,15 @@ impl Ctx {
         self.errors = Reporter::new(log.clone());
         self.log = log;
         self
+    }
+
+    /// The same environment with empty per-request memories, e.g. for each job of a queue batch.
+    pub(crate) fn fresh(&self) -> Self {
+        Self { memo: Arc::default(), ..self.clone() }
+    }
+
+    pub(crate) fn memo(&self) -> &Arc<Memo> {
+        &self.memo
     }
 
     pub(crate) fn timings(&self) -> &Timings {
@@ -227,7 +291,8 @@ impl Ctx {
     /// # let _ = track;
     /// ```
     pub fn db_named(&self, binding: &str) -> Result<Db> {
-        self.env.d1(binding).map(|db| Db::new(db).probed(self.log.clone(), self.timings.clone())).map_err(|err| {
+        let db = self.env.d1(binding).map(|db| Db::new(db, binding, Some(Arc::clone(&self.memo))));
+        db.map(|db| db.probed(self.log.clone(), self.timings.clone())).map_err(|err| {
             Error::internal(format!(
                 "D1 binding `{binding}` is missing ({err}). Fix: add `{binding}: bindings.d1({{ name: \"<database>\" }}),` to worker.env in cloudflare.config.ts"
             ))

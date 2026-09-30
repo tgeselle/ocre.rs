@@ -121,6 +121,7 @@ fn only_errors_a_retry_cannot_fix_are_discarded() {
         Error::Forbidden,
         Error::Invalid(vec![]),
         Error::PayloadTooLarge("x".into()),
+        Error::Conflict("x".into()),
     ] {
         assert!(discards(&err), "{err:?}");
     }

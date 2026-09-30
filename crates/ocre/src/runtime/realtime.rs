@@ -5,7 +5,9 @@ use worker::{Env, Headers, Method, Request, RequestInit, Stub, send::SendFuture}
 use super::Ctx;
 use crate::{
     Error, Result,
-    realtime::{CHANNELS_BINDING, LOG_PREFIX, WebSocketUpgrade, channel_error, missing_binding},
+    realtime::{
+        CHANNELS_BINDING, LOG_PREFIX, SUBSCRIBER_HEADER, WebSocketUpgrade, channel_error, missing_binding, record,
+    },
 };
 
 // `#[durable_object]` generates public wasm-bindgen glue (constructor and runtime callbacks) inside
@@ -74,8 +76,9 @@ pub fn broadcast(ctx: &Ctx, channel: &str, message: &str) -> impl Future<Output 
             Some(invalid) => Err(Error::internal(invalid)),
             None => send(&env, &channel, &message).await,
         };
-        if let Err(err) = &result {
-            worker::console_error!("{LOG_PREFIX} broadcast to {channel} failed: {err}");
+        match &result {
+            Ok(()) => record(&channel, &message),
+            Err(err) => worker::console_error!("{LOG_PREFIX} broadcast to {channel} failed: {err}"),
         }
         result
     })
@@ -129,12 +132,14 @@ impl WebSocketUpgrade {
         let env = ctx.env().clone();
         let invalid = channel_error(channel);
         let channel = channel.to_owned();
+        let subscriber = self.subscriber_header();
         SendFuture::new(async move {
             if let Some(invalid) = invalid {
                 return Err(Error::bad_request(invalid));
             }
             let headers = Headers::new();
             headers.set("Upgrade", "websocket")?;
+            headers.set(SUBSCRIBER_HEADER, &subscriber?)?;
             let mut init = RequestInit::new();
             init.with_headers(headers);
             let response =

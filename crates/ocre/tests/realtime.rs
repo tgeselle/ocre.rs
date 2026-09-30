@@ -70,3 +70,65 @@ fn swaps_wrap_fragments_where_the_browser_parses_them() {
     assert_eq!(remove("post_1"), "<div id=\"post_1\" hx-swap-oob=\"delete\"></div>");
     assert_eq!(remove("a\"&<"), "<div id=\"a&quot;&amp;&lt;\" hx-swap-oob=\"delete\"></div>", "escaped");
 }
+
+#[test]
+fn subscribers_travel_in_a_header_and_default_to_listeners() {
+    let upgrade = extract(&[("upgrade", "websocket")]).unwrap();
+    assert_eq!(upgrade.subscriber, Subscriber::default());
+    let upgrade = upgrade.identified_by("Zoé \"7\"").rebroadcast();
+    let header = upgrade.subscriber_header().unwrap();
+    assert!(header.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'), "{header}");
+    assert_eq!(
+        Subscriber::from_header(Some(&header)),
+        Subscriber { identity: Some("Zoé \"7\"".to_owned()), rebroadcast: true }
+    );
+    for unreadable in [None, Some("%%%"), Some("bm90IGpzb24")] {
+        assert_eq!(Subscriber::from_header(unreadable), Subscriber::default(), "{unreadable:?}");
+    }
+    let err = extract(&[("upgrade", "websocket")])
+        .unwrap()
+        .identified_by("x".repeat(MAX_IDENTITY_LEN + 1))
+        .subscriber_header()
+        .unwrap_err();
+    assert!(err.to_string().contains("more than 256"), "{err}");
+    let fits = extract(&[("upgrade", "websocket")]).unwrap().identified_by("x".repeat(MAX_IDENTITY_LEN));
+    assert!(fits.subscriber_header().is_ok());
+}
+
+#[test]
+fn only_publishers_are_relayed_as_json() {
+    let listener = Subscriber { identity: Some("ada".to_owned()), rebroadcast: false };
+    assert_eq!(listener.relay("hi"), None);
+    let publisher = Subscriber { identity: Some("ada".to_owned()), rebroadcast: true };
+    assert_eq!(publisher.relay(r#"{"text":"hi"}"#).unwrap(), r#"{"data":{"text":"hi"},"from":"ada"}"#);
+    assert_eq!(publisher.relay("<b>hi</b>").unwrap(), r#"{"data":"<b>hi</b>","from":"ada"}"#);
+    let anonymous = Subscriber { identity: None, rebroadcast: true };
+    assert_eq!(anonymous.relay("1").unwrap(), r#"{"data":1,"from":null}"#);
+    assert!(publisher.relay(&"x".repeat(MAX_REBROADCAST_BYTES)).is_some());
+    assert_eq!(publisher.relay(&"x".repeat(MAX_REBROADCAST_BYTES + 1)), None);
+}
+
+#[test]
+fn dev_routes_list_recent_broadcasts() {
+    use tower_service::Service;
+
+    for n in 0..55 {
+        record("posts", &format!("<p>{n}</p>"));
+    }
+    let mut app = dev_routes::<()>();
+    let request = Request::get("/ocre/dev/realtime/sent.json").body(axum::body::Body::empty()).unwrap();
+    let response = block_on(app.call(request)).unwrap();
+    let sent: Vec<serde_json::Value> = serde_json::from_str(&body_text(response)).unwrap();
+    assert_eq!(sent.len(), 50);
+    let last = sent.last().unwrap();
+    assert_eq!((last["channel"].as_str(), last["message"].as_str()), (Some("posts"), Some("<p>54</p>")));
+    assert!(sent.windows(2).all(|pair| pair[0]["id"].as_u64() < pair[1]["id"].as_u64()));
+}
+
+#[test]
+fn identified_publishers_announce_presence() {
+    let publisher = Subscriber { identity: Some("ada".to_owned()), rebroadcast: true };
+    assert_eq!(publisher.presence("joined").unwrap(), r#"{"event":"joined","from":"ada"}"#);
+    assert_eq!(Subscriber { identity: Some("ada".to_owned()), rebroadcast: false }.presence("left"), None);
+    assert_eq!(Subscriber { identity: None, rebroadcast: true }.presence("left"), None);
+}

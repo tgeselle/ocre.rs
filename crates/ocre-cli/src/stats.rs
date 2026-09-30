@@ -47,12 +47,20 @@ const PARTS: [(&str, &str); 8] = [
     ("Tests", "tests"),
 ];
 
-/// `extra`: more directories, each reported as its own row.
+/// `extra`: more directories, each reported as its own row, after those
+/// registered in Cargo.toml (`[package.metadata.ocre] stats = ["lib"]`,
+/// Rails' `CodeStatistics.register_directory`).
 pub fn run(project: &Project, extra: &[String]) -> CliResult {
     let mut rows: Vec<Row> = Vec::new();
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let parts = PARTS.iter().map(|(name, dir)| ((*name).to_owned(), (*dir).to_owned()));
-    let extra = extra.iter().map(|dir| (dir.trim_end_matches('/').to_owned(), dir.trim_end_matches('/').to_owned()));
+    let mut dirs: Vec<String> = Vec::new();
+    for dir in registered(&project.root).into_iter().chain(extra.iter().map(|d| d.trim_end_matches('/').to_owned())) {
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    let extra = dirs.into_iter().map(|dir| (dir.clone(), dir));
     for (name, dir) in parts.chain(extra) {
         let full = project.root.join(&dir);
         if !full.is_dir() && !PARTS.iter().any(|(_, known)| *known == dir) {
@@ -89,6 +97,13 @@ pub fn run(project: &Project, extra: &[String]) -> CliResult {
     };
     let stats = Stats { code_loc: rust_loc(&rows, false), test_loc: rust_loc(&rows, true), rows };
     Ok(Report { stats: Some(stats), ..Report::new("stats") })
+}
+
+/// `stats` of `[package.metadata.ocre]` in Cargo.toml: directories always counted.
+fn registered(root: &Path) -> Vec<String> {
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).ok().and_then(|t| t.parse::<toml::Table>().ok());
+    let dirs = manifest.as_ref().and_then(|m| m.get("package")?.get("metadata")?.get("ocre")?.get("stats")?.as_array());
+    dirs.into_iter().flatten().filter_map(|dir| Some(dir.as_str()?.trim_end_matches('/').to_owned())).collect()
 }
 
 /// `// ...`, `-- ...`, `{# ... #}`, `<!-- ... -->`, `# ...` and `/* ... */` lines.

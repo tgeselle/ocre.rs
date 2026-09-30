@@ -683,14 +683,21 @@ pub fn migrate(remote: bool, json: bool) -> CliResult {
 }
 
 /// Runs until stopped. The app is served at `http://localhost:<port>`.
-pub fn dev(port: u16, json: bool) -> CliResult {
+/// `cache`: `Some(false)` writes `CACHE_STORE=null` into .dev.vars
+/// (`ocre::cache` computes every value), `Some(true)` takes it out; the
+/// choice stays for the next runs, like `bin/rails dev:cache`.
+pub fn dev(port: u16, cache: Option<bool>, json: bool) -> CliResult {
     let project = Project::find()?;
     crate::i18n::check_syntax(&project.root)?;
     check_wasm_target()?;
     require_install(&project.root)?;
+    let ran = match cache {
+        Some(on) => vec![crate::secrets::set_dev_cache(&project.root, on)?],
+        None => Vec::new(),
+    };
     LocalD1::new(&project, Echo::for_json(json)).migrate()?;
     Cloudflare::new(&project.root, Echo::for_json(json)).dev_build().run(&["dev", "--port", &port.to_string()])?;
-    Ok(Report { url: Some(format!("http://localhost:{port}")), ..Report::new("dev") })
+    Ok(Report { url: Some(format!("http://localhost:{port}")), ran, ..Report::new("dev") })
 }
 
 /// `ocre logs`: streams the deployed Worker's live logs until stopped

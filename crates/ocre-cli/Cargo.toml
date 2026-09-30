@@ -83,6 +83,10 @@ path = "tests/integration/logs.rs"
 name = "fixtures"
 path = "tests/integration/fixtures.rs"
 
+[[test]]
+name = "platform"
+path = "tests/integration/platform.rs"
+
 # Generated apps on workerd (the real `cf dev`); ignored by default, run locally with
 # `cargo test -p ocre-cli --test e2e -- --ignored`.
 [[test]]

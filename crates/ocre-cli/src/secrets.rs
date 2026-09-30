@@ -84,7 +84,44 @@ pub fn list(project: &Project, json: bool) -> CliResult {
 }
 
 /// Names whose `.dev.vars` value is for development only.
-const DEV_ONLY: [&str; 2] = [SECRET_KEY_BASE, "MAIL_ADAPTER"];
+const DEV_ONLY: [&str; 3] = [SECRET_KEY_BASE, "MAIL_ADAPTER", CACHE_STORE];
+
+/// `.dev.vars` variable that turns `ocre::cache` off (`ocre dev --no-cache`).
+pub const CACHE_STORE: &str = ocre::cache::STORE_VAR;
+
+/// Turns `ocre::cache` on (removes `CACHE_STORE` from .dev.vars) or off
+/// (`CACHE_STORE=null`) for `ocre dev`; returns what it did.
+pub fn set_dev_cache(root: &Path, on: bool) -> Result<String, CliError> {
+    let path = root.join(".dev.vars");
+    let text = fs::read_to_string(&path).unwrap_or_default();
+    let prefix = format!("{CACHE_STORE}=");
+    let mut lines: Vec<&str> = text.lines().filter(|line| !line.trim_start().starts_with(&prefix)).collect();
+    let off = format!("{CACHE_STORE}=null");
+    if !on {
+        lines.push(&off);
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    fs::write(&path, out)?;
+    Ok(if on {
+        "caching on: CACHE_STORE removed from .dev.vars".to_owned()
+    } else {
+        "caching off: CACHE_STORE=null in .dev.vars".to_owned()
+    })
+}
+
+/// Prints the value of `name` from `file` (Rails' `credentials:fetch`), for
+/// scripts: e.g. `export TOKEN=$(ocre secrets fetch TOKEN --file .prod.vars)`.
+/// Only local files: Cloudflare never returns a secret's value.
+pub fn fetch(project: &Project, name: &str, file: &str) -> CliResult {
+    let vars = read_vars(&project.root, file)?;
+    let value = vars.get(name).ok_or_else(|| {
+        CliError::new(format!("{name} is not set in {file}")).hint(format!(
+            "add `{name}=<value>` to {file}; deployed values cannot be read back (Cloudflare only stores them)"
+        ))
+    })?;
+    Ok(Report { secret: Some(value.clone()), ..Report::new("secrets fetch") })
+}
 
 /// Uploads `names` with their values from `file` to the deployed Worker in
 /// one `cf workers secrets bulk` call (a new Worker version, no rebuild).

@@ -1,4 +1,4 @@
-//! `ocre generate model|scaffold|api|migration|mailer|mailbox|job|schedule|cache|locale`.
+//! `ocre generate model|scaffold|api|migration|mailer|mailbox|job|schedule|cache|locale|ci|pwa|...`.
 //!
 //! Generators collect every change in [`Edits`] and write nothing until the
 //! whole generation succeeded, so a failure never leaves half a resource.
@@ -8,6 +8,7 @@
 mod api;
 mod auth;
 mod cache;
+mod ci;
 mod controller;
 mod custom;
 mod fields;
@@ -17,6 +18,7 @@ mod mailbox;
 mod mailer;
 mod migration;
 mod model;
+mod pwa;
 mod realtime;
 pub(crate) mod record;
 mod scaffold;
@@ -30,6 +32,7 @@ use std::{fmt::Write as _, path::PathBuf};
 pub use api::api;
 pub use auth::{AuthOptions, auth};
 pub use cache::cache;
+pub use ci::ci;
 pub use controller::{controller, resource};
 pub use custom::{custom, generator};
 pub use job::job;
@@ -38,6 +41,7 @@ pub use mailbox::mailbox;
 pub use mailer::mailer;
 pub use migration::migration;
 pub use model::model;
+pub use pwa::pwa;
 pub use scaffold::scaffold;
 pub use schedule::schedule;
 pub use templates::{TemplateInfo, override_templates};

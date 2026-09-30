@@ -221,3 +221,23 @@ fn masking_keeps_offsets_and_skips_strings_and_comments() {
     assert_eq!(mask("/* unterminated").len(), 15);
     assert_eq!(mask("\"unterminated \\").len(), 15);
 }
+
+#[test]
+fn domains_are_read_and_written_as_a_list_of_strings() {
+    let config = parse("export default defineConfig({\n  worker: {\n    name: \"a\",\n  },\n});\n");
+    assert!(config.domains().unwrap().is_empty());
+    let added = config.with_domains(&["www.example.com".to_owned()]).unwrap();
+    assert!(added.contains("    name: \"a\",\n    // Custom domains"), "{added}");
+    assert!(added.contains("    domains: [\"www.example.com\"],\n  },"), "{added}");
+
+    let config = parse(&added);
+    assert_eq!(config.domains().unwrap(), ["www.example.com"]);
+    let both = ["www.example.com".to_owned(), "example.com".to_owned()];
+    let replaced = config.with_domains(&both).unwrap();
+    assert!(replaced.contains("domains: [\"www.example.com\", \"example.com\"],"), "{replaced}");
+
+    let config = parse("export default defineConfig({ worker: { name: \"a\", domains: list } });");
+    assert_eq!(config.domains().unwrap_err().message, "cloudflare.config.ts has a `domains` entry Ocre cannot read");
+    assert!(config.with_domains(&both).is_err());
+    assert!(parse("export default defineConfig({ worker: {} });").with_domains(&both).is_err());
+}

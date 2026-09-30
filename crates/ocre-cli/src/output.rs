@@ -70,6 +70,9 @@ pub struct Report {
     /// `ocre secret`: a new random value for SECRET_KEY_BASE.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secret: Option<String>,
+    /// `ocre domains`: the Worker's custom domains.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub domains: Option<Vec<String>>,
     /// The deploy uploaded a new SECRET_KEY_BASE (the Worker had none).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub secret_created: bool,
@@ -189,6 +192,14 @@ fn print_human(report: &Report) {
     }
     if let Some(secret) = &report.secret {
         println!("{secret}");
+    }
+    if let Some(domains) = &report.domains {
+        if domains.is_empty() {
+            println!("  no custom domain: the Worker answers on workers.dev");
+        }
+        for domain in domains {
+            println!("  {domain}");
+        }
     }
     for secret in report.secrets.iter().flatten() {
         let local = if secret.local { ".dev.vars" } else { "" };

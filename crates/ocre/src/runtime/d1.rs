@@ -1,11 +1,21 @@
+use std::sync::Arc;
+
 use serde::de::DeserializeOwned;
-use wasm_bindgen::JsValue;
+use wasm_bindgen::{JsCast, JsValue};
 use worker::{
     D1Database, D1PreparedStatement,
+    js_sys::{Array, Reflect},
     send::{SendFuture, SendWrapper},
+    wasm_bindgen_futures::JsFuture,
 };
 
-use crate::{Error, Param, Result, Statement, instrument::Timings, log::Logger, sql::Value};
+use super::ctx::Memo;
+use crate::{
+    Error, Param, Result, Statement,
+    cache::{is_read_query, query_key},
+    sql::Value,
+};
+use crate::{instrument::Timings, log::Logger};
 
 /// Handle to the application's D1 (SQLite) database, from [`Ctx::db`](crate::Ctx::db).
 ///
@@ -24,6 +34,18 @@ use crate::{Error, Param, Result, Statement, instrument::Timings, log::Logger, s
 /// D1 bills rows read (every row a query scans, not only those returned) and
 /// rows written. Add indexes for `WHERE` and `ORDER BY` columns, and bound
 /// lists with `LIMIT` (see [`Page`](crate::Page)).
+///
+/// # Query cache
+///
+/// Like Rails' query cache, a `SELECT` run twice with the same parameters
+/// during one request (or one job, or one cron run) is answered from memory
+/// the second time: no D1 round trip and no rows read. Any other statement
+/// ([`execute`](Self::execute), [`batch`](Self::batch), `INSERT ...
+/// RETURNING` through [`first`](Self::first)) empties the cache, before and
+/// after it runs, so a request always reads its own writes. The cache holds
+/// up to 100 results and is emptied when full. Writes by other requests are
+/// not seen until the next request; use [`uncached`](Self::uncached) for a
+/// query that must hit D1 (polling in a loop, a row another Worker updates).
 ///
 /// # Examples
 ///
@@ -47,6 +69,10 @@ use crate::{Error, Param, Result, Statement, instrument::Timings, log::Logger, s
 /// ```
 pub struct Db {
     inner: SendWrapper<D1Database>,
+    binding: String,
+    memo: Option<Arc<Memo>>,
+    /// Whether `SELECT`s may be served from `memo` (false after [`Db::uncached`]).
+    cached: bool,
     probe: Option<Probe>,
 }
 
@@ -59,13 +85,58 @@ struct Probe {
 }
 
 impl Db {
-    pub(crate) fn new(db: D1Database) -> Self {
-        Self { inner: SendWrapper::new(db), probe: None }
+    pub(crate) fn new(db: D1Database, binding: &str, memo: Option<Arc<Memo>>) -> Self {
+        Self { inner: SendWrapper::new(db), binding: binding.to_owned(), memo, cached: true, probe: None }
     }
 
     /// This handle, timing and logging each statement for the request.
     pub(crate) fn probed(self, log: Logger, timings: Timings) -> Self {
         Self { probe: Some(Probe { log, timings }), ..self }
+    }
+
+    /// This handle without the per-request query cache: every query goes to D1.
+    ///
+    /// Writes through it still empty the cache of the other handles of the
+    /// request. Rails' `uncached` block.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use axum::extract::State;
+    /// use ocre::{Ctx, Result, params};
+    /// use serde::Deserialize;
+    ///
+    /// #[derive(Deserialize)]
+    /// struct Import {
+    ///     status: String,
+    /// }
+    ///
+    /// async fn status(State(ctx): State<Ctx>) -> Result<Option<String>> {
+    ///     // Another Worker may have changed it since this request's last read.
+    ///     let db = ctx.db()?.uncached();
+    ///     let row: Option<Import> = db.first("SELECT status FROM imports WHERE id = ?1", params![1]).await?;
+    ///     Ok(row.map(|import| import.status))
+    /// }
+    /// # let _ = status;
+    /// ```
+    pub fn uncached(self) -> Self {
+        Self { cached: false, ..self }
+    }
+
+    /// Where a query's rows are remembered: `Some` for a `SELECT` when the
+    /// cache is on. A statement that may write empties the cache instead.
+    fn cache_slot(&self, sql: &str, params: &[Param]) -> Option<(Arc<Memo>, String)> {
+        let memo = self.memo.as_ref()?;
+        if !is_read_query(sql) {
+            memo.clear_queries();
+            return None;
+        }
+        self.cached.then(|| (Arc::clone(memo), query_key(&self.binding, sql, params)))
+    }
+
+    /// The memo to empty once a statement that may write has run.
+    fn write_memo(&self, sql: &str) -> Option<Arc<Memo>> {
+        self.memo.as_ref().filter(|_| !is_read_query(sql)).map(Arc::clone)
     }
 
     /// Runs a query and returns every row, deserialized into `T`.
@@ -105,10 +176,15 @@ impl Db {
         sql: &'q str,
         params: Vec<Param>,
     ) -> impl Future<Output = Result<Vec<T>>> + Send + use<'q, T> {
+        let slot = self.cache_slot(sql, &params);
+        let written = self.write_memo(sql);
         let stmt = self.prepare(sql, params);
         SendFuture::new(timed(self.probe.clone(), sql, async move {
-            let rows = stmt?.all().await.map_err(|err| query_error(sql, err))?;
-            rows.results::<T>().map_err(|err| query_error(sql, err))
+            let rows = rows(stmt?, sql, slot).await?;
+            if let Some(memo) = written {
+                memo.clear_queries();
+            }
+            rows.iter().map(|row| deserialize(&row, sql)).collect()
         }))
     }
 
@@ -155,9 +231,22 @@ impl Db {
         sql: &'q str,
         params: Vec<Param>,
     ) -> impl Future<Output = Result<Option<T>>> + Send + use<'q, T> {
+        let slot = self.cache_slot(sql, &params);
+        let written = self.write_memo(sql);
         let stmt = self.prepare(sql, params);
         SendFuture::new(timed(self.probe.clone(), sql, async move {
-            stmt?.first::<T>(None).await.map_err(|err| query_error(sql, err))
+            let stmt = stmt?;
+            let row = match slot {
+                Some(slot) => rows(stmt, sql, Some(slot)).await?.iter().next().map(|row| deserialize(&row, sql)),
+                None => {
+                    let row = stmt.first::<T>(None).await.map_err(|err| query_error(sql, err))?;
+                    if let Some(memo) = written {
+                        memo.clear_queries();
+                    }
+                    return Ok(row);
+                }
+            };
+            row.transpose()
         }))
     }
 
@@ -192,9 +281,14 @@ impl Db {
         sql: &'q str,
         params: Vec<Param>,
     ) -> impl Future<Output = Result<usize>> + Send + use<'q> {
+        self.cache_slot(sql, &params);
+        let written = self.write_memo(sql);
         let stmt = self.prepare(sql, params);
         SendFuture::new(timed(self.probe.clone(), sql, async move {
             let result = stmt?.run().await.map_err(|err| query_error(sql, err))?;
+            if let Some(memo) = written {
+                memo.clear_queries();
+            }
             let meta = result.meta().map_err(|err| query_error(sql, err))?;
             Ok(meta.and_then(|m| m.changes).unwrap_or(0))
         }))
@@ -229,10 +323,16 @@ impl Db {
     /// # let _ = check_email;
     /// ```
     pub fn exists<'q>(&self, sql: &'q str, params: Vec<Param>) -> impl Future<Output = Result<bool>> + Send + use<'q> {
+        let slot = self.cache_slot(sql, &params);
         let stmt = self.prepare(sql, params);
         SendFuture::new(timed(self.probe.clone(), sql, async move {
-            let row = stmt?.first::<serde_json::Value>(None).await.map_err(|err| query_error(sql, err))?;
-            Ok(row.is_some())
+            match slot {
+                Some(slot) => Ok(rows(stmt?, sql, Some(slot)).await?.length() > 0),
+                None => {
+                    let row = stmt?.first::<serde_json::Value>(None).await.map_err(|err| query_error(sql, err))?;
+                    Ok(row.is_some())
+                }
+            }
         }))
     }
 
@@ -276,10 +376,18 @@ impl Db {
         let prepared: Result<Vec<D1PreparedStatement>> =
             statements.into_iter().map(|s| self.prepare(&s.sql, s.params)).collect();
         let db = &self.inner;
+        let memo = self.memo.clone();
+        if let Some(memo) = &memo {
+            memo.clear_queries();
+        }
         let probe = self.probe.clone();
         SendFuture::new(async move {
             let batch = async { db.batch(prepared?).await.map_err(|err| query_error(&sql, err)) };
-            let results = timed(probe, &sql, batch).await?;
+            let results = timed(probe, &sql, batch).await;
+            if let Some(memo) = memo {
+                memo.clear_queries();
+            }
+            let results = results?;
             results
                 .iter()
                 .map(|result| {
@@ -295,8 +403,9 @@ impl Db {
     }
 }
 
-/// Runs one D1 call; with a probe, records how long it waited (Workers' clock only
-/// advances during I/O, so this is D1's time) and logs it at `debug`.
+/// Awaits a statement, then records how long it took (Workers' clock
+/// advances during I/O, so this is D1's time) and logs it at `debug`:
+/// `SQL (1.2 ms) SELECT ...`, like Rails' `Post Load (0.3ms) SELECT ...`.
 async fn timed<T>(probe: Option<Probe>, sql: &str, future: impl Future<Output = Result<T>>) -> Result<T> {
     let Some(probe) = probe else { return future.await };
     let started = crate::clock::now_millis();
@@ -309,6 +418,37 @@ async fn timed<T>(probe: Option<Probe>, sql: &str, future: impl Future<Output = 
         log.debug(format_args!("SQL ({ms} ms) {sql}"));
     }
     result
+}
+
+/// The rows of a query, from the request's cache when `slot` holds them.
+/// A statement without a slot (uncached, or one that may write) runs as is.
+async fn rows(stmt: D1PreparedStatement, sql: &str, slot: Option<(Arc<Memo>, String)>) -> Result<Array> {
+    if let Some((memo, key)) = &slot
+        && let Some(rows) = memo.query(key)
+    {
+        return Ok(rows);
+    }
+    let promise = stmt.inner().all().map_err(|err| query_error(sql, js_error(err)))?;
+    let result = JsFuture::from(promise).await.map_err(|err| query_error(sql, js_error(err)))?;
+    let results =
+        Reflect::get(&result, &JsValue::from_str("results")).map_err(|err| query_error(sql, js_error(err)))?;
+    let rows = results.dyn_into::<Array>().unwrap_or_else(|_| Array::new());
+    if let Some((memo, key)) = slot {
+        memo.remember_query(key, rows.clone());
+    }
+    Ok(rows)
+}
+
+/// A rejected D1 promise as an error naming D1's message (`D1_ERROR: no such table: posts...`).
+fn js_error(err: JsValue) -> worker::Error {
+    match err.dyn_ref::<worker::js_sys::Error>() {
+        Some(err) => worker::Error::RustError(String::from(err.message())),
+        None => err.into(),
+    }
+}
+
+fn deserialize<T: DeserializeOwned>(row: &JsValue, sql: &str) -> Result<T> {
+    serde_wasm_bindgen::from_value(row.clone()).map_err(|err| query_error(sql, err.into()))
 }
 
 fn to_js(param: Param) -> JsValue {
