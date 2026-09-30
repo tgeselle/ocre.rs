@@ -4,7 +4,7 @@ Feature-level inventory of Rails 8.1 and Loco 1.2, with what Ocre has and how
 each part maps to Cloudflare's free plan. Collected from the official Rails
 guides and the Loco documentation source; every item links to its page.
 
-993 features: 743 done, 84 partial, 1 to do, 165 not applicable on Workers.
+993 features: 744 done, 84 partial, 0 to do, 165 not applicable on Workers.
 
 Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason given).
 (R) Rails, (L) Loco.
@@ -31,7 +31,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** D1 (SQLite): 5 GB and daily row read/write quotas on the free plan, so batch queries and avoid N+1. Migrations are forward-only SQL files applied by `ocre migrate` (the app's wrangler locally, `cf d1 migrations apply` in production); rollbacks need hand-written reverse SQL (D1 Time Travel restores a point in time). Several databases are several D1 bindings. Encryption uses WebCrypto AES-GCM. Everything here is Rust code over D1: feasible.
 
-246 features: 169 done, 26 partial, 1 to do, 50 not applicable.
+246 features: 170 done, 26 partial, 0 to do, 50 not applicable.
 
 ### Active Record
 
@@ -249,7 +249,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [-] **Old migration squashing** (R): Obsolete migration files can be deleted while schema file stays authoritative, with nonexistent-migration status reporting. *Not applicable: D1 records applied migrations by file name; files stay small SQL, and `db/schema.sql` (`ocre db schema`) shows the result.* [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
 - [-] **Engine migrations install** (R): railties:install:migrations copies engine migrations into the app. *Not applicable: there are no engines; shared code is a crate.* [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
 - [-] **UUID primary keys** (R): enable_extension 'pgcrypto' and id: :uuid (or generator config) use UUIDs for primary keys. *Not applicable: generated models key rows by an integer `id`; a `token:uuid^` column gives each row a UUID for URLs.* [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
-- [ ] **Data migrations guidance** (R): Separate data transformation from schema migrations (e.g. via tasks/maintenance gems). [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
+- [x] **Data migrations guidance** (R): Separate data transformation from schema migrations (e.g. via tasks/maintenance gems). *Ocre: the Models guide's "Data migrations": a one-off `UPDATE` as its own migration, larger or Rust-computed changes as a job that works in batches and re-enqueues itself.* [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
 - [-] **Database enum types** (L): Enum columns create native Postgres enum types automatically, and add_enum_values and drop_enum_type manage them later. *Not applicable: no enum column types in SQLite; store TEXT and map to a Rust enum.* [loco/reference/schema-dsl](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/reference/schema-dsl.md)
 - [-] **enable_extension** (R): Enable database extensions (e.g. PostgreSQL) from migrations. *Not applicable: PostgreSQL extensions; D1 is SQLite.* [active_record_migrations](https://guides.rubyonrails.org/active_record_migrations.html)
 

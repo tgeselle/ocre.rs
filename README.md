@@ -50,6 +50,8 @@ explanations, each page also as Markdown (`<page>.md`), with
 | `ocre g job <Name> [field:type...] [--queue <name>]` | `src/jobs/<name>.rs` (arguments + `perform`), added to the `Job` enum and `perform` match in `src/jobs/mod.rs`; the first job wires the `JOBS` queue and the `queue` event; `--queue urgent` sends it to its own queue `<app>-jobs-urgent` (see [Background jobs](#background-jobs-and-scheduled-tasks)) |
 | `ocre g schedule <name> "<when>"` | `src/schedules/<name>.rs`, run by a Cron Trigger added to `cloudflare.config.ts` (`triggers.scheduled`), dispatched by cron in `src/schedules/mod.rs`; `<when>` is plain English (`"every day at 3am"`, `"every 15 minutes"`) or a cron expression; the first one wires the `scheduled` event |
 | `ocre g cache` | Adds the `CACHE` Workers KV binding to `cloudflare.config.ts` for `ocre::cache::fetch` (see [Caching](#caching)) |
+| `ocre g data <name>` | `data/<name>.json` compiled into the Worker and parsed once by `src/data/<name>.rs` (`crate::data::<name>::all()`) |
+| `ocre g system_test <name>` | A Playwright browser test in `tests/system/`; the first one adds `playwright.config.ts` and `@playwright/test` |
 | `ocre g ci` | `.github/workflows/ci.yml`: the checks of `ocre ci` on every push and pull request, then `ocre deploy` on pushes to main with the `CLOUDFLARE_API_TOKEN`/`CLOUDFLARE_ACCOUNT_ID` repository secrets |
 | `ocre g pwa` | Progressive Web App: `manifest.webmanifest`, `service-worker.js`, `pwa.js` and `icon.svg` in `public/`, linked from `templates/layout.html` |
 | `ocre g locale <code>...` | `locales/<code>.yml` per code, declared in `ocre::locales!(...)` in `src/lib.rs`; the first run makes its first code the default locale and adds the `I18n` layer to `routes()` (see [Translations](#translations)) |
@@ -68,7 +70,7 @@ explanations, each page also as Markdown (`<page>.md`), with
 | `ocre sql "<query>" [--remote]` | Run SQL and print the rows as a table; `--json` returns D1's results in `rows` |
 | `ocre dev [--port N] [--no-cache \| --cache]` | Checks locale files, applies local migrations, then `cf dev`; `--no-cache` writes `CACHE_STORE=null` into `.dev.vars` (`ocre::cache` computes every value), `--cache` removes it |
 | `ocre ci [--signoff]` | The CI steps locally, stopping at the first failure: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, the wasm32 check, `ocre i18n missing` when there are locales; `--signoff` then runs `gh signoff` |
-| `ocre test [--e2e] [-- args]` | `cargo test`, then the wasm32 check; `--e2e` also runs `tests/e2e.sh` against a `cf dev` started for the run (`BASE_URL`) |
+| `ocre test [--e2e] [-- args]` | `cargo test`, then the wasm32 check; `--e2e` also runs, against a fresh test database and one local server, the request tests (`ocre::testing::Client`), `tests/e2e.sh` and the Playwright tests of `tests/system/` |
 | `ocre deploy` | Creates what `cloudflare.config.ts` names and Cloudflare lacks (the D1 database, queues, KV namespaces without an `id`, whose id it then writes into the file, R2 buckets), uploads a new `SECRET_KEY_BASE` only when the Worker has none (an existing one is never rotated), applies remote migrations, then runs `cf deploy`. Refuses locale files the Worker could not load |
 | `ocre i18n missing` | Keys of the default locale missing from other locales (with the plural forms each language needs), undeclared or invalid locale files; fails when there is any |
 | `ocre logs [--status error] [--search text] [--format json]` | Live logs of the deployed Worker (`wrangler tail`) |
@@ -138,7 +140,10 @@ Migrations are forward-only SQL: `ocre g migration` infers
 `drop_t` and `rebuild_t` (SQLite's table rebuild, from `ocre db schema`);
 undo with a new migration or D1 Time Travel. `ocre::encryption` has
 `Encrypted`/`Deterministic` column types, and `ctx.db_named("ANALYTICS")`
-reaches another D1 database.
+reaches another D1 database. `commentable:polymorphic:post,photo` is a
+polymorphic reference (a typed `Commentable` enum), `photos:attachments`
+gives a record many files, every model has `touch`, and `D1_REPLICAS=on`
+reads from D1 replicas while each visitor still reads their own writes.
 
 Validation collects every error before answering, with Rails' messages
 (`required`, lengths, comparisons, `inclusion`/`exclusion`, `format`,
@@ -887,7 +892,7 @@ cargo llvm-cov --workspace --all-features \
 |---|---|
 | Unit (`crates/*/tests/**`, mirroring `src/`) | Pure logic: params, errors, sessions, crypto formats, MIME, extractors, generators |
 | `crates/ocre-cli/tests/integration/` | The `ocre` binary with a fake cf and wrangler (`tests/support/fake_cf.sh`): every command, `--json` contract, every error hint; `ocre new` in a pseudo-terminal |
-| `crates/ocre-cli/tests/system/e2e.rs` | Generated apps built to WebAssembly (dev build, shared `target/e2e-app`), served by `cf dev`: CRUD, sessions, CSRF, auth, email over HTTP, realtime broadcasts to WebSocket clients, background jobs and cron runs, translations by `Accept-Language`/cookie/path, KV read-through cache, 304 responses |
+| `crates/ocre-cli/tests/system/e2e.rs` | Generated apps built to WebAssembly (dev build, shared `target/e2e-app`), served by `cf dev`: CRUD, sessions, CSRF, auth, email over HTTP, realtime broadcasts to WebSocket clients, background jobs and cron runs, translations by `Accept-Language`/cookie/path, KV read-through cache, 304 responses, R2 uploads, D1 sessions, polymorphic references, many attachments, rich text images, signed and encrypted cookies, structured events |
 
 CI (manual trigger for now) runs lint, docs, coverage and a generated-app build as parallel jobs, and requires
 100% line coverage. The generated-app job runs `ocre new` and every generator,

@@ -575,6 +575,14 @@ mailbox: created post 1 from ada@example.com
 
 The email with an empty subject failed the `Post` validation; the `Err` bounced it. Locally, `forward` accepts any address; in production it fails unless the address is a verified destination (the log then says `Fix: add team@example.com as a verified destination address in Cloudflare Email Routing`). To test with a file, save a message as `message.eml` (CRLF line endings) and use `--data-binary @message.eml`.
 
+
+In request tests (`ocre test --e2e`), `ocre::testing::Client::receive_email(from, to, subject, body)` builds such a message (with a `Message-ID`) and posts it to the test server, Rails' `receive_inbound_email_from_mail`; assert on what the mailbox did (a row, a job, a reply in `client.deliveries()`):
+
+```rust,ignore
+let mut client = ocre::testing::Client::new();
+client.receive_email("ada@example.com", "posts@example.com", "Notes from the road", "Written on a train.").assert_success();
+```
+
 ### Keep a record of inbound email
 
 Rails stores every inbound email with a status (Action Mailbox's `InboundEmail`) and deletes it after a while. In Ocre that is a table and a few lines of the mailbox, for apps that need it (an audit, a support inbox). A migration:

@@ -201,6 +201,34 @@ curl -s -X DELETE http://localhost:8787/api/documents/1/file
 
 The content type is the one the client sends. curl guesses it from a few extensions (`.pdf`, `.png`, `.svg`...) and sends `application/octet-stream` for others such as `.csv`; name the type explicitly then: `-F 'file=@contacts.csv;type=text/csv'`.
 
+## Many files per record
+
+`name:attachments` (plural) gives a record any number of files, Rails' `has_many_attached`. It works with `ocre g model`, `scaffold` and `api`:
+
+```sh
+ocre g scaffold Album title:string photos:attachments
+```
+
+Each file is a row of a child model, `AlbumPhoto` (table `album_photos`: `album_id` with `ON DELETE CASCADE`, and a required `file` attachment checked against `album_photo::FILE`). The parent gets:
+
+| Method | Does |
+|---|---|
+| `album.attach_photos(&ctx, uploads)` | stores new files (Rails' `photos.attach`); every file is validated before any is stored |
+| `album.replace_photos(&ctx, uploads)` | deletes the current files, then attaches (Rails' `photos =`) |
+| `album.purge_photos(&ctx)` | deletes the rows and their objects in R2 |
+| `album.album_photos(&ctx, page)` | the rows, newest first; `album_photo::query().eq("album_id", id)` for anything else |
+
+Deleting an album deletes its files first, then the rows go with it. The scaffold's show page lists the files (links open them), deletes one, and adds several at once from `<input type="file" name="photos" multiple>` (`POST /albums/{id}/photos`, `GET /albums/{id}/photos/{file_id}`, `POST .../{file_id}/delete`). `ocre g api` adds the JSON routes:
+
+```sh
+curl -F photos=@a.png -F photos=@b.png http://localhost:8787/api/albums/1/photos   # add, answers the rows
+curl http://localhost:8787/api/albums/1/photos                                      # list
+curl http://localhost:8787/api/albums/1/photos/2                                    # one file
+curl -X DELETE http://localhost:8787/api/albums/1/photos/2                          # 204
+```
+
+A request adding files may carry up to ten files at their limit; a refused file answers 422 and stores none. In a handler of your own, `MultipartForm::files("photos")` takes every file of a multiple input (also sent as `photos[]`).
+
 ## Downloads: ETag, 304 and Range
 
 Every generated file route calls `storage::serve`, which answers with the headers a browser needs to cache, seek and save the file:
@@ -648,6 +676,31 @@ The browser side, plain JavaScript without a build step. `XMLHttpRequest` stands
 
 A 422 from step 1 or 3 carries the field messages (`{"error":{"fields":{"image":["is too large (maximum is 10 MB)"]},...}}`). The URL of step 1 must be used within 10 minutes; a `PUT` started in time may take longer.
 
+### The bundled script
+
+The page above is written by hand to show the steps. Ocre ships the same logic as a script, Active Storage's `activestorage.js`: merge its route once and mark the input.
+
+```rust,ignore
+// src/lib.rs, in routes()
+.merge(ocre::storage::direct_upload_script()) // GET /ocre/direct-upload.js
+```
+
+```html
+<script src="/ocre/direct-upload.js" defer></script>
+<form action="/photos/direct" method="post">
+  <input type="file" name="image" data-direct-upload-url="/api/photos/uploads">
+  <button>Save</button>
+</form>
+```
+
+When the form is submitted, each chosen file is signed (a JSON `POST` to the input's URL, step 1) and `PUT` to R2 (step 2); the form is then submitted without the file, with `image_key` (the signed key) and `image_filename`, which the handler passes to `storage::attach_direct_upload` (step 3). With `multiple`, the two fields repeat. The script dispatches Active Storage's events, which bubble: `direct-uploads:start` / `direct-uploads:end` on the form, and per file `direct-upload:start`, `direct-upload:progress` (`event.detail.progress`, 0 to 100), `direct-upload:error` (call `preventDefault()` to replace the default alert) and `direct-upload:end`.
+
+```js
+document.addEventListener("direct-upload:progress", (event) => {
+  document.querySelector("progress").value = event.detail.progress;
+});
+```
+
 ### Bucket CORS rule
 
 The browser `PUT`s to R2's host, a different origin, so the bucket needs a CORS rule allowing it. In the dashboard: R2 > `<app>-storage` > Settings > CORS policy > Add, with:
@@ -780,6 +833,12 @@ pub fn image_url(ctx: &Ctx, photo: &Photo) -> Result<String> {
 
 The trade-off is total: every object of the bucket is then readable forever by whoever has its key, with no authorization and no expiry, and the `Content-Type` is the stored one (the safe-type rules of `serve` do not apply; do not make a bucket public if it holds user-uploaded HTML or SVG). Use a separate public bucket for avatars and product images, never for private documents. A missing `STORAGE_PUBLIC_URL` is a 500 whose log says how to set it.
 
+## Images in rich text
+
+A `rich_text` field's scaffold form lets writers drop images into the Trix editor (Action Text attachments). The editor posts each file to `POST /<plural>/embeds` (a multipart `file`, images up to 10 MB, the `EMBED` rules in the controller), the controller stores it in R2 under `<plural>/embeds/` and answers its URL, `GET /<plural>/embeds/<name>`, which the editor puts in the text as `<figure><img src="..."></figure>`. The model's `sanitize` keeps `figure`, `figcaption` and relative `img` sources. The upload runs in `/ocre/direct-upload.js` (the scaffold merges `ocre::storage::direct_upload_script()` into `routes()` once), for any `<trix-editor data-embeds-url="...">`.
+
+An image removed from the text stays in R2; `storage::purge_unattached` cannot tell (the keys are in HTML), so list `<plural>/embeds/` and delete what no text contains if storage matters.
+
 ## Safety choices
 
 - **Keys** are random (128 bits), never derived from file names, so a name cannot overwrite or guess another file.
@@ -829,7 +888,7 @@ hint: enable R2 once in the Cloudflare dashboard (Storage & databases > R2; the 
 
 - Storage services other than R2: `store`, `serve` and the other runtime functions use the `STORAGE` binding. `S3Endpoint` presigns URLs for any S3-compatible store (AWS S3, MinIO), but there is no S3 client in the Worker and no mirroring.
 - Image processing inside the Worker: variants come from Cloudflare Image Transformations.
-- Cleanup of files whose rows are removed by `ON DELETE CASCADE`: the database deletes the child rows without calling the child model's `delete`, so their files stay in R2. Delete them in the parent's `delete` if that matters.
+- Cleanup of files whose rows are removed by `ON DELETE CASCADE`: the database deletes the child rows without calling the child model's `delete`, so their files stay in R2. Delete them in the parent's `delete` if that matters; `photos:attachments` children are deleted this way by the generated code.
 
 ## See also
 

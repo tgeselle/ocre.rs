@@ -299,12 +299,13 @@ Rails configures associations with options; in Ocre each one is a line of code i
 | `dependent: :destroy / :nullify / :restrict_with_error` | `ON DELETE CASCADE` (required reference), `ON DELETE SET NULL` (optional), or an error from `before_delete` (see [Callbacks](#callbacks)) |
 | `class_name:`, `foreign_key:` | `author:references:writer_id` names the column; the target is the model before `:references` |
 | `counter_cache: true` | a `comments_count INTEGER NOT NULL DEFAULT 0` column on the parent, updated by the child's `after_create` / `after_delete` (below), or a `COUNT(*)` on the indexed foreign key when the list is short |
-| `touch: true` | `UPDATE posts SET updated_at = datetime('now') WHERE id = ?1` in the child's `after_create` / `after_update` / `after_delete` |
+| `touch: true` | `crate::models::post::touch(ctx, comment.post_id).await?` in the child's `after_create` / `after_update` / `after_delete`: every model has `touch(ctx, id)`, which sets `updated_at` (and bumps `lock_version`) without validation or callbacks |
 | `inverse_of`, association caching, `reload_<name>` | not needed: an association is an `async` function returning plain values; call it again to reload |
 | `validate: true` (`validates_associated`) | call the other model's `validate()` and `v.merge(..)` it in `validate()` or `create` |
 | `autosave: true`, nested attributes | call the other model's `create`/`update` from the handler or a callback; several writes that must succeed together go into one [`db.batch`](#transactions) |
 | scopes on an association (`-> { where(...) }`) | `crate::models::comment::query().eq("post_id", post.id).eq("approved", true)`, or a scope function in the child model |
-| `polymorphic: true` | two columns, `commentable_type` (an `enum` of the parent tables) and `commentable_id` (`integer`), queried with `query().eq("commentable_type", Commentable::Post).eq("commentable_id", id)`; SQLite cannot enforce the reference, so check it in `create` |
+| `polymorphic: true` | `commentable:polymorphic:post,photo` (see [Polymorphic references](#polymorphic-references)) |
+| `has_many_attached` | `photos:attachments` (see [Files](files.md#many-files-per-record)) |
 
 A counter cache and `touch`, in the child model (`src/models/comment.rs`, with `comments_count` added to `posts` by `ocre g migration add_comments_count_to_posts comments_count:integer`):
 
@@ -325,6 +326,33 @@ async fn after_delete(ctx: &Ctx, comment: &Comment) -> Result<()> {
 ```
 
 Each callback costs one row written. Bulk deletes (`delete_all`, `ON DELETE CASCADE`) skip it: recount with `UPDATE posts SET comments_count = (SELECT COUNT(*) FROM comments WHERE comments.post_id = posts.id)` when you use them.
+
+### Polymorphic references
+
+A record that may belong to one of several models (Rails' `belongs_to :commentable, polymorphic: true`) takes a `polymorphic` field listing them:
+
+```sh
+ocre g scaffold Comment body:text commentable:polymorphic:post,photo
+```
+
+It becomes two fields: `commentable_type`, an [enum](#enum-fields) of the models' singular names (`CommentableType::Post`, stored as `'post'`), and `commentable_id`, an integer, with an index on the pair. SQLite cannot declare a foreign key to two tables, so `create` (and `update`, when a change sets both) checks that the record exists: `Commentable must exist` otherwise. The model gets an enum of the records and an accessor:
+
+```rust,ignore
+// src/models/comment.rs
+pub enum Commentable {
+    Post(crate::models::post::Post),
+    Photo(crate::models::photo::Photo),
+}
+
+let parent = comment.commentable(&ctx).await?; // Option<Commentable>: None once the record is deleted
+match parent {
+    Some(Commentable::Post(post)) => { /* ... */ }
+    Some(Commentable::Photo(photo)) => { /* ... */ }
+    None => {}
+}
+```
+
+Each listed model gets the has-many side, `post.comments(ctx, page)` (a query on `commentable_type = 'post'`). Add `?` for an optional reference (`commentable:polymorphic:post,photo?`). Deleting a post does not delete its comments (there is no foreign key): delete them in the post's `before_delete`. The models must exist before the field names them; a model may list itself (`subject:polymorphic:note,post?` on `Note`).
 
 ### Enum fields
 
@@ -652,6 +680,14 @@ npx cf d1 time-travel restore <uuid> --timestamp 2026-09-29T10:00:00+00:00
 ```
 
 A restore overwrites everything written since that minute, including the `d1_migrations` rows: the migrations applied after it become pending again. Delete or fix those files before the next `ocre deploy`, which would apply them again. Note the current bookmark (`get-bookmark` without `--timestamp`) first, to go back to if the restore itself was a mistake (`restore <uuid> --bookmark <it>`). `<database_name>` is the `name` of the `DB` binding in `cloudflare.config.ts`; these commands act on the remote database only.
+
+### Data migrations
+
+Keep schema changes and data changes apart (Rails' maintenance-task advice):
+
+- A small, one-off fix of existing rows (a backfill with a single `UPDATE ... SET slug = lower(replace(title, ' ', '-'))`) can be its own migration: `ocre g migration backfill_slugs` writes an empty numbered file for the SQL. It runs once, locally and on `ocre deploy`, in order with the schema changes.
+- A change that needs Rust (computing values, calling an API) or touches many rows is a job: it processes a batch per run within the CPU limit and enqueues itself with a cursor for the rest (see [Background jobs](jobs.md)), started once with `ocre schedules run` or from an admin route. It can run again safely if it skips rows already done.
+- Change the code to accept both shapes before the data moves, and remove the old shape in a later deploy.
 
 ### Seeds, reset and ad-hoc SQL
 
@@ -1455,6 +1491,19 @@ node_modules/.bin/wrangler d1 migrations apply ANALYTICS --local -c db/analytics
 
 Queries cannot join tables of two databases and a `batch` runs on one database: load ids from one, then `find_many`-style `is_in` queries on the other.
 
+## Read replicas
+
+D1 can keep read-only copies of a database near the Workers that use it ([read replication](https://developers.cloudflare.com/d1/best-practices/read-replication/), free). Ocre routes queries through D1 sessions so each visitor still reads what they wrote (Rails' automatic role switching):
+
+1. turn replication on for the database (dashboard: D1 > database > Settings);
+2. set the variable in `cloudflare.config.ts` (and `D1_REPLICAS=on` in `.dev.vars` to try it locally, where there is no replica):
+
+```ts
+D1_REPLICAS: bindings.text("on"),
+```
+
+Then every request served by `ocre::serve` uses one session per database: a `GET` or `HEAD` may start on any replica, other methods start on the primary, and later queries of the request see the earlier ones. After a request that wrote, the response sets `ocre_d1_<binding>` (HttpOnly, 5 minutes) with the session's bookmark, and the visitor's next requests resume from it, so the page shown after a form has the new row. Read-only responses set no cookie and stay cacheable. Jobs, crons and email handlers query the primary. Nothing changes in the models: `ctx.db()` returns the session. See [`ocre::replicas`](/api/ocre/replicas/index.html).
+
 ## Form objects and plain structs
 
 Rails' Active Model makes a plain Ruby class behave like a model: attributes, validations, callbacks, naming, serialization. In Ocre any struct already does, with serde and `ocre::Validator`, so a form that is not a table (a contact form, a sign-up that writes two tables, a search) is a struct with a `validate()` function:
@@ -1517,7 +1566,7 @@ Ocre models are generated Rust over SQL, not an ORM, and D1 is SQLite behind an 
 | `Model.transaction do ... end`, savepoints, `after_commit` | `db.batch` (see [Transactions](#transactions)); a job enqueued after the write |
 | Lazy loading, `strict_loading` | associations are explicit `async` functions; `includes` / `preload` / `eager_load` are `preload_<parents>`, `for_<parents>`, `find_many`, or one `join` + `select` into a row struct |
 | Pessimistic locking (`lock`, `SELECT ... FOR UPDATE`) | conditions in the `UPDATE`'s `WHERE`, checking the rows changed; `lock_version` for [optimistic locking](#optimistic-locking) |
-| Composite primary keys, single-table inheritance, delegated types | a plain `id` key and a unique index on the pair; a `kind` enum column (one table) or one table per type with a shared reference |
+| Composite primary keys, single-table inheritance, delegated types | a plain `id` key and a unique index on the pair; a `kind` enum column (one table), or one table per type pointed to by a [polymorphic reference](#polymorphic-references) |
 | Tables without `id`/`created_at`/`updated_at` from the generators | an empty migration with a name the generator does not read (`ocre g migration events_table`), your own `CREATE TABLE`, and a hand-written module |
 | `ActiveModel` modules on plain structs | serde and `Validator` (see [Form objects and plain structs](#form-objects-and-plain-structs)) |
 | Fixtures' `created_at`/`updated_at` filled automatically, ERB in fixture files | write the values in `db/fixtures/*.yml`; YAML anchors and `<<` share them |

@@ -33,7 +33,7 @@ The examples below come from `ocre 0.1.0` on apps created by `ocre new ... --sta
 | [`ocre db dump`](#ocre-db-dump) | Writes table rows to fixture files `db/fixtures/<table>.yml` |
 | [`ocre sql QUERY`](#ocre-sql) | Runs SQL on D1 and prints the rows |
 | [`ocre dev`](#ocre-dev) | Applies local migrations, then runs the app with `cf dev` |
-| [`ocre test`](#ocre-test) | Runs `cargo test`, the wasm32 check and, with `--e2e`, `tests/e2e.sh` against a local server |
+| [`ocre test`](#ocre-test) | Runs `cargo test`, the wasm32 check and, with `--e2e`, the request tests, `tests/e2e.sh` and the browser tests against a local server |
 | [`ocre deploy`](#ocre-deploy) | Creates missing Cloudflare resources, applies remote migrations, then runs `cf deploy` |
 | [`ocre logs`](#ocre-logs) | Streams the deployed Worker's live logs (`wrangler tail`) |
 | [`ocre secret`](#ocre-secret) | Prints a new random value for `SECRET_KEY_BASE` |
@@ -47,6 +47,7 @@ The examples below come from `ocre 0.1.0` on apps created by `ocre new ... --sta
 | [`ocre about`](#ocre-about), [`ocre version`](#ocre-version) | Versions and the app's configuration |
 | [`ocre stats [DIRS]`](#ocre-stats) | Lines of code per part of the app |
 | [`ocre notes`](#ocre-notes) | Lists TODO, FIXME and OPTIMIZE comments |
+| [`ocre time-zones`](#ocre-time-zones) | Prints the IANA time zone names |
 | [`ocre help`](#ocre-help) | Help text |
 
 ## Global flag: --json
@@ -311,7 +312,7 @@ ocre generate <GENERATOR> [ARGS]... [--pretend] [--force | --skip]
 ocre g <GENERATOR> [ARGS]...
 ```
 
-`g` is an alias. The built-in generators are `model`, `scaffold`, `api`, `resource`, `controller`, `auth`, `migration`, `mailer`, `mailbox`, `job`, `schedule`, `cache`, `locale`, `override` and `generator`; any other name runs the app's own generator in `.ocre/generators/<name>/`. Each one is documented with its arguments, files, output and errors in [Generators](generators.md).
+`g` is an alias. The built-in generators are `model`, `scaffold`, `api`, `resource`, `controller`, `auth`, `migration`, `mailer`, `mailbox`, `job`, `schedule`, `cache`, `data`, `system_test`, `ci`, `pwa`, `locale`, `override` and `generator`; any other name runs the app's own generator in `.ocre/generators/<name>/`. Each one is documented with its arguments, files, output and errors in [Generators](generators.md).
 
 | Flag | Effect |
 |---|---|
@@ -319,7 +320,7 @@ ocre g <GENERATOR> [ARGS]...
 | `--force` | Overwrite files that already exist |
 | `--skip` | Keep files that already exist and generate the rest (conflicts with `--force`) |
 
-Every run that writes files is recorded in `.ocre/generated/` for [`ocre destroy`](#ocre-destroy) (see [Generation records](generators.md#generation-records-and-ocre-destroy)).
+Generated Rust files go through `rustfmt` with the app's `rustfmt.toml` before they are written (unchanged when rustfmt is missing), so `cargo fmt --check` and [`ocre ci`](#ocre-ci) pass on generated code. Every run that writes files is recorded in `.ocre/generated/` for [`ocre destroy`](#ocre-destroy) (see [Generation records](generators.md#generation-records-and-ocre-destroy)).
 
 ## ocre destroy
 
@@ -867,35 +868,31 @@ ocre test [--e2e] [--port <PORT>] [--json] [-- <CARGO_TEST_ARGS>...]
 
 Runs the app's checks in one command, like `bin/rails test:all`, and stops at the first failure:
 
-1. `cargo test`, the native unit tests, with the arguments after `--` passed on (`ocre test -- models` runs the tests whose name contains `models`);
+1. `cargo test`, the native unit tests, with the arguments after `--` passed on (`ocre test -- models` runs the tests whose name contains `models`); request tests are `#[ignore]`d here;
 2. `cargo check --target wasm32-unknown-unknown`, the type check of the real build;
-3. with `--e2e`: applies the local migrations, starts one `cf dev --port <PORT>` for the whole run (a development build; the first one can take minutes), runs `sh tests/e2e.sh` with `BASE_URL=http://localhost:<PORT>` once the server is ready, then stops the server.
+3. with `--e2e`:
+   - a fresh test database in `.wrangler/test-state` (migrations, then `tests/fixtures/*.yml`); the development data is untouched,
+   - one server on `<PORT>` for the whole run, logging to `.wrangler/test-state/dev.log`,
+   - `cargo test -- --ignored --test-threads=1`: the request tests, with `OCRE_TEST_URL`, `OCRE_TEST_STATE` and `OCRE_TEST_LOG` set for `ocre::testing`,
+   - `sh tests/e2e.sh` with `BASE_URL`, when the app has it,
+   - `node_modules/.bin/playwright test` with `BASE_URL`, when `tests/system/` has `*.spec.ts` files ([`ocre g system_test`](generators.md#ocre-g-system_test)),
+   
+   then stops the server.
 
 | Flag | Default | Effect |
 |---|---|---|
-| `--e2e` | off | Also run `tests/e2e.sh` against a local server. The script is yours: requests to `$BASE_URL`, exiting non-zero on failure (see [Testing](../guides/testing.md)) |
+| `--e2e` | off | Also run the request tests, `tests/e2e.sh` and the browser tests against a local server (see [Testing](../guides/testing.md)) |
 | `--port <PORT>` | `8788` | Port of the server started for `--e2e`, next to `ocre dev`'s 8787 |
 
 ```sh
-ocre test
-```
-
-```text
-...
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.52s
-  cargo test: ok
-  cargo check --target wasm32-unknown-unknown: ok
+ocre test --e2e --json
 ```
 
 ```json
-{"command":"test","ok":true,"ran":["cargo test: ok","cargo check --target wasm32-unknown-unknown: ok"]}
+{"command":"test","ok":true,"ran":["cargo test: ok","cargo check --target wasm32-unknown-unknown: ok","test database .wrangler/test-state: migrated, tests/fixtures loaded","cargo test -- --ignored against the test server on port 8788: ok","playwright test (tests/system) against the test server on port 8788: ok"]}
 ```
 
-With `--json`, the output of cargo, cf and wrangler goes to stderr. A failing step ends with, for example, `error: cargo test failed (exit status: 101)` and `hint: the cargo output above names the failure`; the steps that passed are still listed in `ran`. Other errors: `tests/e2e.sh not found` (hint: ``create tests/e2e.sh: a shell script sending requests to $BASE_URL (e.g. `curl -fsS "$BASE_URL/up"`) that exits non-zero on failure``, checked before anything runs), `tests/e2e.sh failed (<status>)` (hint: `its output above shows the failing request`), `cf dev stopped or did not get ready` (hint: ``run `ocre dev` to see the build or startup error``), the missing wasm target, and `could not run cargo: ...`.
+With `--json`, the output of cargo, wrangler and Playwright goes to stderr. A failing step ends with, for example, `error: cargo test -- --ignored failed (exit status: 101)` and a hint naming how to rerun it; the steps that passed are still listed in `ran`. Other errors: `tests/e2e.sh failed (<status>)`, `tests/system has tests but Playwright is not installed` (hint: `npm install`, then `npx playwright install chromium`), `playwright test failed (<status>)` (hint: screenshots and traces in `test-results/`), `the test server stopped or did not get ready` (hint: its output is in `.wrangler/test-state/dev.log`), a fixture file that does not parse, the missing wasm target, and `could not run cargo: ...`.
 
 ## ocre deploy
 
@@ -1363,6 +1360,24 @@ src/pages.rs:42: [TODO] tidy this
 
 ```json
 {"command":"notes","notes":[{"line":42,"path":"src/pages.rs","tag":"TODO","text":"tidy this"}],"ok":true}
+```
+
+## ocre time-zones
+
+```text
+ocre time-zones [--json]
+```
+
+Prints the 418 IANA time zone names that `ocre::helpers::time_zone_options` offers, one per line (Rails' `bin/rails time:zones:all`); `--json` returns them as `time_zones`.
+
+```sh
+ocre time-zones | grep Europe/P
+```
+
+```text
+Europe/Paris
+Europe/Podgorica
+Europe/Prague
 ```
 
 ## ocre help

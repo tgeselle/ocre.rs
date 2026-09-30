@@ -160,6 +160,7 @@ async fn index(State(ctx): State<Ctx>, page: Page) -> Result<Html<String>> {
 | `{{ post.body\|word_wrap(72) }}` | lines of at most 72 characters | `word_wrap` |
 | `{{ ocre::helpers::class_names([("active", current)]) }}` | `active` when `current` | `class_names` / `token_list` |
 | `{% if ocre::helpers::current_page(current, "/posts") %}` | `true` when `current` (the request's `Uri` as text, set by the handler) is `/posts`, whatever its query | `current_page?` |
+| `<select name="time_zone">{{ ocre::helpers::time_zone_options(user.time_zone.as_str())\|safe }}</select>` | an `<option>` per IANA zone (418, as browsers list them), the current one selected; `ocre time-zones` prints them | `time_zone_select` |
 
 askama's own filters cover the rest: `truncate(n)`, `wordcount`, `linebreaks` / `linebreaksbr` / `paragraphbreaks` (`simple_format`), `pluralize` (`{{ n }} post{{ n|pluralize }}`), `filesizeformat`, `urlencode`, `upper`, `lower`, `title`, `capitalize`, `json`, `fmt` (`{{ ratio|fmt("{:.2}") }}`) and `format` (`{{ "{:?}"|format(value) }}`, Rails' `debug` inside a `<pre>`). Time filters read Unix seconds or the `TEXT` timestamps D1 stores (`2026-09-29 14:05:00`, UTC); number filters read any number. Other text passes through unchanged. They are English; translated text comes from [Translations](i18n.md).
 

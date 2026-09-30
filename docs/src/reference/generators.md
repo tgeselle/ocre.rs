@@ -139,6 +139,9 @@ Apps created before records existed have none for their earlier runs: `ocre dest
 | `attachment` | four columns: `<name>_key`, `<name>_filename`, `<name>_content_type` (`TEXT`), `<name>_size` (`INTEGER`) | `ocre::storage::Upload` when received, `Attachment` when stored | A file in R2; cannot be `^`; cannot be named `edit`, `delete` or `new`; must be `?` in JSON APIs; adds the `STORAGE` R2 binding to `cloudflare.config.ts` |
 | `json` (`jsonb`) | `TEXT CHECK (json_valid(<name>))` | `ocre::serde_json::Value` | Any JSON value; cannot be `^` |
 | `enum:<a>,<b>...` | `TEXT CHECK (<name> IN ('a', 'b'))` | a Rust enum generated in the model (`status` gives `Status`) | A `<select>` in forms; cannot be `^`; not with `--graphql` |
+| `rich_text` | `TEXT` | `String` | Formatted text (the Trix editor in forms), sanitized when saved; cannot be `^` |
+| `polymorphic:<model>,<model>...` | `<name>_type` (an enum of the models) and `<name>_id` (`INTEGER`), indexed together | `<Name>Type` and `i64`; `record.<name>(ctx)` returns an enum of the records | `commentable:polymorphic:post,photo`; the models must exist; checked as "must exist"; cannot be `^` |
+| `attachments` (`model`, `scaffold`, `api`, `resource` only) | a child table `<model>_<singular>` with a `file` attachment | the child model, and `attach_<name>` / `replace_<name>` / `purge_<name>` on the parent | `photos:attachments`; plural name; no `?` or `^` (see [Files](../guides/files.md#many-files-per-record)) |
 
 Field names are snake_case, start with a lowercase letter, and must not be reserved: `id`, `created_at` and `updated_at` (every table gets them), Rust keywords (`type`, `match`, `mod`, `ref`, `self`, `use`, `where`, `yield`...), and these SQL keywords: `and`, `asc`, `by`, `case`, `check`, `default`, `desc`, `from`, `group`, `index`, `join`, `key`, `limit`, `not`, `null`, `offset`, `or`, `order`, `primary`, `references`, `select`, `table`, `unique`, `values`. Two fields cannot produce the same column (an attachment `avatar` takes `avatar_key`, `avatar_filename`, `avatar_content_type` and `avatar_size`).
 
@@ -149,7 +152,7 @@ Field errors (shared by every generator that takes fields):
 | ``field `title` has no type`` | ``write fields as `name:type`, e.g. `title:string` `` |
 | ``invalid field name `<name>` `` | ``use snake_case starting with a letter, e.g. `published_at` `` |
 | ``field name `type` is reserved`` | ``` `id`, `created_at` and `updated_at` are generated; Rust and SQL keywords are not allowed. Pick another name, e.g. `kind` for `type` ``` |
-| ``unknown field type `strng` for `title` `` | ``types: string, text, integer (int, small_int, big_int), float (double), decimal, boolean (bool), date, time, datetime (date_time), uuid, references, attachment, json (jsonb), enum:<value>,<value>...; add `?` for optional, `^` for unique`` |
+| ``unknown field type `strng` for `title` `` | ``types: string, text, rich_text, integer (int, small_int, big_int), float (double), decimal, boolean (bool), date, time, datetime (date_time), uuid, references, attachment, json (jsonb), enum:<value>,<value>..., polymorphic:<model>,<model>..., attachments (many files, `photos:attachments`); `lock_version:integer` turns on optimistic locking; add `?` for optional, `^` for unique`` |
 | ``boolean field `done` cannot be optional`` | ``booleans are true or false (a checkbox); drop the `?` `` |
 | ``attachment `a` cannot be unique`` | ``every stored file gets its own random key already; drop the `^` `` |
 | ``json field `v` cannot be unique`` | ``a unique index compares JSON text, where key order and spacing differ; drop the `^` `` |
@@ -882,6 +885,43 @@ Next:
 ```
 
 Error: ``cloudflare.config.ts already has the `CACHE` binding`` with the hint ``nothing to generate: call `ocre::cache::fetch(&ctx, key, ttl, || async { ... })` in a handler``. See [Caching](../guides/caching.md).
+
+## ocre g data
+
+```text
+ocre g data <NAME>
+```
+
+Read-only data shipped with the Worker (Loco's data loaders): writes `data/<name>.json` (a sample `[{ "name": "Example" }]`) and `src/data/<name>.rs`, which compiles the file in with `include_str!` and parses it once per Worker instance into `Vec<Entry>` (declare the fields in `Entry`). The first one also writes `src/data/mod.rs` and `mod data;` in `src/lib.rs`. Read it with `crate::data::<name>::all()`. The module has a test checking that the file matches `Entry`. A Worker has no disk: the data changes with a deploy.
+
+```sh
+ocre g data countries
+```
+
+```json
+{"command":"generate data","created":["src/data/mod.rs","data/countries.json","src/data/countries.rs"],"next":["put the entries in data/countries.json and their fields in `Entry` (src/data/countries.rs)","read them with `crate::data::countries::all()`"],"ok":true,"updated":["src/lib.rs"]}
+```
+
+Errors: ``invalid data name `Bad-Name` `` (hint: snake_case), `data/<name>.json already exists`, and a missing `// ocre:modules` or `// ocre:data` marker.
+
+## ocre g system_test
+
+```text
+ocre g system_test <NAME>
+ocre g system-test <NAME>
+```
+
+A browser test (Rails' system tests) in `tests/system/<name>.spec.ts`, run by [Playwright](https://playwright.dev) against the test server of [`ocre test --e2e`](cli.md#ocre-test). The first one also writes `playwright.config.ts` (tests in `tests/system/`, `baseURL` from `BASE_URL`, one worker, a desktop and a phone screen, a screenshot and trace per failure), adds `"@playwright/test": "1.63.0"` to the `devDependencies` of `package.json`, and `test-results/` and `playwright-report/` to `.gitignore`.
+
+```sh
+ocre g system_test signing_up
+```
+
+```json
+{"command":"generate system_test","created":["playwright.config.ts","tests/system/signing_up.spec.ts"],"next":["npm install","npx playwright install chromium (once per machine)","edit tests/system/signing_up.spec.ts, then ocre test --e2e"],"ok":true,"updated":["package.json",".gitignore"]}
+```
+
+Errors: ``invalid system test name `Bad` ``, `tests/system/<name>.spec.ts already exists`, and ``package.json has no `"devDependencies": {` block``. See [Testing](../guides/testing.md#browser-tests-ocre-g-system_test).
 
 ## ocre g ci
 

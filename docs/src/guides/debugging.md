@@ -67,7 +67,8 @@ Fields whose name contains a fragment of `ocre::security::FILTERED_PARAMETERS` (
 
 | Line | Level | When |
 |---|---|---|
-| `GET /posts 200 in 40 ms (db: 3 queries, 12 ms)` | `debug` | every request |
+| `GET /posts 200 in 40 ms (db: 3 queries, 12 ms)`, with ` -> /posts/7` for a redirect | `debug` | every request |
+| `event order.placed {"order_id":42}` with the event's tags | `info` | `ctx.events().notify(..)` |
 | `SQL (1.2 ms) SELECT ...` with `duration_ms` (and `failed` on errors) | `debug` | every D1 statement through `ctx.db()` |
 | `[ocre] <message>` with `error_class`, `handled`, `source` | `error` | a handler returned `Error::Internal` (a 500) |
 | `panicked at src/posts.rs:12:5: <message>` | `error` | a panic, which ends the request |
@@ -78,6 +79,18 @@ Durations come from the Workers clock, which only advances while the Worker wait
 ### Free plan
 
 Workers Logs (`observability: { enabled: true }` in `cloudflare.config.ts`) keeps 200,000 events a day for 3 days; each request is one event, plus one per line it logs. Above that, events are sampled, never billed. Ocre's own per-request and SQL lines are `debug`, so they cost nothing at the default production level `info`.
+
+## Structured events
+
+Events are named facts about what the app did, for analytics or an audit trail (Rails 8.1's `Rails.event`). `ctx.events().notify(name, payload)` logs an `info` line with the request's fields (so Workers Logs can query it) and hands the event to the subscribers registered with `ocre::events::subscribe`:
+
+```rust,ignore
+ctx.events().set_context("tenant", "acme");                                          // on every event of this request
+ctx.events().notify("order.placed", ocre::serde_json::json!({ "order_id": 42 }));
+ctx.events().tagged("step", "payment").notify("payment.captured", ocre::serde_json::json!({ "order_id": 42 }));
+```
+
+A subscriber (registered in the `start` event of `src/lib.rs`) implements `ocre::events::Subscriber`: `emit(&Event, vars)` returns the HTTP request to send (`Delivery`), or `None` to skip the event. Ocre sends deliveries with `fetch` after the handler, like error reports; each is a subrequest (50 per request on the free plan). See [`ocre::events`](/api/ocre/events/index.html).
 
 ## Errors as responses
 

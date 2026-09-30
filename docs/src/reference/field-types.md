@@ -42,6 +42,8 @@ Field names are snake_case identifiers starting with a letter (`published_at`). 
 | `json` | `TEXT CHECK (json_valid(<name>))` | `ocre::serde_json::Value` | `<textarea rows="5" spellcheck="false" placeholder="{}">` | the JSON value itself | `JSON` scalar | forms: "is not valid JSON"; cannot be unique |
 | `enum:<a>,<b>...` | `TEXT CHECK (<name> IN ('a', 'b'))` | a generated Rust enum (`Status`) | `<select>` with one `<option>` per value | string, one of the values | not supported (`--graphql` refuses it) | forms: "is not included in the list"; cannot be unique |
 | `lock_version:integer` | `INTEGER NOT NULL DEFAULT 0` | `i64` in the record, `Option<i64>` in `Changes`, absent from `New` | `<input type="hidden">` | number | `Int` (patch only) | none; `update` answers 409 when stale |
+| `polymorphic:<a>,<b>...` | `<name>_type TEXT CHECK (... IN ('a', 'b'))` and `<name>_id INTEGER`, indexed together | a generated enum (`CommentableType`) and `i64`; an accessor returning `Commentable` | `<select>` and `<input type="number">` | string and number | not supported | "must exist" in `create`/`update` |
+| `attachments` | a child table `<model>_<singular>` | a child model; `attach_<name>` / `replace_<name>` / `purge_<name>` on the parent | the show page's `<input type="file" multiple>` | `POST/GET/DELETE /api/<plural>/{id}/<name>` | not supported | the child's `FILE` rules |
 
 Without `?`, every column is `NOT NULL`. The sections below give the exact generated code for each type.
 
@@ -270,6 +272,37 @@ pub doc: Option<Option<Upload>>,
 - Restrictions: cannot be unique (``error: attachment `photo` cannot be unique``), cannot be named `edit`, `delete` or `new` (they clash with scaffold routes), and `<name>_key`, `_filename`, `_content_type`, `_size` cannot be other fields of the same model.
 
 See [File storage](../guides/files.md) for the upload and serving flow.
+
+## polymorphic
+
+A reference to a record of one of several models. `commentable:polymorphic:post,photo` generates two fields, as if written `commentable_type:enum:post,photo commentable_id:integer`, plus:
+
+```sql
+CREATE INDEX index_comments_on_commentable ON comments (commentable_type, commentable_id);
+```
+
+```rust
+/// The record a comment's `commentable` points to (`commentable_type` and `commentable_id`).
+#[derive(Debug, Clone)]
+pub enum Commentable {
+    Post(crate::models::post::Post),
+    Photo(crate::models::photo::Photo),
+}
+
+/// The table a `commentable_type` points into.
+fn commentable_table(kind: CommentableType) -> &'static str {
+    match kind {
+        CommentableType::Post => "posts",
+        CommentableType::Photo => "photos",
+    }
+}
+```
+
+`create` checks `SELECT 1 FROM <table> WHERE id = ?1` for the pair ("must exist" on `commentable_id`), `update` when a change sets both. `comment.commentable(&ctx)` returns `Option<Commentable>`, and each listed model gets `post.comments(&ctx, page)`. With `?` both columns are optional. There is no foreign key: deleting a post leaves its comments. The listed models must exist (`src/models/post.rs`), except the model being generated.
+
+## attachments
+
+Many files per record: `photos:attachments` on `Album` generates the child model `AlbumPhoto` (`album:references file:attachment`, its own migration and factory) and, on `Album`, `attach_photos`, `replace_photos`, `purge_photos` and the file deletion in `delete`. The name is plural and takes no `?` or `^`; other generators (`migration`, `job`) refuse the type. See [Files](../guides/files.md#many-files-per-record).
 
 ## json
 

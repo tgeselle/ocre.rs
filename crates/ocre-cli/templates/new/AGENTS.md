@@ -26,6 +26,8 @@ on stdout (`"ok": true|false`, plus `error` and `hint` on failure).
 | CRUD resource (HTML pages; JSON in API-only apps) | `ocre g scaffold Post title:string body:text published:boolean author:references` |
 | Same, index page updated live in every open browser (WebSockets) | `ocre g scaffold Post title:string --realtime` |
 | Resource with an uploaded file (R2; adds the `STORAGE` binding) | `ocre g scaffold Photo title:string image:attachment notes:attachment?` |
+| Many files per record (child model, show page and API routes) | `ocre g scaffold Album title:string photos:attachments` |
+| Belongs to one of several models | `ocre g scaffold Comment body:text commentable:polymorphic:post,photo` |
 | JSON REST resource, `/api/posts` | `ocre g api Post title:string body:text` |
 | Same, also on `/graphql` (costs CPU, see below) | `ocre g api Post title:string --graphql` |
 | Model + `index`/`show` actions to fill in (lighter than scaffold) | `ocre g resource Tag name:string^ color:enum:red,green,blue` |
@@ -44,6 +46,8 @@ on stdout (`"ok": true|false`, plus `error` and `hint` on failure).
 | Scheduled task (Cron Trigger, UTC; English or cron) | `ocre g schedule nightly_cleanup "every day at 3am"` |
 | List scheduled tasks; run one now (`ocre dev` running) | `ocre schedules`, `ocre schedules run nightly_cleanup` |
 | Cache values in Workers KV (adds the `CACHE` binding) | `ocre g cache` |
+| Read-only JSON data compiled into the Worker | `ocre g data countries` (`crate::data::countries::all()`) |
+| Browser test (Playwright, run by `ocre test --e2e`) | `ocre g system_test signing_up` |
 | Turn the cache off / back on in `ocre dev` (`CACHE_STORE=null` in `.dev.vars`) | `ocre dev --no-cache` / `ocre dev --cache` |
 | GitHub Actions: checks on every push, `ocre deploy` on main (needs `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` secrets) | `ocre g ci` |
 | Installable app: web manifest, service worker, icon | `ocre g pwa` |
@@ -78,7 +82,7 @@ on stdout (`"ok": true|false`, plus `error` and `hint` on failure).
 | Check cloudflare.config.ts after editing it | `npx tsc -p .` |
 | Find a Cloudflare command `ocre` does not wrap | `npx cf cli search "list worker versions"`, then `npx cf <command> --help` |
 | Type-check | `cargo check --target wasm32-unknown-unknown` |
-| Unit tests + type-check (`--e2e`: also `tests/e2e.sh` against a local server, `$BASE_URL`) | `ocre test` |
+| Unit tests + type-check (`--e2e`: also the request tests of `tests/*.rs`, `tests/e2e.sh` and `tests/system/` against a fresh test database) | `ocre test` |
 
 Field types: `string`, `text`, `rich_text` (HTML from the Trix editor,
 sanitized on save; show it with `{{ x|rich_text }}`), `integer`, `float`, `decimal` (exact, as

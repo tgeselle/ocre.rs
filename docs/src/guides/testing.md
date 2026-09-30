@@ -1,45 +1,59 @@
 # Testing an Ocre app
 
-An Ocre app is tested today in three layers: native `cargo test` for code that does not touch Cloudflare bindings, `cargo check --target wasm32-unknown-unknown` as the type check of the real build, and end-to-end requests against `ocre dev`. `ocre test` runs all three in one command. This page shows what works, with the exact commands and their output, and lists what Ocre does not provide yet.
+An Ocre app is tested in four layers: native `cargo test` for code that touches no Cloudflare binding, `cargo check --target wasm32-unknown-unknown` for the real build, request tests that talk HTTP to the app running in workerd, and browser tests (Playwright) for pages with JavaScript. Generators write the tests for what they generate; `ocre test` runs the first two layers, `ocre test --e2e` all four, against a fresh test database.
 
 ## Before you start
 
 - An Ocre app created with `ocre new` (the examples use `ocre new blog --starter blog`, whose `Post` model has `title:string`, `body:text` and `published:boolean`).
 - Rust installed with rustup; the app's `rust-toolchain.toml` adds the `wasm32-unknown-unknown` target.
-- Node.js 22 or newer and the app's npm packages (`npm install`, run by `ocre new`), for `ocre dev` (it runs the app's `cf dev`).
-- No generator is needed: the tests below are added by hand.
+- Node.js 22 or newer and the app's npm packages (`npm install`, run by `ocre new`).
 
 ## What you can test, and where
 
-| Code | Native `cargo test` | `ocre dev` + HTTP requests |
+| Code | Native `cargo test` | Request tests (`ocre test --e2e`) |
 |---|---|---|
-| Pure functions (formatting, parsing, slugs, prices) | yes | yes |
-| A model's `validate()` on `New<Model>` / `<Model>Changes` | yes | yes |
-| Handlers without `State(ctx)` (`home`, `up`), askama templates | yes | yes |
+| Pure functions, a model's `validate()`, mailer functions (the `Email` they build), askama templates | yes | yes |
 | `ocre::password`, `ocre::token`, `ocre::jwt::{encode_with, decode_with}` | yes | yes |
-| Model queries (`create`, `find`, `update`...), uniqueness and foreign-key checks | no | yes |
-| Handlers taking `State(ctx)`, `Session`, `Flash`, `CurrentUser`, `BearerUser` | no | yes |
-| CSRF, CORS and security headers (`ocre::serve`) | no | yes |
-| Mailer functions (the `Email` they build), job structs, `ocre::mail::address_with_name` | yes | yes |
-| Sending mail, running jobs and crons, R2 files, KV cache, realtime | no | yes |
+| Model queries, uniqueness and reference checks, callbacks | no | yes |
+| Handlers with `State(ctx)`, `Session`, `Flash`, `Cookies`, `CurrentUser`; CSRF and security headers | no | yes |
+| Sending mail, jobs, crons, R2 files, KV cache, realtime broadcasts, mailboxes | no | yes |
+| Pages whose behavior needs JavaScript (htmx, Trix, uploads) | no | browser tests |
 
-Everything that reaches D1, KV, R2, Queues, Durable Objects or email goes through `ocre::Ctx`, and only `ocre::serve` (and the `queue`, `scheduled` and `email` entry points) can build one: a `Ctx` wraps the Worker's JavaScript environment, which exists only inside workerd. So that code runs in `ocre dev`, not in `cargo test`.
+Everything that reaches D1, KV, R2, Queues, Durable Objects or email goes through `ocre::Ctx`, which only exists inside workerd, so request tests reach it over HTTP.
 
-## What Ocre does not provide yet
+## The tests generators write
 
-- `ocre new` and the generators write no tests and no `tests/` directory.
-- There is no test client for handlers, no in-memory or test D1 database, and no fixtures or factories.
-- Integration tests in `tests/*.rs` cannot see the app. A generated app is a `cdylib` (the WebAssembly module), so Cargo has no library to link them to; a file `tests/external.rs` that names the crate fails with:
+| File | Written by | What it holds |
+|---|---|---|
+| `tests/app.rs` | `ocre new` | `/up` and the home page answer |
+| `tests/<plural>.rs` | `ocre g scaffold` | list, show, create, update, delete and a rejected invalid record |
+| `tests/api_<plural>.rs` | `ocre g api` | the same through the JSON API |
+| `tests/factories/<model>.rs` | `ocre g model` (and scaffold, api) | valid, unique attributes: `post()`, `.insert()`, `.form()`, `.json()` |
+| `tests/fixtures/<table>.yml` | you, or `ocre db dump --dir tests/fixtures` | named rows loaded into the test database before each run |
+| `tests/system/<name>.spec.ts` | `ocre g system_test <name>` | a browser test |
 
-```text
-error[E0433]: cannot find module or crate `blog` in this scope
- --> tests/external.rs:3:13
-  |
-3 |     let _ = blog::models::post::NewPost { title: "a".into(), body: "b".into(), published: false };
-  |             ^^^^ use of unresolved module or unlinked crate `blog`
+A generated request test:
+
+```rust,ignore
+// tests/posts.rs
+mod factories;
+
+use factories::post::post;
+use ocre::testing::Client;
+
+#[test]
+#[ignore = "request test: run with `ocre test --e2e`"]
+fn creates_a_post() {
+    let mut client = Client::new();
+    let created = client.post("/posts", &post().form());
+    let location = created.assert_status(303).location().unwrap_or_default().to_owned();
+    assert!(location.starts_with("/posts/"), "redirects to the new post: {location}");
+    assert_eq!(client.flash("notice").as_deref(), Some("Post was successfully created."));
+    client.follow_redirect(&created).assert_status(200).assert_contains("Post was successfully created.");
+}
 ```
 
-Put unit tests in a `#[cfg(test)] mod tests` inside the file they test, as below.
+`#[ignore]` marks the tests that need the running app: plain `cargo test` (and `ocre test`) skips them, `ocre test --e2e` runs them.
 
 ## Unit tests with cargo test
 
@@ -127,13 +141,7 @@ The first `cargo test` compiles every dependency natively (19 seconds on the mac
 
 ### Test async code
 
-Handlers and Ocre's password functions are `async`. The app has no async runtime outside workerd, so add a small executor as a development dependency (dev-dependencies are not part of the WebAssembly build):
-
-```sh
-cargo add --dev pollster@1
-```
-
-Then block on the future in the test. This module, at the end of `src/lib.rs`, tests the starter's `home` and `up` handlers and the functions `ocre g auth` builds on:
+Handlers and Ocre's password functions are `async`. The app has no async runtime outside workerd; `ocre::testing::block_on` (the `testing` feature a generated app enables in `[dev-dependencies]`) runs a future on the test thread. This module, at the end of `src/lib.rs`, tests the starter's `home` and `up` handlers and the functions `ocre g auth` builds on:
 
 ```rust
 // at the end of src/lib.rs
@@ -143,19 +151,19 @@ mod tests {
 
     #[test]
     fn home_page_renders() {
-        let Html(page) = pollster::block_on(home()).unwrap();
+        let Html(page) = ocre::testing::block_on(home()).unwrap();
         assert!(page.contains("<h1>blog</h1>"), "{page}");
     }
 
     #[test]
     fn up_answers_ok() {
-        assert_eq!(pollster::block_on(up()), "OK");
+        assert_eq!(ocre::testing::block_on(up()), "OK");
     }
 
     #[test]
     fn passwords_hash_natively() {
-        let digest = pollster::block_on(ocre::password::hash("correct horse")).unwrap();
-        assert!(pollster::block_on(ocre::password::verify("correct horse", &digest)).unwrap());
+        let digest = ocre::testing::block_on(ocre::password::hash("correct horse")).unwrap();
+        assert!(ocre::testing::block_on(ocre::password::verify("correct horse", &digest)).unwrap());
     }
 
     #[test]
@@ -202,269 +210,144 @@ cargo check --target wasm32-unknown-unknown
 
 This check does not compile `#[cfg(test)]` code, and `cargo test` does not compile for WebAssembly: run both. A function used only by tests shows up here as a `dead_code` warning ("function `slugify` is never used") until app code calls it.
 
-## All checks in one command: ocre test
+## Request tests: ocre test --e2e
 
-`ocre test` runs `cargo test`, then `cargo check --target wasm32-unknown-unknown`, and stops at the first failure. Arguments after `--` go to `cargo test`:
+`ocre test --e2e` runs, in order and stopping at the first failure:
+
+1. `cargo test` and the wasm32 check;
+2. a fresh test database in `.wrangler/test-state` (the development data in `.wrangler/state` is untouched): migrations, then `tests/fixtures/*.yml`;
+3. one server for the whole run (the app's wrangler, as `cf dev` runs it) on port 8788 (`--port` to change it), logging to `.wrangler/test-state/dev.log`;
+4. `cargo test -- --ignored --test-threads=1`, with `OCRE_TEST_URL`, `OCRE_TEST_STATE` and `OCRE_TEST_LOG` set for `ocre::testing`;
+5. `tests/e2e.sh` with `BASE_URL`, when the app has one;
+6. the browser tests of `tests/system/`, when there are some.
 
 ```sh
-ocre test                  # both steps
-ocre test -- post::tests   # only the tests whose name contains post::tests
+ocre test --e2e
+ocre test --e2e -- posts             # only request tests whose name contains "posts"
+ocre test --e2e --json               # one JSON report on stdout, tool output on stderr
 ```
 
 ```text
-...
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.52s
-  cargo test: ok
-  cargo check --target wasm32-unknown-unknown: ok
+{"command":"test","ok":true,"ran":["cargo test: ok","cargo check --target wasm32-unknown-unknown: ok","test database .wrangler/test-state: migrated, tests/fixtures loaded","cargo test -- --ignored against the test server on port 9555: ok","playwright test (tests/system) against the test server on port 9555: ok"]}
 ```
 
-It exits with status 1 when a step fails, so it can run in CI; `ocre test --json` prints `{"command":"test","ok":true,"ran":["cargo test: ok","cargo check --target wasm32-unknown-unknown: ok"]}` on stdout and cargo's output on stderr. With `--e2e` it also runs your end-to-end script against a server it starts (see [below](#run-the-script-with-ocre-test-e2e)).
+Tests share one database and run one at a time: create your own records (factories give unique values) and assert on them, not on global counts. There are no per-test transactions: the database belongs to the server process.
 
-## End-to-end tests against ocre dev
+### The client
 
-`ocre dev` applies local migrations and runs the app in workerd, the runtime Cloudflare uses in production, with a local D1 database, queues, R2 and KV under `.wrangler/state`. Everything the unit tests cannot reach is tested here, with HTTP requests.
+`ocre::testing::Client` sends requests to the test server and keeps cookies like a browser (the session, its flash messages, your own cookies):
 
-### Start the app
+| Method | Does |
+|---|---|
+| `get`, `post(path, &form)`, `post_json`, `patch_json`, `put_json`, `delete`, `request` | send a request; forms are URL-encoded |
+| `follow_redirect(&response)` | GET the `Location` |
+| `header(name, value)`, `cross_site()`, `htmx()` | extra headers (a cross-site form, an htmx request) |
+| `session()`, `flash(kind)`, `cookie(name)`, `set_cookie(name, value)` | read the decrypted session, the pending flash, a cookie |
+| `deliveries()` | emails the app sent (`MAIL_ADAPTER=log`), from `/ocre/dev/mailers/sent.json` |
+| `broadcasts()` | realtime messages sent (`/ocre/dev/realtime/sent.json`) |
+| `jobs()` | jobs enqueued and those the local queue ran, with `done`, `discarded` or `retried` (`/ocre/dev/jobs.json`, merged by the first `ocre g job`) |
+| `receive_email(from, to, subject, body)` | delivers a message to the app's mailbox (`ocre g mailbox`) through the local Email Routing endpoint |
 
-```sh
-ocre dev                # http://localhost:8787
-ocre dev --port 8805    # another port, e.g. for a second app
+A `Response` has `status`, `headers`, `body` and the assertions `assert_status`, `assert_success`, `assert_redirect_to`, `assert_contains`, `assert_not_contains` and `assert_header`, each returning the response for chaining.
+
+```rust,ignore
+use ocre::testing::{Client, eventually};
+
+#[test]
+#[ignore = "request test: run with `ocre test --e2e`"]
+fn signing_up_sends_a_welcome_email_from_a_job() {
+    let mut client = Client::new();
+    client.post("/signups", &[("email", "ada@example.com")]).assert_status(303);
+    assert_eq!(client.jobs().enqueued.last().unwrap().name(), Some("send_welcome"));
+    // Local queues deliver within a few seconds.
+    eventually(|| client.jobs().performed.iter().any(|run| run.job == "send_welcome" && run.outcome == "done").then_some(()));
+    assert_eq!(client.deliveries().last().unwrap().to, ["ada@example.com"]);
+}
 ```
 
-Wait for the `Ready on http://localhost:8787` line, printed by the wrangler that `cf dev` runs (the first build compiles every dependency to WebAssembly: a minute or two).
+### Test data: factories and fixtures
 
-### Send requests with curl
+A factory builds valid attributes, unique per call, and writes them with one call to the test database:
 
-```sh
-curl -s http://localhost:8787/up
+```rust,ignore
+let id = post().insert();                                             // a row
+let draft = factories::post::Post { published: false, ..post() }.insert(); // with changes
+client.post("/posts", &post().form());                                // as a form
 ```
 
-```text
-OK
+Factories of models with `references` create the parent first (`with_parents`). Fixtures are named rows for data every test can rely on, in Rails' format:
+
+```yaml
+# tests/fixtures/posts.yml
+DEFAULTS: &defaults
+  published: true
+hello:
+  <<: *defaults
+  title: Hello $LABEL      # $LABEL is the row's label
+  author: ada              # author_id = id of the fixture labelled `ada` in users.yml
 ```
 
-Create a post and keep only the headers that matter:
+Read them with `ocre::testing::fixture_id("hello")` and `fixture("posts", "hello")`. `ocre::testing::sql(query)`, `count(table)` and `insert(table, values)` reach the test database directly.
 
-```sh
-curl -si -X POST http://localhost:8787/posts -d 'title=Hello&body=First+post&published=true' \
-  | grep -iE '^(HTTP|location|set-cookie)'
-```
+### Assertions, the server log and time
 
-```text
-HTTP/1.1 303 See Other
-Location: /posts/1
-Set-Cookie: _ocre_session=UXRzDZDuYNFoQp1fytfMPOeFjEXsJ4lhsLxC3bcIDa0Hfe9ziNyrcfnA8s0dWm80OUDst+yDXXHOjD9xt7QsKGrxxsjg5bdbmPHu3vBQ9nqNtQ%3D%3D; HttpOnly; SameSite=Lax; Path=/
-```
+- `assert_difference(|| count("posts"), 1, || { ... })`, `assert_no_difference`, `assert_changes`, `assert_no_changes`: Rails' names.
+- `Log::mark()` then `log.wait_for("[ocre jobs] send_welcome done")`: lines the server printed since the mark.
+- `eventually(|| ...)`: retries a check for a few seconds (queues, broadcasts).
+- `travel_to(unix)`, `travel(seconds)`, `freeze_time()`, `travel_back()`: `ocre::now()` in the test process (native code under test, such as token expiry).
+- `redact(text)`: replaces ids, dates and tokens, for stable snapshots.
 
-The session cookie carries the flash message "Post was successfully created." to the next page: send it back with `-H 'Cookie: _ocre_session=...'` to see it.
+### A shell script: tests/e2e.sh
 
-A failed validation is a 422 with the messages in the page:
-
-```sh
-curl -s -X POST http://localhost:8787/posts -d 'title=&body=' | grep '<li>'
-```
-
-```text
-    <li>Title can&#39;t be blank</li><li>Body can&#39;t be blank</li>
-```
-
-curl sends neither `Sec-Fetch-Site` nor `Origin`, so Ocre's CSRF check lets it through, as it does any non-browser client. To test the check, send the header a browser sends for a form posted from another site:
-
-```sh
-curl -si -X POST http://localhost:8787/posts -H 'Sec-Fetch-Site: cross-site' -d 'title=x&body=y'
-```
-
-```text
-HTTP/1.1 403 Forbidden
-Transfer-Encoding: chunked
-Content-Type: text/plain; charset=utf-8
-referrer-policy: strict-origin-when-cross-origin
-x-content-type-options: nosniff
-x-frame-options: SAMEORIGIN
-x-permitted-cross-domain-policies: none
-x-xss-protection: 0
-
-Forbidden: cross-site request. Add the origin to ALLOWED_ORIGINS to allow it.
-```
-
-### Inspect the database with ocre sql
-
-`ocre sql` runs SQL on the same local database, also while `ocre dev` runs:
-
-```sh
-ocre sql "SELECT id, title, published FROM posts"
-ocre sql "SELECT id, title FROM posts" --json
-```
-
-```text
-id | title | published
----+-------+----------
-1  | Hello | 1
-(1 row)
-{"command":"sql","ok":true,"rows":[{"meta":{"duration":0},"results":[{"id":1,"title":"Hello"}],"success":true}]}
-```
-
-With `--json`, the rows are in `rows[0].results` (one entry per statement), which scripts can compare with `jq`.
-
-### Start from a known state with ocre db reset
-
-`ocre db reset` deletes the local database (`.wrangler/state/v3/d1`), applies every migration, then runs `db/seeds.sql` when the app has one. Put the data your tests expect in the seeds:
-
-```sql
--- db/seeds.sql: known data for local tests
-INSERT INTO posts (title, body, published) VALUES ('Seeded post', 'From db/seeds.sql', 1);
-```
-
-Stop `ocre dev` first. A running `ocre dev` keeps the deleted database open, and every query then fails until it restarts: requests answer 500 and the log shows `✘ [ERROR] [ocre] D1 query failed: Error: internal error; ...`. The order is:
-
-```sh
-# 1. stop `ocre dev` (Ctrl-C)
-ocre db reset
-# 2. start `ocre dev` again
-```
-
-```text
- ⛅️ wrangler 4.143.0
-...
-┌───────────────────────┬────────┐
-│ name                  │ status │
-├───────────────────────┼────────┤
-│ 0001_create_posts.sql │ ✅     │
-└───────────────────────┴────────┘
-...
-🚣 1 command executed successfully.
-...
-  deleted .wrangler/state/v3/d1
-  applied migrations (--local)
-  loaded db/seeds.sql (--local)
-```
-
-With `--json`, wrangler's output (local database commands run the app's wrangler) goes to stderr and stdout holds one object listing the same steps, for example `{"command":"db reset","ok":true,"ran":["deleted .wrangler/state/v3/d1","applied migrations (--local)"]}` for an app without seeds. `ocre db reset` only touches the local database; it has no `--remote` flag.
-
-### A smoke-test script
-
-A shell script with curl is enough to check the important paths after each change. Status codes are the most stable thing to assert:
+Checks that are easier with curl go in `tests/e2e.sh`, run with `BASE_URL` set:
 
 ```sh
 #!/bin/sh
-# script/smoke.sh: end-to-end checks against a running `ocre dev`.
-# Usage: BASE=http://localhost:8787 sh script/smoke.sh
 set -eu
-BASE=${BASE:-http://localhost:8787}
-failures=0
-
-# expect <description> <expected> <actual>
-expect() {
-  if [ "$2" = "$3" ]; then
-    echo "ok   $1"
-  else
-    echo "FAIL $1: expected '$2', got '$3'"
-    failures=$((failures + 1))
-  fi
-}
-
 status() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
-
-expect "health check" 200 "$(status "$BASE/up")"
-expect "seeded post is listed" 1 "$(curl -s "$BASE/posts" | grep -c 'Seeded post')"
-expect "create redirects" 303 "$(status -X POST "$BASE/posts" -d 'title=Smoke&body=test')"
-expect "blank title is refused" 422 "$(status -X POST "$BASE/posts" -d 'title=&body=x')"
-expect "cross-site form is refused" 403 \
-  "$(status -X POST "$BASE/posts" -H 'Sec-Fetch-Site: cross-site' -d 'title=x&body=y')"
-expect "missing post is 404" 404 "$(status "$BASE/posts/999")"
-
-[ "$failures" -eq 0 ] || { echo "$failures check(s) failed"; exit 1; }
-echo "all checks passed"
+[ "$(status "$BASE_URL/up")" = 200 ]
+[ "$(status -X POST "$BASE_URL/posts" -H 'Sec-Fetch-Site: cross-site' -d 'title=x&body=y')" = 403 ]
 ```
 
-After `ocre db reset` and a fresh `ocre dev`:
+## Browser tests: ocre g system_test
+
+Pages that need JavaScript (htmx swaps, the rich text editor, direct uploads) are tested in a real browser with [Playwright](https://playwright.dev), Rails' system tests:
 
 ```sh
-sh script/smoke.sh
+ocre g system_test creating_a_post
+npm install                            # @playwright/test, added to package.json
+npx playwright install chromium        # once per machine
 ```
 
-```text
-ok   health check
-ok   seeded post is listed
-ok   create redirects
-ok   blank title is refused
-ok   cross-site form is refused
-ok   missing post is 404
-all checks passed
+The first run writes `playwright.config.ts`: tests in `tests/system/`, the base URL from `BASE_URL`, one worker (the database is shared), each test on a desktop and a phone screen, and a screenshot and trace of each failure in `test-results/` (git-ignored). Edit the generated test:
+
+```ts
+// tests/system/creating_a_post.spec.ts
+import { expect, test } from "@playwright/test";
+
+test("Creating a post", async ({ page }) => {
+  await page.goto("/posts/new");
+  await page.getByLabel("Title").fill("Hello from Playwright");
+  await page.getByRole("button", { name: /create|save/i }).click();
+  await expect(page.getByText("Post was successfully created.")).toBeVisible();
+});
 ```
 
-The script exits with status 1 when a check fails, so an agent or a CI job can run it.
+`ocre test --e2e` runs them after the request tests, with `node_modules/.bin/playwright test`. Assertions wait for the page, so no sleeps are needed. Other browsers are more `projects` in the config (`devices["Desktop Firefox"]`, then `npx playwright install firefox`). Against `ocre dev` instead: `BASE_URL=http://localhost:8787 npx playwright test --ui`.
 
-### Run the script with ocre test --e2e
+Errors: `tests/system has tests but Playwright is not installed` (run `npm install`), and `playwright test failed (exit status: 1)` with a hint pointing to `test-results/`.
 
-`ocre test --e2e` runs the whole chain unattended: `cargo test`, the wasm32 check, then local migrations, one `cf dev` on port 8788 (`--port` to change it) started for the run, and `sh tests/e2e.sh` with `BASE_URL=http://localhost:8788` once the server is ready. The server stops when the script ends, and the command fails when the script exits non-zero. Save the script above as `tests/e2e.sh`, reading `BASE_URL` instead of `BASE`:
+## Manual checks against ocre dev
 
-```sh
-BASE=${BASE_URL:-http://localhost:8787}
-```
+`ocre dev` runs the app with the development data. `ocre sql "SELECT ..."` reads the same database while it runs, `ocre db reset` (with `ocre dev` stopped) recreates it from the migrations and `db/seeds.sql`, and the development pages show what has no HTTP answer: `/ocre/dev/mailers` (emails), `/ocre/dev/mailbox` (deliver an email), `/ocre/dev/jobs.json` (jobs), `/ocre/dev/realtime/sent.json` (broadcasts).
 
-The server uses the same local database as `ocre dev`: run `ocre db reset` first when the checks expect the seeds. Without `tests/e2e.sh`, `ocre test --e2e` stops before running anything with ``error: tests/e2e.sh not found``. See [ocre test](../reference/cli.md#ocre-test).
+## CI
 
-### Emails, jobs and scheduled tasks
-
-These leave traces in the `ocre dev` output rather than in responses:
-
-- Emails: with `MAIL_ADAPTER=log` (written to `.dev.vars` by `ocre new`), each email is printed between `[ocre mail]` lines, links included, and the last 20 are listed as JSON at `http://localhost:8787/ocre/dev/mailers/sent.json`: `curl -s http://localhost:8787/ocre/dev/mailers/sent.json | jq -r '.[-1].email.text'` reads the magic-link or reset token of the last one. Mailer previews are at `/ocre/dev/mailers` (see [Email](email.md#preview-and-inspect-emails-in-development)).
-- Jobs: they run within about 5 seconds of being enqueued; look for `[ocre jobs] <job> done` (see [Background jobs and schedules](jobs.md)).
-- Scheduled tasks: fire one with `ocre schedules run <task>` (or `curl 'http://localhost:8787/cdn-cgi/local/scheduled?cron=0+3+*+*+*'`, the cron expression URL-encoded) and read the `[ocre cron]` lines.
-- Incoming email: the form at `http://localhost:8787/ocre/dev/mailbox`, or POST a raw message to `http://localhost:8787/cdn-cgi/local/email?from=...&to=...` (see [Email](email.md#test-it-locally)).
-
-A test script can redirect `ocre dev`'s output to a file and wait for the line it expects.
-
-## How the Ocre repository tests generated apps
-
-Ocre's own end-to-end suite, `crates/ocre-cli/tests/system/e2e.rs`, is a working example of the approach above written in Rust. Each test:
-
-1. creates an app with the real CLI (`ocre new e2e --starter blog`, then generators such as `ocre g scaffold Book ...`);
-2. runs `ocre dev --port <free port>` in its own process group, with stdout and stderr in a log file, and polls the base URL until it answers (up to 240 seconds for the first build);
-3. sends requests with the `ureq` HTTP client, redirects turned off, and asserts on status codes, `Location`, headers and HTML (for example `<li>Title can&#39;t be blank</li>` on a 422);
-4. carries the `_ocre_session` cookie from one response to the next like a browser, to test flash messages, sign-in and CSRF (`sec-fetch-site: cross-site` must get 403);
-5. reads the log file for what has no HTTP answer: emailed tokens printed by the `log` mail adapter, `[ocre jobs]` and `[ocre cron]` lines;
-6. kills the process group when done.
-
-The start-up part, from the file:
-
-```rust
-fn start(sandbox: &Sandbox, root: &Path) -> Server {
-    let port = free_port().to_string();
-    let mut command = sandbox.command(&["dev", "--port", &port], root);
-    // ...
-    // One target dir for every run, so the wasm dependencies compile once.
-    command.env("CARGO_TARGET_DIR", Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/e2e-app"));
-    let log = sandbox.work.join("dev.log");
-    let output = std::fs::File::create(&log).unwrap();
-    let child = command.process_group(0).stdout(output.try_clone().unwrap()).stderr(output).spawn().unwrap();
-    // The dev server listens on `localhost`, which is IPv6-only on some Linux hosts.
-    let mut server = Server { child, base: format!("http://localhost:{port}") };
-    let deadline = Instant::now() + Duration::from_secs(240);
-    while agent().get(&server.base).call().is_err() {
-        // ...
-        std::thread::sleep(Duration::from_secs(1));
-    }
-    server
-}
-```
-
-In the Ocre repository, it runs with:
-
-```sh
-cargo test -p ocre-cli --test e2e -- --ignored
-```
-
-To do the same for your app, put such a harness in a separate Cargo project next to it (the app itself is a `cdylib`), pointed at an already created app instead of generating one. Sharing one `CARGO_TARGET_DIR` between runs, as above, keeps the WebAssembly build incremental.
+`ocre ci` runs `cargo fmt --check`, clippy with `-D warnings`, `cargo test`, the wasm32 check and `ocre i18n missing`; `ocre g ci` writes the same steps as a GitHub Actions workflow. Generators format the Rust they write with the app's `rustfmt.toml`, so a freshly generated app passes. Add `ocre test --e2e` to the workflow to run the request and browser tests too (the runner needs Node.js and, for browser tests, `npx playwright install --with-deps chromium`).
 
 ## Reference
 
-- [CLI commands](../reference/cli.md): [`ocre test`](../reference/cli.md#ocre-test), [`ocre dev`](../reference/cli.md#ocre-dev), [`ocre db reset`](../reference/cli.md#ocre-db-reset), [`ocre db seed`](../reference/cli.md#ocre-db-seed), [`ocre sql`](../reference/cli.md#ocre-sql)
-- [Validations](validations.md): what `validate()`, `create` and `update` check
-- [Sessions, flash and security](security.md): the CSRF check the smoke test exercises
-- [Email](email.md), [Background jobs and schedules](jobs.md): what to read in the `ocre dev` output
-- [Architecture](../explanations/architecture.md): why bindings only exist inside workerd
-- The `ocre` crate's [rustdoc](/api/ocre/index.html): `ocre::password`, `ocre::jwt::{encode_with, decode_with}`, `ocre::Validator`
+- [CLI commands](../reference/cli.md): [`ocre test`](../reference/cli.md#ocre-test), [`ocre ci`](../reference/cli.md#ocre-ci), [`ocre db dump`](../reference/cli.md#ocre-db-dump), [`ocre sql`](../reference/cli.md#ocre-sql)
+- [Generators](../reference/generators.md): factories, `ocre g system_test`
+- [Email](email.md), [Background jobs and schedules](jobs.md), [Realtime](realtime.md): what the captures list
+- The `ocre::testing` [rustdoc](/api/ocre/testing/index.html)

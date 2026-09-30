@@ -214,8 +214,14 @@ fn rustfmt(root: &std::path::Path, contents: String) -> String {
         .stderr(Stdio::null())
         .spawn();
     let Ok(mut child) = child else { return contents };
-    let written = child.stdin.take().is_some_and(|mut stdin| stdin.write_all(contents.as_bytes()).is_ok());
-    match child.wait_with_output() {
+    // Written from another thread: a formatter streaming its output would
+    // otherwise fill the stdout pipe while this one still writes stdin.
+    let stdin = child.stdin.take();
+    let input = contents.clone();
+    let writer = std::thread::spawn(move || stdin.is_some_and(|mut stdin| stdin.write_all(input.as_bytes()).is_ok()));
+    let output = child.wait_with_output();
+    let written = writer.join().unwrap_or(false);
+    match output {
         Ok(output) if written && output.status.success() => String::from_utf8(output.stdout).unwrap_or(contents),
         _ => contents,
     }

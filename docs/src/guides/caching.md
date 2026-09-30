@@ -154,6 +154,7 @@ The explicit forms, for when a closure does not fit (a value refreshed by a sche
 | `ocre::cache::read::<T>(&ctx, key)` | `Result<Option<T>>`: `None` when absent, expired or undecodable | 1 read | Logged; `None` |
 | `ocre::cache::write(&ctx, key, &value, ttl)` | `Result<()>` | 1 write | Error (500) |
 | `ocre::cache::delete(&ctx, key)` | `Result<()>`; deleting an absent key succeeds | 1 write | Error (500) |
+| `ocre::cache::clear(&ctx, prefix, limit)` | `Result<Cleared>`: how many were deleted, and `more` when keys with the prefix remain | 1 list + 1 write per key | Error (500) |
 
 ```rust
 // in a scheduled task: refresh the value before visitors ask for it
@@ -163,6 +164,15 @@ ocre::cache::write(ctx, "rates:v1", &rates, Duration::from_secs(6 * 3600)).await
 // in a handler: use it if present
 let rates: Option<Rates> = ocre::cache::read(&ctx, "rates:v1").await?;
 ```
+
+`clear` is Rails' `Rails.cache.clear`, bounded: it deletes at most `limit` values whose key starts with `prefix` (`""` for all, `"views/"` for fragments), since each delete spends one of the free plan's 1,000 daily KV writes. Call it again, for example from a scheduled task, while `more` is true:
+
+```rust,ignore
+let cleared = ocre::cache::clear(&ctx, "views/", 200).await?;
+ctx.log().info(format_args!("cleared {} fragments, more: {}", cleared.deleted, cleared.more));
+```
+
+Bumping the version in the keys (`v1` to `v2`) needs no delete at all: old values expire with their TTL.
 
 ## Caching HTML fragments
 

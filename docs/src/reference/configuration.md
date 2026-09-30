@@ -20,6 +20,7 @@ This page describes every configuration file of an Ocre app (`cloudflare.config.
 | `.dev.vars` | `ocre new` | no (`.gitignore`) | Secrets and variable overrides for `ocre dev` only |
 | `Cargo.toml` | `ocre new`, then `ocre g api --graphql` and `--realtime` (features) | yes | Rust dependencies, Ocre features, API-only mode |
 | `rust-toolchain.toml` | `ocre new` | yes | Stable Rust with the `wasm32-unknown-unknown` target |
+| `rustfmt.toml` | `ocre new` | yes | The formatting style generators and `ocre ci` use |
 
 Every `ocre` command that runs inside an app looks for the nearest `cloudflare.config.ts` in the current directory or its parents. An app that still has only a `wrangler.toml` is refused with a hint pointing to [Upgrading from wrangler.toml](../guides/upgrading.md).
 
@@ -507,6 +508,21 @@ See [Email](../guides/email.md).
 - Value: the base URL of a public bucket, an `r2.dev` URL or a custom domain connected to it (dashboard: R2 > bucket > Settings > Public access), e.g. `https://files.example.com`.
 - Errors (500, logged) when missing: ``public file URLs need the STORAGE_PUBLIC_URL variable. Fix: ...``. See [File storage](../guides/files.md#public-files).
 
+### D1_REPLICAS
+
+- Kind: variable. Optional.
+- Value: `on` routes each request's queries through a D1 session (read replicas, each visitor reading their own writes); anything else, or no variable, queries the database directly. Enable read replication on the database too. See [Read replicas](../guides/models.md#read-replicas).
+
+### CACHE_STORE
+
+- Kind: variable. Optional.
+- Value: `kv` (default) stores `ocre::cache` values in the `CACHE` namespace; `null` turns caching off without code changes. `ocre dev --no-cache` writes `CACHE_STORE=null` into `.dev.vars` and `--cache` removes it. See [Caching](../guides/caching.md).
+
+### APP_URL
+
+- Kind: variable. Optional; required by `ocre::mail::url`.
+- Value: the app's public base URL (`https://www.example.com`, `http://localhost:8787` in `.dev.vars`), joined to paths for links in emails sent from jobs, where there is no request to read the host from.
+
 ### LOG_LEVEL
 
 - Kind: variable. Optional.
@@ -670,6 +686,17 @@ mode = "api"
 ```
 
 The generators read `mode = "api"`: `ocre g scaffold` then generates a JSON API (like `ocre g api`), and `ocre g mailer` builds the email text with `format!` instead of askama templates.
+
+## rustfmt.toml
+
+`ocre new` writes the formatting style Ocre's own code uses:
+
+```toml
+max_width = 120
+use_small_heuristics = "Max"
+```
+
+Generators pipe the Rust they write through `rustfmt` with it, and `ocre ci` runs `cargo fmt --check`, so a generated app is formatted from the start. Change it freely: later generated code follows it.
 
 ## rust-toolchain.toml
 

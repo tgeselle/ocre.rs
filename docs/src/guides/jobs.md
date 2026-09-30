@@ -578,6 +578,15 @@ Rails' rake tasks and Loco's `cargo loco task` run app code from a terminal. A W
 
 A job is a plain struct: build it in a unit test and check what it holds, or test the functions `perform` calls. `perform` itself needs a `Ctx`, which only exists inside workerd, so run it end to end in `ocre dev`: enqueue through a request, then read the `[ocre jobs]` lines, the database (`ocre sql`), or the emails it sent at `http://localhost:8787/ocre/dev/mailers/sent.json` (see [Email](email.md#preview-and-inspect-emails-in-development)). In a handler, `job.perform(&ctx).await` runs a job inline, Rails' `perform_now`, with the same code as the queue.
 
+Request tests (`ocre test --e2e`) check them with `ocre::testing::Client::jobs()`, Rails' `assert_enqueued_with` and `assert_performed_jobs`: it reads `GET /ocre/dev/jobs.json`, which the first `ocre g job` merges into `routes()` (debug builds only, a 404 after `ocre deploy`), and lists the last 50 jobs enqueued (`queue`, `job` as JSON, `name()`) and the last 50 runs (`job`, `outcome`: `done`, `discarded` or `retried`):
+
+```rust,ignore
+let mut client = ocre::testing::Client::new();
+client.post("/signups", &[("email", "ada@example.com")]);
+assert_eq!(client.jobs().enqueued.last().unwrap().name(), Some("send_welcome"));
+ocre::testing::eventually(|| client.jobs().performed.iter().any(|run| run.job == "send_welcome" && run.outcome == "done").then_some(()));
+```
+
 ## Deploy
 
 `ocre deploy` handles the queues and crons of `cloudflare.config.ts`:

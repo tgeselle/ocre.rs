@@ -181,6 +181,26 @@ Kinds are free-form; generated code uses `notice` and `alert`, and generated tem
 
 Setting a second message of the same kind in one request replaces the first. `session.clear()` keeps pending flash messages, so "Signed out." survives the logout that empties the session. Flash messages live in the session cookie, so they count toward its 4 KB: keep them to a sentence.
 
+For a message on the page being rendered (Rails' `flash.now`), add it to the `Flash` the view gets, without touching the session: `render(&EditView { flash: flash.now("alert", "Check the highlighted fields."), .. })`. To carry the messages one more request (Rails' `flash.keep`), for example when a page redirects again before showing them, call `session.keep_flash(&flash)?`.
+
+## Cookies
+
+The session is the place for per-visitor state. For cookies that outlive it or that other parts of the site read, take `ocre::Cookies` in the handler (Rails' `cookies`, `cookies.signed` and `cookies.encrypted`):
+
+```rust,ignore
+use std::time::Duration;
+use ocre::{Cookies, Result};
+
+async fn preferences(cookies: Cookies) -> Result<String> {
+    cookies.set("theme", "dark", Some(Duration::from_secs(365 * 86_400)))?;       // readable and changeable by the browser
+    cookies.set_signed("seen_banner", "1", None)?;                                 // readable, tamper-proof (HMAC)
+    cookies.set_encrypted("remember_token", "a1b2c3", Some(Duration::from_secs(30 * 86_400)))?; // hidden and tamper-proof
+    Ok(format!("{:?} {:?}", cookies.get("theme"), cookies.signed("seen_banner")?))
+}
+```
+
+`get`, `signed` and `encrypted` read the request's cookies (`None` when absent, or changed by the client for the last two); `remove(name)` deletes one. Cookies set by a handler go out with the response, `HttpOnly`, `SameSite=Lax`, `Path=/` and `Secure` over HTTPS. Signed and encrypted cookies use keys derived from `SECRET_KEY_BASE`, and values made with a key of `SECRET_KEY_BASE_PREVIOUS` still read. The session cookie's name (`_ocre_session`) is refused.
+
 ## Keys and rotation
 
 `SECRET_KEY_BASE` must be set and at least 64 characters long. `ocre secret` prints a new random value (128 hex characters):
@@ -574,7 +594,6 @@ cargo clippy --target wasm32-unknown-unknown -- -D warnings   # Rust lints on th
 
 ## What is not included
 
-- **Encrypted or signed cookies other than the session** (Rails' `cookies.encrypted` and `cookies.signed`): store such values in the session, which is encrypted.
 - **A `force_ssl` switch**: see [HTTPS and HSTS](#https-and-hsts).
 - **Roles, two-factor authentication and account lockout**: see [Authentication](authentication.md#what-is-not-included).
 - **Dependency scanning in new apps**: see [Dependency and code scanning](#dependency-and-code-scanning).
