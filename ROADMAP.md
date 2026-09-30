@@ -4,7 +4,7 @@ Feature-level inventory of Rails 8.1 and Loco 1.2, with what Ocre has and how
 each part maps to Cloudflare's free plan. Collected from the official Rails
 guides and the Loco documentation source; every item links to its page.
 
-993 features: 739 done, 76 partial, 26 to do, 152 not applicable on Workers.
+993 features: 740 done, 79 partial, 18 to do, 156 not applicable on Workers.
 
 Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason given).
 (R) Rails, (L) Loco.
@@ -316,7 +316,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** axum handlers and routers, askama templates compiled into the binary, htmx instead of Turbo/Stimulus, Workers Static Assets for files (free, not counted as Worker requests). tower middlewares that do not need tokio compile to WebAssembly.
 
-202 features: 186 done, 1 partial, 4 to do, 11 not applicable.
+202 features: 186 done, 2 partial, 0 to do, 14 not applicable.
 
 ### Controllers
 
@@ -396,7 +396,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [x] **Parametric scopes** (R): scope with dynamic segments (e.g. :account_id) prefixing a group of routes. *Ocre: `.nest("/{account_id}", ..)` with `Path` in handlers.* [routing](https://guides.rubyonrails.org/routing.html)
 - [x] **Translated paths** (R): Localize resource path segments via scope path_names/path:. *Ocre: one route per language to the same handler, documented.* [routing](https://guides.rubyonrails.org/routing.html)
 - [x] **Route inspection** (R): bin/rails routes with grep/controller filters, expanded view, --unused, and /rails/info/routes. *Ocre: `ocre routes [filter] [--json]`, following `merge` and `nest`.* [routing](https://guides.rubyonrails.org/routing.html)
-- [ ] **Route testing assertions** (R): assert_generates, assert_recognizes and assert_routing. [routing](https://guides.rubyonrails.org/routing.html)
+- [~] **Route testing assertions** (R): assert_generates, assert_recognizes and assert_routing. *Ocre: `ocre routes --json` lists the routes and request tests hit them; no assertion helpers.* [routing](https://guides.rubyonrails.org/routing.html)
 - [x] **Split route files with draw** (R): Break routes.rb into files under config/routes loaded with draw. *Ocre: one `routes()` per module.* [routing](https://guides.rubyonrails.org/routing.html)
 - [-] **Routes in console** (R): Call path helpers via app / Rails.application.routes.url_helpers in the console. *Not applicable: no interactive process on Workers.* [routing](https://guides.rubyonrails.org/routing.html)
 
@@ -505,9 +505,9 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [x] **SPA fallback routing** (L): Pointing the static fallback at index.html lets client-side routes survive a hard refresh. *Ocre: `not_found_handling = "single-page-application"` under `[assets]`, documented.* [loco/how-to/serve-assets](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/serve-assets.md)
 - [x] **Precompressed assets and cache-control** (L): Serves .gz siblings of files when they exist, and sets a configurable Cache-Control header on static responses. *Ocre: Cloudflare compresses at the edge; `public/_headers` sets `Cache-Control`.* [loco/how-to/serve-assets](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/serve-assets.md)
 - [x] **Embedded assets (embedded_assets)** (L): A build-time feature that compiles static files and view templates into the binary for single-binary deploys, with no controller changes. *Ocre: templates are compiled into the Worker; `public/` deploys with each Worker version.* [loco/how-to/serve-assets](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/serve-assets.md)
-- [ ] **Typed React SPA frontend** (L): The clientside starter creates a Vite, React, React Router and TanStack Query frontend/ served from frontend/dist, with a Vite dev proxy to the API. [loco/how-to/build-a-spa](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/build-a-spa.md)
-- [ ] **Rust-to-TypeScript DTO bindings** (L): DTOs deriving ts-rs export TypeScript types to frontend/src/bindings every time cargo test runs, so schema changes break the frontend build. [loco/how-to/build-a-spa](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/build-a-spa.md)
-- [ ] **Scaffolded frontend pages and hooks** (L): Scaffold generates typed query/mutation hooks with cache invalidation and List, Show, New and Edit pages, injected into routes.tsx at anchor comments. [loco/how-to/build-a-spa](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/build-a-spa.md)
+- [-] **Typed React SPA frontend** (L): The clientside starter creates a Vite, React, React Router and TanStack Query frontend/ served from frontend/dist, with a Vite dev proxy to the API. *Not applicable: Ocre's front end is server-rendered HTML with htmx; a SPA built by its own tooling goes in `public/`, served by Workers Static Assets with `notFoundHandling: "single-page-application"`.* [loco/how-to/build-a-spa](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/build-a-spa.md)
+- [-] **Rust-to-TypeScript DTO bindings** (L): DTOs deriving ts-rs export TypeScript types to frontend/src/bindings every time cargo test runs, so schema changes break the frontend build. *Not applicable: no bundled SPA; a client app can derive its types from the JSON API with its own tooling.* [loco/how-to/build-a-spa](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/build-a-spa.md)
+- [-] **Scaffolded frontend pages and hooks** (L): Scaffold generates typed query/mutation hooks with cache invalidation and List, Show, New and Edit pages, injected into routes.tsx at anchor comments. *Not applicable: scaffolds write askama pages; `ocre g api` writes the JSON API a SPA would call.* [loco/how-to/build-a-spa](https://github.com/loco-rs/loco/blob/master/website/src/content/docs/docs/how-to/build-a-spa.md)
 - [-] **Propshaft asset load paths** (R): Serve assets from configured load paths with defined lookup order and organization. *Not applicable: one `public/` directory served by Cloudflare, no lookup.* [asset_pipeline](https://guides.rubyonrails.org/asset_pipeline.html)
 - [x] **Asset fingerprinting** (R): Digest-stamped filenames with a manifest (.manifest.json) for cache-busting. *Ocre: not needed: Static Assets send ETags with `must-revalidate`, so a deploy is never hidden; `_headers` for long caching of versioned paths.* [asset_pipeline](https://guides.rubyonrails.org/asset_pipeline.html)
 - [x] **Digested asset references** (R): Helpers in views and url() rewriting in CSS / RAILS_ASSET_URL in JS resolve digested paths. *Ocre: plain paths, as files are revalidated by ETag.* [asset_pipeline](https://guides.rubyonrails.org/asset_pipeline.html)
@@ -725,7 +725,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** R2 (10 GB free, no egress fees) through a binding; direct uploads with presigned URLs. Image variants through Cloudflare Images transformations (free quota not verified). Rich text needs a JS editor, HTML sanitizing and R2 for attachments.
 
-51 features: 32 done, 6 partial, 1 to do, 12 not applicable.
+51 features: 32 done, 7 partial, 0 to do, 12 not applicable.
 
 ### Storage
 
@@ -766,7 +766,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [-] **File previews** (R): `preview`/`representation` generate images from PDFs and videos using previewers. *Not applicable: no PDF or video renderer runs in a Worker; image variants cover pictures.* [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [x] **Direct uploads** (R): `direct_upload: true` file fields upload straight from the browser to the storage service using the JS library. *Ocre: `storage::direct_upload` signs a PUT to R2, `ocre::storage::direct_upload_script()` serves the browser side (`<input type="file" data-direct-upload-url="...">`), and `attach_direct_upload` checks the signed key the form submits.* [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [x] **Direct upload JavaScript events** (R): Events (`direct-upload:start/progress/error/end`, etc.) and `DirectUpload` class allow progress tracking, custom drag-and-drop and framework integration. *Ocre: `direct-uploads:start|end` on the form and `direct-upload:start|progress|error|end` per file, with Active Storage's names and details.* [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
-- [ ] **Attachment fixtures and test cleanup** (R): Fixtures for blobs/attachments, a test storage service, and cleanup of files created during tests. [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
+- [~] **Attachment fixtures and test cleanup** (R): Fixtures for blobs/attachments, a test storage service, and cleanup of files created during tests. *Ocre: fixtures and factories fill the four attachment columns with placeholder keys; no file is put in the test R2, which is wiped with `.wrangler/test-state` on each `ocre test --e2e`.* [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [-] **Custom storage services** (R): Implement `ActiveStorage::Service` subclasses to support other cloud providers. *Not applicable: R2 is the store; other services are reached with `worker::Fetch` from app code.* [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 - [x] **Purging unattached uploads** (R): Unattached blobs (e.g. abandoned direct uploads) can be found with `ActiveStorage::Blob.unattached` and purged. *Ocre: `storage::purge_unattached` deletes objects under a prefix that no row of the table references, one page per call (for a cron).* [active_storage_overview](https://guides.rubyonrails.org/active_storage_overview.html)
 
@@ -788,7 +788,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** Durable Objects with WebSocket hibernation (free with SQLite storage): one object per channel, broadcasting HTML fragments for htmx or JSON.
 
-15 features: 11 done, 2 partial, 1 to do, 1 not applicable.
+15 features: 12 done, 2 partial, 0 to do, 1 not applicable.
 
 ### Realtime
 
@@ -804,7 +804,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [x] **Rebroadcasting client messages** (R): Channels can receive client data and rebroadcast it to other subscribers. *Ocre: `WebSocketUpgrade::rebroadcast` relays what a client sends to the other subscribers.* [action_cable_overview](https://guides.rubyonrails.org/action_cable_overview.html)
 - [-] **Subscription adapters** (R): `cable.yml` selects pub/sub adapters (async, Redis, PostgreSQL, Solid Cable). *Not applicable: one Durable Object per channel is the pub/sub; there is no adapter to choose.* [action_cable_overview](https://guides.rubyonrails.org/action_cable_overview.html)
 - [x] **Allowed request origins** (R): `allowed_request_origins` restricts WebSocket connections to trusted origins. [action_cable_overview](https://guides.rubyonrails.org/action_cable_overview.html)
-- [ ] **Cable server configuration** (R): Configure consumer URL (`action_cable_meta_tag`), worker pool size, client logging, mount path and other options. [action_cable_overview](https://guides.rubyonrails.org/action_cable_overview.html)
+- [x] **Cable server configuration** (R): Configure consumer URL (`action_cable_meta_tag`), worker pool size, client logging, mount path and other options. *Ocre: the WebSocket route is an ordinary route of `routes()`: its path is the consumer URL, and origins are checked like forms.* [action_cable_overview](https://guides.rubyonrails.org/action_cable_overview.html)
 - [x] **Standalone cable server** (R): Run Action Cable mounted in-app or as a separate standalone server process. *Ocre: channels always run apart from the app's Worker, in Durable Objects (`OcreChannel`), with no server process to manage.* [action_cable_overview](https://guides.rubyonrails.org/action_cable_overview.html)
 - [~] **Action Cable testing** (R): Connection and channel test cases plus broadcast assertions (`assert_broadcasts`, `assert_broadcast_on`). *Ocre: `realtime::dev_routes` lists recent broadcasts so request tests can assert on them; no connection test case.* [action_cable_overview](https://guides.rubyonrails.org/action_cable_overview.html)
 
@@ -812,7 +812,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** Cache API (per data center, free) for HTTP and fragment caching, KV for global data that is read often and written rarely (the free plan has a small daily write quota; check the current number before relying on it).
 
-21 features: 17 done, 1 partial, 1 to do, 2 not applicable.
+21 features: 17 done, 1 partial, 0 to do, 3 not applicable.
 
 ### Caching
 
@@ -826,7 +826,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [x] **Fragment caching** (R): `cache` view helper caches template fragments keyed by record `cache_key_with_version` and template digest. *Ocre: `cache::fragment(ctx, &key, ttl, || Row {..})` caches rendered askama HTML under `views/<key>`; `cache::key` builds versioned keys.* [caching_with_rails](https://guides.rubyonrails.org/caching_with_rails.html)
 - [x] **Conditional fragment caching** (R): `cache_if` / `cache_unless` cache fragments only when a condition holds. *Ocre: an `if` around `cache::fragment`, or render directly.* [caching_with_rails](https://guides.rubyonrails.org/caching_with_rails.html)
 - [x] **Collection caching** (R): `render partial:, collection:, cached: true` fetches all cached partials in one multi-read. *Ocre: `cache::fragments` reads every cached row in parallel and renders only the missing ones.* [caching_with_rails](https://guides.rubyonrails.org/caching_with_rails.html)
-- [ ] **Template dependency tracking** (R): Template digests automatically track render dependencies, with explicit `Template Dependency:` comments for dynamic ones. [caching_with_rails](https://guides.rubyonrails.org/caching_with_rails.html)
+- [-] **Template dependency tracking** (R): Template digests automatically track render dependencies, with explicit `Template Dependency:` comments for dynamic ones. *Not applicable: fragment keys carry an explicit version (`cache::key(&[.., &"v2"])`) instead of template digests, so a deploy does not rewrite every fragment against KV's write quota.* [caching_with_rails](https://guides.rubyonrails.org/caching_with_rails.html)
 - [x] **Russian doll caching** (R): Nested fragment caches invalidate outward via `touch: true` associations. *Ocre: outer keys include the newest `updated_at` of the records inside (`cache::key`), so a change makes new keys all the way out.* [caching_with_rails](https://guides.rubyonrails.org/caching_with_rails.html)
 - [-] **Shared partial caching** (R): Partials can be cached across formats/mime types by specifying the format explicitly. *Not applicable: fragments are cached HTML strings, the same whatever the response format.* [caching_with_rails](https://guides.rubyonrails.org/caching_with_rails.html)
 - [x] **Conditional GET** (R): `fresh_when` and `stale?` set ETag/Last-Modified and return 304 Not Modified for fresh requests; `http_cache_forever` for static content. [caching_with_rails](https://guides.rubyonrails.org/caching_with_rails.html)
@@ -1099,7 +1099,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** Native unit tests for pure code; request tests need workerd (`cf dev`/Miniflare), which is slow, so Ocre should offer a harness that starts one server for a whole test run.
 
-78 features: 58 done, 11 partial, 1 to do, 8 not applicable.
+78 features: 58 done, 12 partial, 0 to do, 8 not applicable.
 
 ### Testing
 
@@ -1132,7 +1132,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [x] **Fixture associations by label** (R): Fixtures refer to associated records by label instead of id, including polymorphic associations and has_many :through join records. *Ocre: `author: ada` becomes `author_id` from the migrations' foreign keys.* [testing](https://guides.rubyonrails.org/testing.html)
 - [~] **ERB in fixtures** (R): Fixtures can contain ERB to generate records or compute values. *Ocre: YAML anchors (`<<: *defaults`) and `$LABEL`; no templating.* [testing](https://guides.rubyonrails.org/testing.html)
 - [x] **Fixture defaults** (R): A DEFAULTS entry used as a YAML anchor lets fixtures share default attribute values. *Ocre: YAML anchors and merge keys.* [testing](https://guides.rubyonrails.org/testing.html)
-- [ ] **File attachment fixtures** (R): Active Storage blob and attachment fixtures (ActiveStorage::FixtureSet.blob) attach files to fixture records. [testing](https://guides.rubyonrails.org/testing.html)
+- [~] **File attachment fixtures** (R): Active Storage blob and attachment fixtures (ActiveStorage::FixtureSet.blob) attach files to fixture records. *Ocre: fixture rows set `<name>_key`, `_filename`, `_content_type` and `_size`; no file content is uploaded.* [testing](https://guides.rubyonrails.org/testing.html)
 - [x] **Fixture accessor methods** (R): Methods such as `users(:david)` or `users(:david, :steve)` return fixture records as Active Record objects. *Ocre: `ocre::testing::fixture("posts", "hello")` and `fixture_id`.* [testing](https://guides.rubyonrails.org/testing.html)
 - [x] **Fixture selection** (R): A test class can load every fixture set with `fixtures :all` or name specific sets. *Ocre: Every file of tests/fixtures is loaded; `ocre db seed --from` for other sets.* [testing](https://guides.rubyonrails.org/testing.html)
 - [-] **Transactional tests** (R): Each test runs inside a database transaction that is rolled back afterward, so no data leaks between tests. *Not applicable: The test server and the tests are separate processes on D1; a fresh database per run replaces rollback.* [testing](https://guides.rubyonrails.org/testing.html)
