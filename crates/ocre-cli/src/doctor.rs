@@ -5,10 +5,13 @@
 //! Checks: the Rust wasm32 target, Node.js, the Cloudflare login, and inside
 //! an app: the npm packages against the pinned versions, cloudflare.config.ts
 //! (cf's own loader, then `tsc`), bindings for what the code uses, pending
-//! local migrations, SECRET_KEY_BASE in .dev.vars, and the production
-//! secrets when logged in.
+//! local migrations, SECRET_KEY_BASE in .dev.vars, the production
+//! configuration (no secret in plain-text variables, mail really sent,
+//! .dev.vars git-ignored), the production secrets when logged in, and the
+//! app's own checks: executables in `.ocre/doctor/`.
 
 use std::{
+    borrow::Cow,
     path::Path,
     process::{Command, Stdio},
 };
@@ -35,7 +38,7 @@ pub enum Status {
 /// One line of `ocre doctor`.
 #[derive(Serialize, Debug)]
 pub struct Check {
-    pub name: &'static str,
+    pub name: Cow<'static, str>,
     pub status: Status,
     pub detail: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -44,19 +47,19 @@ pub struct Check {
 
 impl Check {
     fn ok(name: &'static str, detail: impl Into<String>) -> Self {
-        Self { name, status: Status::Ok, detail: detail.into(), hint: None }
+        Self { name: name.into(), status: Status::Ok, detail: detail.into(), hint: None }
     }
 
     fn warn(name: &'static str, detail: impl Into<String>, hint: impl Into<String>) -> Self {
-        Self { name, status: Status::Warn, detail: detail.into(), hint: Some(hint.into()) }
+        Self { name: name.into(), status: Status::Warn, detail: detail.into(), hint: Some(hint.into()) }
     }
 
     fn fail(name: &'static str, detail: impl Into<String>, hint: impl Into<String>) -> Self {
-        Self { name, status: Status::Fail, detail: detail.into(), hint: Some(hint.into()) }
+        Self { name: name.into(), status: Status::Fail, detail: detail.into(), hint: Some(hint.into()) }
     }
 
     fn from_error(name: &'static str, err: CliError) -> Self {
-        Self { name, status: Status::Fail, detail: err.message, hint: err.hint }
+        Self { name: name.into(), status: Status::Fail, detail: err.message, hint: err.hint }
     }
 }
 
@@ -132,7 +135,7 @@ pub fn doctor() -> CliResult {
     if let Some(project) = &project {
         app_checks(project, &cloudflare, has_node, logged_in, &mut checks)?;
     }
-    let failed: Vec<&str> = checks.iter().filter(|c| c.status == Status::Fail).map(|c| c.name).collect();
+    let failed: Vec<&str> = checks.iter().filter(|c| c.status == Status::Fail).map(|c| c.name.as_ref()).collect();
     let failure = (!failed.is_empty()).then(|| {
         CliError::new(format!("{} check(s) failed: {}", failed.len(), failed.join(", ")))
             .hint("fix each failed check as its hint says, then run `ocre doctor` again")
@@ -211,8 +214,97 @@ fn app_checks(
             format!("run `echo {SECRET_KEY_BASE}=$(ocre secret) >> .dev.vars`"),
         )
     });
+    checks.push(production_check(project, &config));
     if logged_in {
         checks.push(remote_secrets(cloudflare, &config));
+    }
+    custom_checks(&project.root, checks)?;
+    Ok(())
+}
+
+/// Variable names that hold a secret: they belong in Worker secrets, not in
+/// the plain-text `bindings.text(...)` entries committed with the code.
+const SECRET_WORDS: [&str; 5] = ["SECRET", "TOKEN", "PASSWORD", "API_KEY", "PRIVATE_KEY"];
+
+/// Settings unsafe in production (Loco's production safety check).
+fn production_check(project: &Project, config: &Config) -> Check {
+    let name = "production config";
+    let secrets: Vec<&str> =
+        config.vars().map(|(key, _)| key).filter(|key| SECRET_WORDS.iter().any(|word| key.contains(word))).collect();
+    if !secrets.is_empty() {
+        return Check::fail(
+            name,
+            format!("{} is a plain-text variable in {}: committed and readable", secrets.join(", "), config::FILE),
+            "delete it from worker.env, put the value in .prod.vars and run `ocre secrets push NAME --file .prod.vars`",
+        );
+    }
+    let gitignore = std::fs::read_to_string(project.root.join(".gitignore")).unwrap_or_default();
+    if project.root.join(".git").exists() && !gitignore.lines().any(|line| line.trim() == ".dev.vars") {
+        return Check::fail(
+            name,
+            ".dev.vars is not in .gitignore: local secrets would be committed",
+            "add `.dev.vars` and `.prod.vars` to .gitignore",
+        );
+    }
+    let unsafe_values = [
+        ("MAIL_ADAPTER", "log", "production only logs emails instead of sending them"),
+        ("LOG_LEVEL", "debug", "production logs every debug line (Workers Logs: 200,000 events a day)"),
+        ("LOG_LEVEL", "trace", "production logs every trace line (Workers Logs: 200,000 events a day)"),
+    ];
+    let found: Vec<String> = config
+        .vars()
+        .filter_map(|(key, value)| {
+            let (_, _, why) = unsafe_values.iter().find(|(k, v, _)| *k == key && Some(*v) == value)?;
+            Some(format!("{key} = \"{}\": {why}", value.unwrap_or_default()))
+        })
+        .collect();
+    if found.is_empty() {
+        Check::ok(name, "no secret in plain-text variables, no development-only setting")
+    } else {
+        Check::warn(
+            name,
+            found.join("; "),
+            format!("set development values in .dev.vars (it overrides {} locally), not in worker.env", config::FILE),
+        )
+    }
+}
+
+/// Directory of the app's own checks.
+pub const CUSTOM_DIR: &str = ".ocre/doctor";
+
+/// Runs each executable of `.ocre/doctor/` from the app root, in name order:
+/// exit 0 passes, exit 2 warns, anything else fails. The first line of its
+/// stdout is the detail, the first line of its stderr the hint.
+fn custom_checks(root: &Path, checks: &mut Vec<Check>) -> Result<(), CliError> {
+    let dir = root.join(CUSTOM_DIR);
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    let mut paths: Vec<_> = std::fs::read_dir(&dir)?.map(|entry| entry.map(|e| e.path())).collect::<Result<_, _>>()?;
+    paths.sort();
+    for path in paths.into_iter().filter(|path| path.is_file()) {
+        let name = path.file_name().expect("read_dir entries have a name").to_string_lossy().into_owned();
+        let output = Command::new(&path).current_dir(root).stdin(Stdio::null()).output();
+        let (status, detail, hint) = match output {
+            Ok(output) => {
+                let first = |bytes: &[u8]| lossy(bytes).lines().next().unwrap_or_default().to_owned();
+                let status = match output.status.code() {
+                    Some(0) => Status::Ok,
+                    Some(2) => Status::Warn,
+                    _ => Status::Fail,
+                };
+                let detail = first(&output.stdout);
+                let detail = if detail.is_empty() { format!("{CUSTOM_DIR}/{name}: {}", output.status) } else { detail };
+                let hint = first(&output.stderr);
+                (status, detail, (!hint.is_empty()).then_some(hint))
+            }
+            Err(err) => (
+                Status::Fail,
+                format!("could not run {CUSTOM_DIR}/{name}: {err}"),
+                Some(format!("make it executable (`chmod +x {CUSTOM_DIR}/{name}`) with a `#!` line")),
+            ),
+        };
+        checks.push(Check { name: name.into(), status, detail, hint });
     }
     Ok(())
 }

@@ -176,6 +176,7 @@ fn doctor_passes_warns_and_fails() {
         ("config", "ok"),
         ("migrations", "ok"),
         ("local secrets", "ok"),
+        ("production config", "ok"),
         ("production secrets", "ok"),
     ];
     assert_eq!(statuses(&report), expected.map(|(n, s)| (n.to_owned(), s.to_owned())));
@@ -315,7 +316,7 @@ fn doctor_checks_node() {
     let names: Vec<String> = statuses(&report).into_iter().map(|(name, _)| name).collect();
     assert_eq!(
         names,
-        ["rust", "node", "npm packages", "local secrets"],
+        ["rust", "node", "npm packages", "local secrets", "production config"],
         "no cf, config or wrangler checks without node"
     );
     sandbox.write_state("node_version", "garbage\n");
@@ -802,4 +803,81 @@ fn template_from_a_url() {
     let report = fails(&sandbox, &["template", &url], &root);
     server.join().unwrap();
     assert!(report["error"].as_str().unwrap().starts_with(&format!("could not download the template {url}: ")));
+}
+
+fn add_var(root: &Path, entry: &str) {
+    add_to_config(root, "// ocre:env", entry);
+}
+
+#[test]
+fn doctor_flags_settings_unsafe_in_production() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    fake_rustc(&sandbox, true);
+    let doctor = || sandbox.json(&["doctor"], &root).0;
+    let production = check(&doctor(), "production config");
+    assert_eq!(production["status"], "ok");
+
+    add_var(&root, "MAIL_ADAPTER: bindings.text(\"log\"),\nLOG_LEVEL: bindings.text(\"debug\"),");
+    let production = check(&doctor(), "production config");
+    assert_eq!(production["status"], "warn");
+    assert_eq!(
+        production["detail"],
+        "MAIL_ADAPTER = \"log\": production only logs emails instead of sending them; \
+         LOG_LEVEL = \"debug\": production logs every debug line (Workers Logs: 200,000 events a day)"
+    );
+
+    fs::create_dir_all(root.join(".git")).unwrap();
+    fs::write(root.join(".gitignore"), "target/\n").unwrap();
+    let report = fails(&sandbox, &["doctor"], &root);
+    assert_eq!(
+        check(&report, "production config")["detail"],
+        ".dev.vars is not in .gitignore: local secrets would be committed"
+    );
+
+    add_var(&root, "STRIPE_API_KEY: bindings.text(\"sk_live\"),");
+    let production = check(&fails(&sandbox, &["doctor"], &root), "production config");
+    assert_eq!(production["status"], "fail");
+    assert_eq!(
+        production["detail"],
+        "STRIPE_API_KEY is a plain-text variable in cloudflare.config.ts: committed and readable"
+    );
+}
+
+#[test]
+fn doctor_runs_the_apps_own_checks() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    fake_rustc(&sandbox, true);
+    let dir = root.join(".ocre/doctor");
+    fs::create_dir_all(dir.join("helpers")).unwrap();
+    let script = |name: &str, body: &str, mode: u32| {
+        fs::write(dir.join(name), body).unwrap();
+        fs::set_permissions(dir.join(name), std::os::unix::fs::PermissionsExt::from_mode(mode)).unwrap();
+    };
+    script("1-stripe", "#!/bin/sh\necho \"stripe webhook secret set in $(basename \"$PWD\")\"\n", 0o755);
+    script("2-backups", "#!/bin/sh\necho 'no backup in 8 days'\necho 'run ./backup.sh' >&2\nexit 2\n", 0o755);
+    script("3-broken", "#!/bin/sh\nexit 1\n", 0o755);
+    script("4-not-executable", "echo hi\n", 0o644);
+    let report = fails(&sandbox, &["doctor"], &root);
+    assert_eq!(
+        check(&report, "1-stripe"),
+        json!({ "name": "1-stripe", "status": "ok", "detail": "stripe webhook secret set in shop" })
+    );
+    assert_eq!(
+        check(&report, "2-backups"),
+        json!({ "name": "2-backups", "status": "warn", "detail": "no backup in 8 days", "hint": "run ./backup.sh" })
+    );
+    assert_eq!(
+        check(&report, "3-broken"),
+        json!({ "name": "3-broken", "status": "fail", "detail": ".ocre/doctor/3-broken: exit status: 1" })
+    );
+    let not_executable = check(&report, "4-not-executable");
+    assert!(not_executable["detail"].as_str().unwrap().starts_with("could not run .ocre/doctor/4-not-executable"));
+    assert_eq!(
+        not_executable["hint"],
+        "make it executable (`chmod +x .ocre/doctor/4-not-executable`) with a `#!` line"
+    );
+    assert!(report["error"].as_str().unwrap().ends_with("3-broken, 4-not-executable"), "{report}");
+    assert!(!report["checks"].as_array().unwrap().iter().any(|c| c["name"] == "helpers"));
 }

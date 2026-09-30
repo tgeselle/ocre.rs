@@ -216,7 +216,8 @@ enum Command {
     /// toolchain, compatibility date, bindings and triggers, variable names.
     About,
     /// Check the tools (Rust wasm target, Node.js, Cloudflare login) and the
-    /// app (bindings for what the code uses, pending migrations, secrets).
+    /// app (bindings for what the code uses, pending migrations, secrets,
+    /// production settings, and the executables in .ocre/doctor/).
     /// Exits with an error when a check fails.
     Doctor,
     /// Lines of code per part of the app (models, controllers, templates, tests...).
