@@ -55,6 +55,9 @@ graphql = ["dep:async-graphql"]
 # Realtime channels: exports the `OcreChannel` Durable Object class (WebSocket
 # Hibernation) and `ocre::realtime`. `ocre g scaffold ... --realtime` turns it on.
 realtime = []
+# Test helpers (`ocre::testing`, native builds only): generated apps enable it
+# in `[dev-dependencies]`, so it is never in the WebAssembly build.
+testing = ["dep:ureq", "dep:pollster"]
 
 [dev-dependencies]
 pollster = "1.0.1"
@@ -71,3 +74,7 @@ wasm-bindgen-futures = "0.4"
 # algorithm in pure Rust.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pbkdf2 = { version = "0.12.2", default-features = false, features = ["hmac"] }
+# `ocre::testing::Client`: plain HTTP to the local test server (no TLS, no gzip).
+ureq = { version = "3.4.2", default-features = false, optional = true }
+# `ocre::testing::block_on`: async code in unit tests.
+pollster = { version = "1.0.1", optional = true }

@@ -39,6 +39,7 @@ const FILES: &[(&str, &str)] = &[
     ("AGENTS.md", include_str!("../templates/new/AGENTS.md")),
     ("migrations/.gitkeep", ""),
     ("public/robots.txt", include_str!("../templates/new/robots.txt")),
+    ("tests/app.rs", include_str!("../templates/new/app_test.rs")),
 ];
 
 /// Full-stack apps: HTML pages.
@@ -195,12 +196,14 @@ impl Plan {
         }
         let mut report = Report::new("new");
         let kind_files = if self.api { API_FILES } else { HTML_FILES };
+        let test_dep = test_dependency(&self.ocre_dep);
         for (relative, template) in FILES.iter().chain(kind_files) {
             let path = self.root.join(relative);
             std::fs::create_dir_all(path.parent().expect("file paths have a parent"))?;
             let mut contents = template
                 .replace("__APP_NAME__", name)
                 .replace("__OCRE_DEP__", &self.ocre_dep)
+                .replace("__OCRE_TEST_DEP__", &test_dep)
                 .replace("__DOCS_URL__", DOCS_URL)
                 .replace("__CF_VERSION__", CF_VERSION)
                 .replace("__WRANGLER_VERSION__", WRANGLER_VERSION)
@@ -258,6 +261,11 @@ impl Plan {
         check_wasm_target()?;
         Cloudflare::new(&self.root, echo).deploy(&Project::at(self.root.clone())?)
     }
+}
+
+/// The `[dev-dependencies]` line: Ocre again, with its `testing` feature.
+fn test_dependency(ocre_dep: &str) -> String {
+    format!("{}, features = [\"testing\"] }}", ocre_dep.trim_end_matches('}').trim_end())
 }
 
 /// App name rules plus "the directory is free". Shared with the wizard.

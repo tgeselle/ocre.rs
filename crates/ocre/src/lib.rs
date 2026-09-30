@@ -169,6 +169,9 @@ pub mod storage;
 #[cfg(test)]
 #[path = "../tests/support.rs"]
 mod support;
+#[cfg(all(feature = "testing", not(target_arch = "wasm32")))]
+#[cfg_attr(docsrs, doc(cfg(feature = "testing")))]
+pub mod testing;
 pub mod token;
 mod validate;
 #[cfg(feature = "html")]

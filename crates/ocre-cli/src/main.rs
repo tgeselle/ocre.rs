@@ -12,6 +12,7 @@ mod db;
 mod db_admin;
 mod destroy;
 mod doctor;
+mod fixtures;
 mod generate;
 mod i18n;
 mod names;
@@ -235,13 +236,15 @@ enum Command {
         #[arg(long, value_delimiter = ',')]
         annotations: Vec<String>,
     },
-    /// Run the app's checks: `cargo test`, then `cargo check --target
-    /// wasm32-unknown-unknown`; with --e2e, then tests/e2e.sh against one
-    /// `cf dev` started for the run. Stops at the first failure.
+    /// Run the app's tests: `cargo test`, then `cargo check --target
+    /// wasm32-unknown-unknown`; with --e2e, then a fresh test database
+    /// (migrations + tests/fixtures), one local server for the run, the
+    /// request tests (`cargo test -- --ignored`, with OCRE_TEST_URL) and
+    /// tests/e2e.sh when present. Stops at the first failure.
     ///
-    /// Example: `ocre test --e2e`, or `ocre test -- models` to filter unit tests.
+    /// Example: `ocre test --e2e`, or `ocre test -- models` to filter tests.
     Test {
-        /// Also run tests/e2e.sh with BASE_URL set to a local server.
+        /// Also run the request tests and tests/e2e.sh against a local server.
         #[arg(long)]
         e2e: bool,
         /// Port of the server started for --e2e.
@@ -518,14 +521,19 @@ enum SecretsCommand {
 
 #[derive(Subcommand)]
 enum DbCommand {
-    /// Run db/seeds.sql (local database unless --remote).
+    /// Load the fixtures of db/fixtures, then run db/seeds.sql (local database unless --remote).
+    ///
+    /// Fixtures empty their tables before inserting, so they only load locally.
     Seed {
-        /// Seed the production database on Cloudflare.
+        /// Seed the production database on Cloudflare (db/seeds.sql only).
         #[arg(long)]
         remote: bool,
-        /// Local only: empty every table first (keeps the tables and migrations).
+        /// Local only: empty every table first (keeps the tables and migrations). Loco's `--reset`.
         #[arg(long)]
         replant: bool,
+        /// Fixture directory, relative to the app root [default: db/fixtures].
+        #[arg(long, value_name = "DIR")]
+        from: Option<String>,
     },
     /// Create the local database, or with --remote the D1 database on Cloudflare when missing.
     Create {
@@ -551,13 +559,28 @@ enum DbCommand {
     },
     /// Local, safe to repeat: apply pending migrations; seed when the database was just created.
     Prepare,
-    /// Local only: delete the local database, apply every migration, then run db/seeds.sql if present.
+    /// Local only: delete the local database, apply every migration, then load db/fixtures and db/seeds.sql if present.
     Reset,
     /// Write the database's CREATE statements to db/schema.sql (local unless --remote).
     ///
     /// A snapshot to read, and the input of `ocre g migration rebuild_<table>`.
     Schema {
         /// Dump the production database on Cloudflare.
+        #[arg(long)]
+        remote: bool,
+    },
+    /// Write table rows to fixture files `<dir>/<table>.yml` that `ocre db seed` loads back (local unless --remote).
+    Dump {
+        /// Tables to dump, comma-separated [default: every app table].
+        #[arg(long, value_delimiter = ',', value_name = "TABLES")]
+        tables: Vec<String>,
+        /// Directory of the fixture files, relative to the app root.
+        #[arg(long, default_value = "db/fixtures")]
+        dir: String,
+        /// Overwrite existing fixture files.
+        #[arg(long)]
+        force: bool,
+        /// Dump the production database on Cloudflare (read-only).
         #[arg(long)]
         remote: bool,
     },
@@ -621,8 +644,8 @@ fn main() -> ExitCode {
         Command::I18n(I18nCommand::Missing) => Project::find().and_then(|project| i18n::missing(&project)),
         Command::Migrate { remote, status: true } => db::status(remote, json),
         Command::Migrate { remote, status: false } => cloudflare::migrate(remote, json),
-        Command::Db(DbCommand::Seed { remote, replant: false }) => db::seed(remote, json),
-        Command::Db(DbCommand::Seed { remote, replant: true }) => db_admin::replant(remote, json),
+        Command::Db(DbCommand::Seed { remote, replant, from }) => db::seed(remote, replant, from.as_deref(), json),
+        Command::Db(DbCommand::Dump { tables, dir, force, remote }) => db::dump(&tables, &dir, force, remote),
         Command::Db(DbCommand::Create { remote }) => db_admin::create(remote, json),
         Command::Db(DbCommand::Drop { remote }) => db_admin::drop(remote),
         Command::Db(DbCommand::Version { remote }) => db_admin::version(remote),

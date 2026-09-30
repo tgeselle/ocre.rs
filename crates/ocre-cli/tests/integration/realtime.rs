@@ -14,8 +14,11 @@ fn realtime_scaffold_sets_up_the_channel_once() {
     let root = sandbox.new_app("live", &[]);
     let (report, ok) = sandbox.json(&["g", "scaffold", "Post", "title:string", "--realtime"], &root);
     assert!(ok, "{report}");
-    assert_eq!(report["created"][9], "templates/posts/_row.html");
-    assert_eq!(report["created"][10], "src/realtime.rs");
+    let created = report["created"].as_array().unwrap();
+    assert!(
+        created.contains(&json!("templates/posts/_row.html")) && created.contains(&json!("src/realtime.rs")),
+        "{report}"
+    );
     assert_eq!(report["updated"], json!(["src/lib.rs", "Cargo.toml", "cloudflare.config.ts"]));
     assert_eq!(report["next"][3], "open http://localhost:8787/posts in a second window, then create a post");
 
@@ -57,13 +60,16 @@ fn realtime_scaffold_sets_up_the_channel_once() {
     // A second live resource only adds its channel; one already listed by hand is kept.
     let (report, ok) = sandbox.json(&["g", "scaffold", "Comment", "body:text", "--realtime"], &root);
     assert!(ok, "{report}");
-    assert_eq!(report["updated"], json!(["src/models/mod.rs", "src/lib.rs", "src/realtime.rs"]));
+    assert_eq!(
+        report["updated"],
+        json!(["src/models/mod.rs", "tests/factories/mod.rs", "src/lib.rs", "src/realtime.rs"])
+    );
     let module = fs::read_to_string(root.join("src/realtime.rs")).unwrap();
     assert!(module.contains("// ocre:channels\n        \"comments\" => {}\n        \"posts\" => {}\n"), "{module}");
     fs::write(root.join("src/realtime.rs"), module.replace("\"comments\" => {}", "\"tags\" => {}")).unwrap();
     let (report, ok) = sandbox.json(&["g", "scaffold", "Tag", "name:string", "--realtime"], &root);
     assert!(ok, "{report}");
-    assert_eq!(report["updated"], json!(["src/models/mod.rs", "src/lib.rs"]));
+    assert_eq!(report["updated"], json!(["src/models/mod.rs", "tests/factories/mod.rs", "src/lib.rs"]));
     let module = fs::read_to_string(root.join("src/realtime.rs")).unwrap();
     assert_eq!(module.matches("\"tags\" => {}").count(), 1, "{module}");
     let config = fs::read_to_string(root.join("cloudflare.config.ts")).unwrap();

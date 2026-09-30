@@ -108,6 +108,14 @@ esac
 echo "$tool $*" >> "$state/calls.log"
 
 if [ "$tool" = "wrangler" ]; then
+  # The test server of `ocre test --e2e`: `wrangler dev --x-new-config --port N --persist-to .wrangler/test-state`.
+  if [ "$1" = "dev" ]; then
+    fail_if dev_fails
+    echo "build $OCRE_BUILD" >> "$state/calls.log"
+    echo "[custom build] Running: cargo install -q \"worker-build@^0.8\" && worker-build \${OCRE_BUILD:---release}" >&2
+    echo "[wrangler:info] Ready on http://localhost:$4"
+    exit 0
+  fi
   # `ocre logs`: `wrangler tail <worker> --format <f> [--status s] [--search t]`.
   # The auth failure is wrangler 4.144.0's recorded stderr with an expired,
   # unrefreshable login; the stream is NOT recorded (it needs a deployed
@@ -138,6 +146,11 @@ if [ "$tool" = "wrangler" ]; then
       fi
       ;;
     "migrations apply")
+      # `ocre test --e2e` then cannot start its server: a non-executable wrangler.
+      if [ -e "$state/server_unstartable" ]; then
+        cp node_modules/.bin/wrangler "$state/wrangler.copy" && rm node_modules/.bin/wrangler
+        mv "$state/wrangler.copy" node_modules/.bin/wrangler && chmod -x node_modules/.bin/wrangler
+      fi
       fail_if migrate_fails
       echo "Migrations applied to $4 ($5)"
       ;;

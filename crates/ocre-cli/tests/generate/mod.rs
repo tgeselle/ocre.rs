@@ -70,3 +70,12 @@ fn routes_need_lib_rs_and_both_markers() {
     assert_eq!(message(&mut Edits::new(&project)), expected, "no routes marker");
     std::fs::remove_dir_all(&project.root).unwrap();
 }
+
+#[test]
+fn features_go_on_the_dependency_not_the_test_one() {
+    let cargo = "[dependencies]\nocre = { path = \"x\" }\n\n[dev-dependencies]\nocre = { path = \"x\", features = [\"testing\"] }\n";
+    assert_eq!(
+        with_ocre_feature(cargo, "realtime").unwrap(),
+        "[dependencies]\nocre = { path = \"x\", features = [\"realtime\"] }\n\n[dev-dependencies]\nocre = { path = \"x\", features = [\"testing\"] }\n"
+    );
+}

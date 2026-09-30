@@ -157,8 +157,10 @@ impl Sandbox {
 
     /// Runs with `--json` and returns (parsed stdout, success).
     pub fn json(&self, args: &[&str], cwd: &Path) -> (Value, bool) {
+        // Before a `--`: what follows it goes to another program (`ocre test -- <cargo args>`).
         let mut all = args.to_vec();
-        all.push("--json");
+        let at = all.iter().position(|arg| *arg == "--").unwrap_or(all.len());
+        all.insert(at, "--json");
         let output = self.ocre(&all, cwd);
         let stdout = String::from_utf8(output.stdout).unwrap();
         let value = serde_json::from_str(&stdout)

@@ -33,6 +33,7 @@ pub fn scaffold(project: &Project, name: &str, specs: &[String], realtime: bool)
         edits.create(&format!("templates/{plural}/{file}"), contents)?;
     }
     register_routes(&mut edits, plural)?;
+    super::test_files::scaffold_tests(&mut edits, &names, &fields, &command)?;
     if realtime {
         add_channel(&mut edits, plural, &command)?;
     }

@@ -23,6 +23,7 @@ mod scaffold;
 mod schedule;
 pub(crate) mod storage;
 mod templates;
+mod test_files;
 
 use std::{fmt::Write as _, path::PathBuf};
 
@@ -254,7 +255,9 @@ pub(crate) fn with_ocre_feature(cargo_toml: &str, feature: &str) -> Result<Strin
     let mut out = String::with_capacity(cargo_toml.len() + quoted.len() + 16);
     let mut found = false;
     for line in cargo_toml.lines() {
-        if line.starts_with("ocre = {") && line.ends_with('}') {
+        // The first one is the [dependencies] entry; the [dev-dependencies] one
+        // (`ocre::testing`) inherits its features.
+        if !found && line.starts_with("ocre = {") && line.ends_with('}') {
             found = true;
             if line.contains(&quoted) {
                 out.push_str(line);

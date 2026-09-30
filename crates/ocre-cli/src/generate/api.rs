@@ -35,6 +35,7 @@ pub fn api(project: &Project, name: &str, specs: &[String], graphql: bool) -> Cl
     ensure_model(&mut edits, &names, &fields, &command)?;
     edits.create(&format!("src/{module}.rs"), module_rs(&names, &fields, &command, graphql))?;
     register_routes(&mut edits, &module)?;
+    super::test_files::api_tests(&mut edits, &names, &fields, &command)?;
     if graphql {
         let cargo = edits.read("Cargo.toml")?.unwrap_or_default();
         edits.update("Cargo.toml", with_graphql(&cargo)?);

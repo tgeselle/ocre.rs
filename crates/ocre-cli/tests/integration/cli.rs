@@ -365,12 +365,15 @@ fn scaffold_generates_and_registers_a_resource() {
             "src/models/mod.rs",
             "migrations/0001_create_products.sql",
             "src/models/product.rs",
+            "tests/factories/mod.rs",
+            "tests/factories/product.rs",
             "src/products.rs",
             "templates/products/index.html",
             "templates/products/show.html",
             "templates/products/new.html",
             "templates/products/edit.html",
             "templates/products/_form.html",
+            "tests/products.rs",
         ])
     );
     let sql = fs::read_to_string(root.join("migrations/0001_create_products.sql")).unwrap();
@@ -404,7 +407,10 @@ fn model_links_associations_both_ways() {
     assert_eq!(report["next"], serde_json::json!(["ocre migrate", "cargo check --target wasm32-unknown-unknown"]));
     let (report, ok) = sandbox.json(&["g", "model", "Book", "title:string", "author:references"], &root);
     assert!(ok, "{report}");
-    assert_eq!(report["updated"], serde_json::json!(["src/models/author.rs", "src/models/mod.rs"]));
+    assert_eq!(
+        report["updated"],
+        serde_json::json!(["src/models/author.rs", "src/models/mod.rs", "tests/factories/mod.rs"])
+    );
     let author = fs::read_to_string(root.join("src/models/author.rs")).unwrap();
     assert!(author.contains("pub async fn books(&self, ctx: &Ctx, page: ocre::Page)"), "{author}");
     let book = fs::read_to_string(root.join("src/models/book.rs")).unwrap();
@@ -613,7 +619,10 @@ fn api_generates_a_rest_resource() {
             "src/models/mod.rs",
             "migrations/0001_create_products.sql",
             "src/models/product.rs",
-            "src/products_api.rs"
+            "tests/factories/mod.rs",
+            "tests/factories/product.rs",
+            "src/products_api.rs",
+            "tests/api_products.rs"
         ])
     );
     assert_eq!(report["updated"], serde_json::json!(["src/lib.rs"]));
@@ -637,7 +646,11 @@ fn api_after_scaffold_reuses_the_table() {
     let root = sandbox.new_app("blog", &["--starter", "blog"]);
     let (report, ok) = sandbox.json(&["g", "api", "Post", "title:string", "body:text", "published:boolean"], &root);
     assert!(ok, "{report}");
-    assert_eq!(report["created"], serde_json::json!(["src/posts_api.rs"]), "reuses the Post model and table");
+    assert_eq!(
+        report["created"],
+        serde_json::json!(["src/posts_api.rs", "tests/api_posts.rs"]),
+        "reuses the Post model and table"
+    );
 }
 
 #[test]
@@ -655,7 +668,10 @@ fn api_with_graphql_wires_the_schema_and_dependency() {
             "src/models/mod.rs",
             "migrations/0001_create_products.sql",
             "src/models/product.rs",
+            "tests/factories/mod.rs",
+            "tests/factories/product.rs",
             "src/products_api.rs",
+            "tests/api_products.rs",
             "src/graphql.rs"
         ])
     );
@@ -677,7 +693,7 @@ fn api_with_graphql_wires_the_schema_and_dependency() {
     assert!(ok, "{report}");
     assert_eq!(
         report["updated"],
-        serde_json::json!(["src/models/mod.rs", "src/lib.rs", "src/graphql.rs"]),
+        serde_json::json!(["src/models/mod.rs", "tests/factories/mod.rs", "src/lib.rs", "src/graphql.rs"]),
         "Cargo.toml already has the dependency: unchanged, not reported"
     );
     let schema = fs::read_to_string(root.join("src/graphql.rs")).unwrap();

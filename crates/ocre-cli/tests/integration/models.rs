@@ -48,7 +48,10 @@ fn references_give_has_one_has_many_through_and_preloads() {
     assert!(ok, "{report}");
     let (report, ok) = sandbox.json(&["g", "model", "Tagging", "post:references", "tag:references"], &root);
     assert!(ok, "{report}");
-    assert_eq!(report["updated"], json!(["src/models/post.rs", "src/models/tag.rs", "src/models/mod.rs"]));
+    assert_eq!(
+        report["updated"],
+        json!(["src/models/post.rs", "src/models/tag.rs", "src/models/mod.rs", "tests/factories/mod.rs"])
+    );
 
     let user = fs::read_to_string(root.join("src/models/user.rs")).unwrap();
     assert!(user.contains(

@@ -90,10 +90,8 @@ fn about_lists_configuration() {
         "triggers.queue({ name: \"shop-jobs\" }),\ntriggers.scheduled({ schedule: \"0 3 * * *\" }),",
     );
     let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
-    let cargo = cargo
-        .lines()
-        .map(|l| if l.starts_with("ocre = ") { l.replace(" }", ", features = [\"cache\"] }") } else { l.to_owned() });
-    let cargo = cargo.collect::<Vec<_>>().join("\n");
+    // The first `ocre = ` line is the dependency; the second, in [dev-dependencies], already has features.
+    let cargo = cargo.replacen(" }\n", ", features = [\"cache\"] }\n", 1);
     fs::write(root.join("Cargo.toml"), cargo).unwrap();
     let about = ok(&sandbox, &["about"], &root)["about"].clone();
     assert_eq!(about["mode"], "api (JSON only)");
@@ -444,7 +442,7 @@ fn doctor_checks_the_bindings_the_generated_code_uses() {
 fn stats_counts_code_per_part() {
     let sandbox = Sandbox::new();
     let root = sandbox.new_app("shop", &[]);
-    fs::create_dir_all(root.join("tests")).unwrap();
+    fs::remove_file(root.join("tests/app.rs")).unwrap();
     fs::write(root.join("tests/home.rs"), "// Home.\n#[test]\nfn home() {}\n\n").unwrap();
     fs::create_dir_all(root.join("lib/.hidden")).unwrap();
     fs::write(root.join("lib/util.rs"), "/* x */\n pub(crate) async fn a() {}\npub const fn b() {}\n").unwrap();
@@ -656,29 +654,78 @@ fn test_runs_unit_tests_then_the_wasm_check() {
     assert!(report["error"].as_str().unwrap().contains("wasm32-unknown-unknown target is not installed"));
 }
 
+/// `wrangler <args>` on the test database of `ocre test --e2e`, as logged by the fake.
+fn test_d1(args: &str) -> String {
+    format!("wrangler {args} -c .wrangler/ocre-d1.json --persist-to .wrangler/test-state")
+}
+
 #[test]
-fn test_e2e_runs_the_script_against_one_server() {
+fn test_e2e_runs_request_tests_and_the_script_against_one_server() {
     let sandbox = Sandbox::new();
     let root = sandbox.new_app("shop", &[]);
-    fake_cargo(&sandbox);
+    // Logs the arguments and the ocre::testing environment; fails the
+    // request tests when `ignored_fails` exists.
+    sandbox.script(
+        "cargo",
+        "#!/bin/sh\necho \"$* [$OCRE_TEST_URL $OCRE_TEST_STATE $OCRE_TEST_LOG]\" >> \"$FAKE_CF_STATE/cargo.log\"\n\
+         case \"$*\" in *--ignored*) if [ -e \"$FAKE_CF_STATE/ignored_fails\" ]; then exit 101; fi ;; esac\n",
+    );
     fake_rustc(&sandbox, true);
-    let report = fails(&sandbox, &["test", "--e2e"], &root);
-    assert_eq!(report["error"], "tests/e2e.sh not found");
-    fs::create_dir_all(root.join("tests")).unwrap();
-    fs::write(root.join("tests/e2e.sh"), "echo \"checking $BASE_URL\"\n").unwrap();
-    let report = ok(&sandbox, &["test", "--e2e", "--port", "9123"], &root);
-    assert_eq!(report["ran"][2], "tests/e2e.sh against cf dev on port 9123: ok");
+    let report = ok(&sandbox, &["test", "--e2e", "--port", "9123", "--", "posts"], &root);
+    assert_eq!(
+        report["ran"],
+        json!([
+            "cargo test: ok",
+            "cargo check --target wasm32-unknown-unknown: ok",
+            "test database .wrangler/test-state: migrated, tests/fixtures loaded",
+            "cargo test -- --ignored against the test server on port 9123: ok"
+        ])
+    );
     assert_eq!(
         sandbox.calls(),
-        [local_d1("d1 migrations apply DB --local"), "cf dev --port 9123".to_owned(), "build --dev".to_owned()]
+        [
+            test_d1("d1 migrations apply DB --local"),
+            "wrangler dev --x-new-config --port 9123 --persist-to .wrangler/test-state".to_owned(),
+            "build --dev".to_owned()
+        ]
     );
-    let output = sandbox.ocre(&["test", "--e2e", "--json"], &root);
+    let log = fs::read_to_string(sandbox.work.join("../state/cargo.log")).unwrap();
+    let log_path = root.join(".wrangler/test-state/dev.log");
+    assert!(
+        log.ends_with(&format!(
+            "test posts -- --ignored --test-threads=1 [http://localhost:9123 .wrangler/test-state {}]\n",
+            log_path.display()
+        )),
+        "{log}"
+    );
+    let server_log = fs::read_to_string(&log_path).unwrap();
+    assert!(server_log.contains("Ready on http://localhost:9123"), "{server_log}");
+
+    // Fixtures, the script, and harness arguments after a second `--`.
+    sandbox.clear_calls();
+    fs::create_dir_all(root.join("tests/fixtures")).unwrap();
+    fs::write(root.join("tests/fixtures/posts.yml"), "first:\n  title: Hello\n").unwrap();
+    fs::write(root.join("tests/e2e.sh"), "echo \"checking $BASE_URL\"\n").unwrap();
+    let output = sandbox.ocre(&["test", "--e2e", "--json", "--", "posts", "--", "--nocapture"], &root);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["ran"][4], "tests/e2e.sh against the test server on port 8788: ok");
     assert!(text(&output).1.contains("checking http://localhost:8788"), "{}", text(&output).1);
+    assert_eq!(sandbox.calls()[1], test_d1("d1 execute DB --local --file .wrangler/test-state/fixtures.sql --yes"));
+    let fixtures = fs::read_to_string(root.join(".wrangler/test-state/fixtures.sql")).unwrap();
+    assert!(fixtures.contains("INSERT INTO \"posts\""), "{fixtures}");
+    let log = fs::read_to_string(sandbox.work.join("../state/cargo.log")).unwrap();
+    assert!(log.contains("test posts -- --nocapture --ignored --test-threads=1 [http://localhost:8788"), "{log}");
 
     fs::write(root.join("tests/e2e.sh"), "exit 3\n").unwrap();
     assert_eq!(fails(&sandbox, &["test", "--e2e"], &root)["error"], "tests/e2e.sh failed (exit status: 3)");
+    sandbox.set("ignored_fails");
+    let report = fails(&sandbox, &["test", "--e2e"], &root);
+    assert_eq!(report["error"], "cargo test -- --ignored failed (exit status: 101)");
+    assert!(report["hint"].as_str().unwrap().contains("ocre test -- <test name>"), "{report}");
     sandbox.set("dev_fails");
-    assert_eq!(fails(&sandbox, &["test", "--e2e"], &root)["error"], "cf dev stopped or did not get ready");
+    assert_eq!(fails(&sandbox, &["test", "--e2e"], &root)["error"], "the test server stopped or did not get ready");
+    fs::write(root.join("tests/fixtures/posts.yml"), "first: [").unwrap();
+    assert!(fails(&sandbox, &["test", "--e2e"], &root)["error"].as_str().unwrap().contains("posts.yml"));
 }
 
 #[test]
@@ -880,4 +927,37 @@ fn doctor_runs_the_apps_own_checks() {
     );
     assert!(report["error"].as_str().unwrap().ends_with("3-broken, 4-not-executable"), "{report}");
     assert!(!report["checks"].as_array().unwrap().iter().any(|c| c["name"] == "helpers"));
+}
+
+#[test]
+fn test_e2e_reports_a_server_that_cannot_start() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    sandbox.script("cargo", "#!/bin/sh\nexit 0\n");
+    fake_rustc(&sandbox, true);
+    sandbox.set("server_unstartable");
+    let report = fails(&sandbox, &["test", "--e2e"], &root);
+    assert!(report["error"].as_str().unwrap().starts_with("could not run wrangler"), "{report}");
+    assert_eq!(report["hint"], "install Node.js 22 or newer, then run `npm install` in the app");
+}
+
+#[test]
+fn test_e2e_loads_fixtures_with_references_from_the_migrations() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    sandbox.script("cargo", "#!/bin/sh\nexit 0\n");
+    fake_rustc(&sandbox, true);
+    let files = [
+        ("migrations/0001_create_posts.sql", "CREATE TABLE posts (id INTEGER PRIMARY KEY, author_id INTEGER);\n"),
+        ("tests/fixtures/authors.yml", "ada:\n  id: 1\n"),
+        ("tests/fixtures/posts.yml", "p:\n  author: ada\n"),
+    ];
+    for (path, contents) in files {
+        fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
+        fs::write(root.join(path), contents).unwrap();
+    }
+    ok(&sandbox, &["test", "--e2e", "--port", "9124"], &root);
+    let sql = fs::read_to_string(root.join(".wrangler/test-state/fixtures.sql")).unwrap();
+    assert!(sql.contains("INSERT INTO \"posts\" (\"id\", \"author_id\") VALUES ("), "{sql}");
+    assert!(sql.contains(", 1);"), "`author: ada` becomes author_id 1: {sql}");
 }

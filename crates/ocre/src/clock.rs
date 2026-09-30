@@ -30,6 +30,10 @@ pub fn now() -> i64 {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
+        #[cfg(feature = "testing")]
+        if let Some(frozen) = FROZEN.get() {
+            return frozen;
+        }
         let elapsed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
         i64::try_from(elapsed.expect("the clock is after 1970").as_secs()).expect("seconds fit in i64")
     }
@@ -46,6 +50,18 @@ pub(crate) fn now_millis() -> f64 {
         let elapsed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
         elapsed.map_or(0.0, |elapsed| elapsed.as_secs_f64() * 1000.0)
     }
+}
+
+// The time `ocre::testing::travel_to` set on this thread.
+#[cfg(all(feature = "testing", not(target_arch = "wasm32")))]
+thread_local! {
+    static FROZEN: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
+}
+
+/// Freezes [`now`] at `unix` on this thread, or unfreezes it with `None`.
+#[cfg(all(feature = "testing", not(target_arch = "wasm32")))]
+pub(crate) fn set_frozen(unix: Option<i64>) {
+    FROZEN.set(unix);
 }
 
 #[cfg(test)]

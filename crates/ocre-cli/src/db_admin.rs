@@ -1,5 +1,5 @@
 //! Whole-database tasks on the app's D1 database: `ocre db create`, `drop`,
-//! `version`, `truncate`, `prepare` and `seed --replant`.
+//! `version`, `truncate` and `prepare`.
 //!
 //! Destructive tasks (drop, truncate, replant) only touch the local
 //! database: Ocre never deletes production data; the Cloudflare dashboard
@@ -10,13 +10,14 @@ use serde::Deserialize;
 use crate::{
     CliResult,
     cloudflare::{Cloudflare, Database, Echo, LocalD1, Sql},
-    db::{LOCAL_STATE, SEEDS, load_seeds},
+    db::{LOCAL_STATE, load_data},
+    fixtures::FIXTURES,
     output::{CliError, Report},
     project::Project,
 };
 
 /// App tables: everything but SQLite's and D1's own.
-const TABLES_QUERY: &str = "SELECT name FROM sqlite_master WHERE type = 'table' \
+pub(crate) const TABLES_QUERY: &str = "SELECT name FROM sqlite_master WHERE type = 'table' \
      AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\' AND name != 'd1_migrations' \
      ORDER BY name";
 
@@ -26,19 +27,19 @@ struct Rows<T> {
 }
 
 #[derive(Deserialize)]
-struct Name {
-    name: String,
+pub(crate) struct Name {
+    pub(crate) name: String,
 }
 
 /// Runs one query and returns the rows of its single statement.
-fn query<T: for<'de> Deserialize<'de>>(database: &Database, sql: &str) -> Result<Vec<T>, CliError> {
+pub(crate) fn query<T: for<'de> Deserialize<'de>>(database: &Database, sql: &str) -> Result<Vec<T>, CliError> {
     let output = database.query(sql)?;
     let mut statements: Vec<Rows<T>> =
         serde_json::from_str(&output).map_err(|err| CliError::new(format!("unexpected D1 query output: {err}")))?;
     Ok(statements.pop().map(|rows| rows.results).unwrap_or_default())
 }
 
-fn local_only(task: &str) -> CliError {
+pub(crate) fn local_only(task: &str) -> CliError {
     CliError::new(format!("`ocre db {task}` only runs on the local database"))
         .hint("Ocre never deletes production data; use the Cloudflare dashboard or `cf d1 ...` for that on purpose")
 }
@@ -107,7 +108,7 @@ pub fn truncate(remote: bool, json: bool) -> CliResult {
     Ok(Report { ran: vec![ran], ..Report::new("db truncate") })
 }
 
-fn empty_tables(project: &Project, json: bool) -> Result<String, CliError> {
+pub(crate) fn empty_tables(project: &Project, json: bool) -> Result<String, CliError> {
     let captured = Database::Local(LocalD1::new(project, Echo::Capture));
     let tables = query::<Name>(&captured, TABLES_QUERY)?;
     if tables.is_empty() {
@@ -129,31 +130,16 @@ fn empty_tables(project: &Project, json: bool) -> Result<String, CliError> {
     Ok(format!("emptied {} (--local)", names.join(", ")))
 }
 
-/// `ocre db seed --replant`: empties the local tables, then loads the seeds.
-pub fn replant(remote: bool, json: bool) -> CliResult {
-    if remote {
-        return Err(local_only("seed --replant"));
-    }
-    let project = Project::find()?;
-    if !project.root.join(SEEDS).is_file() {
-        return Err(CliError::new(format!("{SEEDS} not found in the app"))
-            .hint(format!("create {SEEDS} with INSERT statements, then run `ocre db seed --replant`")));
-    }
-    let emptied = empty_tables(&project, json)?;
-    let seeded = load_seeds(&Database::open(&project, Echo::for_json(json), false)?)?;
-    Ok(Report { ran: vec![emptied, seeded], ..Report::new("db seed") })
-}
-
 /// `ocre db prepare`: safe to run any time. Applies pending migrations to
-/// the local database, and loads the seeds when it was just created.
+/// the local database, and loads the fixtures and seeds when it was just created.
 pub fn prepare(json: bool) -> CliResult {
     let project = Project::find()?;
     let database = Database::open(&project, Echo::for_json(json), false)?;
     let fresh = !project.root.join(LOCAL_STATE).exists();
     database.migrate()?;
     let mut ran = vec!["applied migrations (--local)".to_owned()];
-    if fresh && project.root.join(SEEDS).is_file() {
-        ran.push(load_seeds(&database)?);
+    if fresh {
+        ran.extend(load_data(&project, &database, FIXTURES)?);
     }
     Ok(Report { ran, ..Report::new("db prepare") })
 }

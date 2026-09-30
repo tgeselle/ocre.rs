@@ -326,16 +326,6 @@ impl<'a> Cloudflare<'a> {
         Ok(Deployed { url, secret_created: secrets.is_some(), provisioned })
     }
 
-    /// Starts `cf dev` in the background with stdout piped, in its own
-    /// process group so [`stop`] ends cf, wrangler and workerd together.
-    pub fn spawn_dev(&self, port: u16) -> Result<std::process::Child, CliError> {
-        let mut command = self.command();
-        command.args(["dev", "--port", &port.to_string()]).stdout(Stdio::piped());
-        #[cfg(unix)]
-        std::os::unix::process::CommandExt::process_group(&mut command, 0);
-        command.spawn().map_err(cf_missing)
-    }
-
     /// Runs cf with its stdout routed by `echo`, and returns that stdout.
     pub fn run(&self, args: &[&str]) -> Result<String, CliError> {
         let mut command = self.command();
@@ -451,34 +441,6 @@ fn missing(tool: &str, err: std::io::Error) -> CliError {
 }
 
 /// Remote commands and `cf dev` need the app's pinned packages.
-/// `ocre logs`: streams the deployed Worker's live logs until stopped
-/// (Ctrl-C) through the app's wrangler (`wrangler tail`): cf 1.0.0-beta.5
-/// has no tail command. `format` is `pretty` or `json`; `status` keeps
-/// invocations by outcome (`ok`, `error`, `canceled`); `search` keeps
-/// events whose console lines contain the text.
-pub fn logs(format: &str, status: &[String], search: Option<&str>, json: bool) -> CliResult {
-    let project = Project::find()?;
-    require_install(&project.root)?;
-    let config = project.config()?;
-    let name = config.worker_name()?;
-    let mut args = vec!["tail", name, "--format", format];
-    for status in status {
-        args.extend(["--status", status.as_str()]);
-    }
-    if let Some(search) = search {
-        args.extend(["--search", search]);
-    }
-    let mut command = Command::new(project.root.join("node_modules/.bin/wrangler"));
-    command.args(&args).current_dir(&project.root).stdin(Stdio::null());
-    run(command, &format!("wrangler {}", args.join(" ")), Echo::for_json(json)).map_err(|err| {
-        err.hint(format!(
-            "wrangler tail uses wrangler's own login: run `npx wrangler login` in {}, or set CLOUDFLARE_API_TOKEN; the Worker must be deployed (`ocre deploy`)",
-            project.root.display()
-        ))
-    })?;
-    Ok(Report::new("logs"))
-}
-
 fn require_install(root: &Path) -> Result<(), CliError> {
     if root.join("node_modules/.bin/cf").is_file() && root.join("node_modules/.bin/wrangler").is_file() {
         return Ok(());
@@ -494,14 +456,17 @@ pub enum Sql<'a> {
     File(&'a str),
 }
 
-/// The one wrangler fallback: the local D1 database. cf 1.0.0-beta.5
-/// addresses D1 only by UUID while `cf dev` keys the local database by its
-/// binding name, keeps local state outside the app, and its local writes do
-/// not exit. The app's own wrangler reads a config derived from
-/// cloudflare.config.ts and shares `cf dev`'s state in `.wrangler/state`.
+/// The wrangler fallbacks: the local D1 database, and the server of
+/// `ocre test --e2e`. cf 1.0.0-beta.5 addresses D1 only by UUID while
+/// `cf dev` keys the local database by its binding name, keeps local state
+/// outside the app, and its local writes do not exit; `cf dev` also always
+/// uses `.wrangler/state`, so tests could not get their own database. The
+/// app's own wrangler reads a config derived from cloudflare.config.ts and
+/// shares `cf dev`'s state in `.wrangler/state` (or the test state).
 pub struct LocalD1<'a> {
     project: &'a Project,
     echo: Echo,
+    state: &'static str,
 }
 
 impl<'a> LocalD1<'a> {
@@ -509,9 +474,16 @@ impl<'a> LocalD1<'a> {
     pub const CONFIG: &'static str = ".wrangler/ocre-d1.json";
     /// Local state shared with `cf dev`, relative to the app root.
     pub const STATE: &'static str = ".wrangler/state";
+    /// Local state of `ocre test --e2e` runs, recreated by each run.
+    pub const TEST_STATE: &'static str = ".wrangler/test-state";
 
     pub fn new(project: &'a Project, echo: Echo) -> Self {
-        Self { project, echo }
+        Self { project, echo, state: Self::STATE }
+    }
+
+    /// The same database in the test state instead of the development one.
+    pub fn for_tests(self) -> Self {
+        Self { state: Self::TEST_STATE, ..self }
     }
 
     /// Applies the pending migrations.
@@ -540,7 +512,27 @@ impl<'a> LocalD1<'a> {
         self.run(&["d1", "execute", "DB", "--local", "--command", sql, "--json"], Echo::Capture)
     }
 
-    fn run(&self, args: &[&str], echo: Echo) -> Result<String, CliError> {
+    /// Starts the app on `port` like `cf dev` does (wrangler's
+    /// `--x-new-config` reads cloudflare.config.ts and wrangler.config.ts,
+    /// an unoptimized build), but on this state directory. Stdout and stderr
+    /// are piped; the server runs in its own process group so [`stop`] ends
+    /// wrangler and workerd together.
+    pub fn spawn_server(&self, port: u16) -> Result<std::process::Child, CliError> {
+        let mut command = Command::new(self.wrangler()?);
+        command
+            .args(["dev", "--x-new-config", "--port", &port.to_string(), "--persist-to", self.state])
+            .current_dir(&self.project.root)
+            .env("OCRE_BUILD", "--dev")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        command.spawn().map_err(|err| missing("wrangler", err))
+    }
+
+    /// The app's `node_modules/.bin/wrangler`, or an error naming the fix.
+    fn wrangler(&self) -> Result<std::path::PathBuf, CliError> {
         let root = &self.project.root;
         let wrangler = root.join("node_modules/.bin/wrangler");
         if !wrangler.is_file() {
@@ -548,11 +540,17 @@ impl<'a> LocalD1<'a> {
                 format!("run `npm install` in {} (local databases run through the app's wrangler)", root.display()),
             ));
         }
+        Ok(wrangler)
+    }
+
+    fn run(&self, args: &[&str], echo: Echo) -> Result<String, CliError> {
+        let root = &self.project.root;
+        let wrangler = self.wrangler()?;
         self.write_config()?;
         let mut command = Command::new(wrangler);
         command
             .args(args)
-            .args(["-c", Self::CONFIG, "--persist-to", Self::STATE])
+            .args(["-c", Self::CONFIG, "--persist-to", self.state])
             .current_dir(root)
             .stdin(Stdio::null());
         run(command, &format!("wrangler {}", args.join(" ")), echo)
@@ -648,7 +646,7 @@ pub(crate) fn pending_migrations(output: &str) -> Vec<String> {
         .collect()
 }
 
-/// Stops a process started by [`Cloudflare::spawn_dev`], with its children.
+/// Stops a process started by [`LocalD1::spawn_server`], with its children.
 pub fn stop(mut child: std::process::Child) {
     #[cfg(unix)]
     let _ = Command::new("kill").args(["-TERM", &format!("-{}", child.id())]).status();
@@ -693,6 +691,34 @@ pub fn dev(port: u16, json: bool) -> CliResult {
     LocalD1::new(&project, Echo::for_json(json)).migrate()?;
     Cloudflare::new(&project.root, Echo::for_json(json)).dev_build().run(&["dev", "--port", &port.to_string()])?;
     Ok(Report { url: Some(format!("http://localhost:{port}")), ..Report::new("dev") })
+}
+
+/// `ocre logs`: streams the deployed Worker's live logs until stopped
+/// (Ctrl-C) through the app's wrangler (`wrangler tail`): cf 1.0.0-beta.5
+/// has no tail command. `format` is `pretty` or `json`; `status` keeps
+/// invocations by outcome (`ok`, `error`, `canceled`); `search` keeps
+/// events whose console lines contain the text.
+pub fn logs(format: &str, status: &[String], search: Option<&str>, json: bool) -> CliResult {
+    let project = Project::find()?;
+    require_install(&project.root)?;
+    let config = project.config()?;
+    let name = config.worker_name()?;
+    let mut args = vec!["tail", name, "--format", format];
+    for status in status {
+        args.extend(["--status", status.as_str()]);
+    }
+    if let Some(search) = search {
+        args.extend(["--search", search]);
+    }
+    let mut command = Command::new(project.root.join("node_modules/.bin/wrangler"));
+    command.args(&args).current_dir(&project.root).stdin(Stdio::null());
+    run(command, &format!("wrangler {}", args.join(" ")), Echo::for_json(json)).map_err(|err| {
+        err.hint(format!(
+            "wrangler tail uses wrangler's own login: run `npx wrangler login` in {}, or set CLOUDFLARE_API_TOKEN; the Worker must be deployed (`ocre deploy`)",
+            project.root.display()
+        ))
+    })?;
+    Ok(Report::new("logs"))
 }
 
 pub fn deploy(json: bool) -> CliResult {

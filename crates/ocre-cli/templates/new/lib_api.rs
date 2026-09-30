@@ -5,6 +5,13 @@ use worker::{Context, Env, HttpRequest, event};
 
 // ocre:modules
 
+/// Runs once when a Worker instance starts, before its first request, job or
+/// cron run: the app's initializers. Register error reporters here, e.g.
+/// `ocre::errors::subscribe(ocre::errors::Sentry);` (needs the SENTRY_DSN secret).
+/// Keep it cheap: its CPU time counts against the first request.
+#[event(start)]
+fn start() {}
+
 #[event(fetch)]
 async fn fetch(req: HttpRequest, env: Env, _ctx: Context) -> worker::Result<worker::web_sys::Response> {
     ocre::serve(routes(), req, env).await

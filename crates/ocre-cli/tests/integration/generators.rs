@@ -108,7 +108,10 @@ fn every_run_is_recorded_and_destroy_takes_it_back() {
     assert!(root.join("src/blog_posts.rs").exists());
 
     let report = ok(&sandbox, &["d", "scaffold", "blog_post"], &root);
-    assert_eq!(report["updated"], json!(["src/models/author.rs", "src/models/mod.rs", "src/lib.rs"]));
+    assert_eq!(
+        report["updated"],
+        json!(["src/models/author.rs", "src/models/mod.rs", "tests/factories/mod.rs", "src/lib.rs"])
+    );
     assert!(report["removed"].as_array().unwrap().contains(&json!("templates/blog_posts/index.html")));
     assert_eq!(report["removed"].as_array().unwrap().last().unwrap(), ".ocre/generated/0002_scaffold_blogpost.json");
     assert!(report["next"][0].as_str().unwrap().contains("migrations/0002_create_blog_posts.sql"));
@@ -516,4 +519,45 @@ fn field_type_arguments_are_checked() {
     }
     let report = fails(&sandbox, &["g", "model", "Book", "size:tiny"], &root);
     assert!(report["hint"].as_str().unwrap().contains("decimal, boolean (bool), date, time"));
+}
+
+#[test]
+fn model_factories_bring_the_test_dependency_to_older_apps() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    // An app made before generators wrote tests: no [dev-dependencies] at all.
+    let cargo = read(&root, "Cargo.toml");
+    let start = cargo.find("\n[dev-dependencies]").unwrap();
+    let end = cargo[start + 1..].find("\n[").map_or(cargo.len(), |at| start + 1 + at);
+    let old = format!("{}{}", &cargo[..start], &cargo[end..]);
+    fs::write(root.join("Cargo.toml"), &old).unwrap();
+    ok(&sandbox, &["g", "model", "Tag", "label:string"], &root);
+    let cargo = read(&root, "Cargo.toml");
+    let dev = &cargo[cargo.find("[dev-dependencies]").expect("section added")..];
+    assert!(dev.lines().nth(1).unwrap().ends_with("features = [\"testing\"] }"), "{cargo}");
+    ok(&sandbox, &["g", "model", "Label", "name:string"], &root);
+    assert_eq!(read(&root, "Cargo.toml").matches("\"testing\"").count(), 1, "added once");
+
+    // [dev-dependencies] present, without Ocre: the line goes under it.
+    fs::write(root.join("Cargo.toml"), format!("{old}\n[dev-dependencies]\npretty_assertions = \"1\"\n")).unwrap();
+    ok(&sandbox, &["g", "model", "Badge", "name:string"], &root);
+    assert!(read(&root, "Cargo.toml").contains("[dev-dependencies]\nocre = {"));
+}
+
+#[test]
+fn model_factories_need_a_one_line_ocre_dependency_and_the_marker() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    let cargo = read(&root, "Cargo.toml");
+    let broken: String = cargo.lines().filter(|l| !l.starts_with("ocre = ")).map(|l| format!("{l}\n")).collect();
+    fs::write(root.join("Cargo.toml"), broken).unwrap();
+    let report = fails(&sandbox, &["g", "model", "Tag", "label:string"], &root);
+    assert_eq!(report["error"], "Cargo.toml has no one-line `ocre = { ... }` dependency");
+
+    fs::write(root.join("Cargo.toml"), cargo).unwrap();
+    fs::create_dir_all(root.join("tests/factories")).unwrap();
+    fs::write(root.join("tests/factories/mod.rs"), "pub mod tag;\n").unwrap();
+    let report = fails(&sandbox, &["g", "model", "Tag", "label:string"], &root);
+    assert_eq!(report["error"], "tests/factories/mod.rs is missing the `// ocre:factories` marker");
+    assert!(!root.join("src/models/tag.rs").exists(), "nothing written");
 }

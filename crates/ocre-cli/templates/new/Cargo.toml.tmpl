@@ -17,6 +17,11 @@ axum = { version = "0.8.9", default-features = false, features = ["form", "json"
 askama = "0.16.1"
 serde = { version = "1.0", features = ["derive"] }
 
+# `ocre::testing` for `cargo test` and `ocre test --e2e`: native test builds
+# only, never in the WebAssembly build.
+[dev-dependencies]
+__OCRE_TEST_DEP__
+
 # `strip` breaks wasm-bindgen ("externref table required"); keep symbols.
 [profile.release]
 lto = true

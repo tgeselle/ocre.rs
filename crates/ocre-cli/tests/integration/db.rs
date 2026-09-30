@@ -175,7 +175,10 @@ fn db_seed_without_a_seeds_file_names_the_fix() {
     let (report, ok) = sandbox.json(&["db", "seed"], &root);
     assert!(!ok);
     assert_eq!(report["error"], "db/seeds.sql not found in the app");
-    assert_eq!(report["hint"], "create db/seeds.sql with INSERT statements, then run `ocre db seed`");
+    assert_eq!(
+        report["hint"],
+        "create db/seeds.sql with INSERT statements or fixture files in db/fixtures/, then run `ocre db seed`"
+    );
     assert!(sandbox.calls().is_empty());
 }
 

@@ -92,7 +92,8 @@ fn add_model(edits: &mut Edits, names: &ModelNames, fields: &[Field], command: &
         let path = next_migration_path(edits, &format!("create_{}", names.plural))?;
         edits.create(&path, table_sql(&names.plural, fields))?;
     }
-    edits.create(&model_path(names), model_rs(names, fields, command))
+    edits.create(&model_path(names), model_rs(names, fields, command))?;
+    super::test_files::add_factory(edits, names, fields, command)
 }
 
 /// Adds `pub mod <module>;` to src/models/mod.rs, creating it (and `mod models;`
