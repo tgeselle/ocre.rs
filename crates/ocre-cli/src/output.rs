@@ -70,6 +70,9 @@ pub struct Report {
     /// `ocre secret`: a new random value for SECRET_KEY_BASE.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secret: Option<String>,
+    /// `ocre time-zones`: IANA time zone names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_zones: Option<Vec<&'static str>>,
     /// `ocre domains`: the Worker's custom domains.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub domains: Option<Vec<String>>,
@@ -200,6 +203,9 @@ fn print_human(report: &Report) {
         for domain in domains {
             println!("  {domain}");
         }
+    }
+    for zone in report.time_zones.iter().flatten() {
+        println!("{zone}");
     }
     for secret in report.secrets.iter().flatten() {
         let local = if secret.local { ".dev.vars" } else { "" };

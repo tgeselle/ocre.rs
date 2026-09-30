@@ -185,6 +185,11 @@ enum Command {
     ///
     /// Example: `ocre secret` for a value to put in a git-ignored env file, then `ocre secrets push`.
     Secret,
+    /// Print the IANA time zone names `ocre::helpers::time_zone_options` offers
+    /// (Rails' `bin/rails time:zones:all`).
+    ///
+    /// Example: `ocre time-zones | grep Europe`.
+    TimeZones,
     /// Worker secrets (Ocre's credentials): list them, or upload values from a
     /// git-ignored env file. Values are encrypted by Cloudflare and never
     /// read back.
@@ -755,6 +760,10 @@ fn main() -> ExitCode {
         Command::Deploy => cloudflare::deploy(json),
         Command::Logs { format, status, search } => cloudflare::logs(&format, &status, search.as_deref(), json),
         Command::Secret => secret::run(),
+        Command::TimeZones => Ok(output::Report {
+            time_zones: Some(ocre::helpers::TIME_ZONES.to_vec()),
+            ..output::Report::new("time-zones")
+        }),
         Command::Secrets(SecretsCommand::List) => Project::find().and_then(|project| secrets::list(&project, json)),
         Command::Secrets(SecretsCommand::Push { names, file }) => {
             Project::find().and_then(|project| secrets::push(&project, &names, &file, json))

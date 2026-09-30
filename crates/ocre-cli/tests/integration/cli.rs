@@ -977,3 +977,14 @@ fn deploy_failures_carry_hints() {
     let last = sandbox.calls().pop().unwrap();
     assert_eq!(last, "cf workers secrets list --worker shop", "nothing ran after the failed check");
 }
+
+#[test]
+fn time_zones_lists_the_iana_names() {
+    let sandbox = Sandbox::new();
+    let (report, ok) = sandbox.json(&["time-zones"], &sandbox.work);
+    assert!(ok, "{report}");
+    let zones = report["time_zones"].as_array().unwrap();
+    assert!(zones.len() > 400 && zones.contains(&serde_json::json!("Europe/Paris")));
+    let output = sandbox.ocre(&["time-zones"], &sandbox.work);
+    assert!(String::from_utf8(output.stdout).unwrap().lines().any(|line| line == "America/New_York"));
+}

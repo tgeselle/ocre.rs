@@ -143,3 +143,11 @@ fn current_page_compares_paths_then_query_and_host_when_given() {
     assert!(!current_page("https://a.example/posts", "https://b.example/posts"));
     assert_eq!(split_url("http://h?q#f"), (Some("h"), "/", Some("q")));
 }
+
+#[test]
+fn time_zone_options_mark_the_selected_zone() {
+    let options = time_zone_options("Asia/Tokyo");
+    assert_eq!(options.matches("<option").count(), TIME_ZONES.len());
+    assert!(options.starts_with("<option>UTC</option>"));
+    assert!(options.contains("<option selected>Asia/Tokyo</option>") && !options.contains("selected>UTC"));
+}

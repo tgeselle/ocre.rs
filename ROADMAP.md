@@ -4,7 +4,7 @@ Feature-level inventory of Rails 8.1 and Loco 1.2, with what Ocre has and how
 each part maps to Cloudflare's free plan. Collected from the official Rails
 guides and the Loco documentation source; every item links to its page.
 
-993 features: 737 done, 76 partial, 28 to do, 152 not applicable on Workers.
+993 features: 739 done, 76 partial, 26 to do, 152 not applicable on Workers.
 
 Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason given).
 (R) Rails, (L) Loco.
@@ -316,7 +316,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** axum handlers and routers, askama templates compiled into the binary, htmx instead of Turbo/Stimulus, Workers Static Assets for files (free, not counted as Worker requests). tower middlewares that do not need tokio compile to WebAssembly.
 
-202 features: 185 done, 1 partial, 5 to do, 11 not applicable.
+202 features: 186 done, 1 partial, 4 to do, 11 not applicable.
 
 ### Controllers
 
@@ -480,7 +480,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [x] **Method override for PATCH/PUT/DELETE** (R): Hidden _method field lets HTML forms send non-GET/POST verbs. *Ocre: HTML routes use `POST /x/{id}` and `POST /x/{id}/delete` instead of `_method`.* [form_helpers](https://guides.rubyonrails.org/form_helpers.html)
 - [x] **select and options helpers** (R): select with option arrays/hashes, selected/disabled values, option groups (grouped_options_for_select) and model binding. *Ocre: `<select>` with a `{% for %}`, documented with the selected value.* [form_helpers](https://guides.rubyonrails.org/form_helpers.html)
 - [x] **Date and time select helpers** (R): date_select, time_select, datetime_select and select_year/month/day etc. with multi-parameter attributes. *Ocre: native `date`/`time`/`datetime-local` inputs checked by `Validator::date`.* [form_helpers](https://guides.rubyonrails.org/form_helpers.html)
-- [ ] **time_zone_select** (R): Select box of time zones, optionally prioritized. [form_helpers](https://guides.rubyonrails.org/form_helpers.html)
+- [x] **time_zone_select** (R): Select box of time zones, optionally prioritized. *Ocre: `ocre::helpers::time_zone_options(selected)` writes the `<option>`s of the 418 IANA zones browsers know, for a `<select name="time_zone">`.* [form_helpers](https://guides.rubyonrails.org/form_helpers.html)
 - [x] **Collection helpers** (R): collection_select, collection_radio_buttons and collection_checkboxes build inputs from object collections. *Ocre: `{% for %}` over records to build options, radios or checkboxes.* [form_helpers](https://guides.rubyonrails.org/form_helpers.html)
 - [x] **File uploads** (R): file_field with automatic multipart encoding; uploaded files accessible as objects in params. *Ocre: `ocre::storage::Multipart` and attachment fields.* [form_helpers](https://guides.rubyonrails.org/form_helpers.html)
 - [x] **Custom form builders** (R): Subclass FormBuilder and use builder: or default_form_builder to add custom field methods. *Ocre: askama macros (the `errors_for` example).* [form_helpers](https://guides.rubyonrails.org/form_helpers.html)
@@ -969,7 +969,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** `ocre` CLI: non-interactive with `--json`, wizard in a terminal. Cloudflare commands wrap Cloudflare's `cf` CLI; local D1 commands still run the app's wrangler (see the last section).
 
-118 features: 69 done, 18 partial, 1 to do, 30 not applicable.
+118 features: 70 done, 18 partial, 0 to do, 30 not applicable.
 
 ### CLI
 
@@ -1022,7 +1022,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [x] **bin/rails initializers** (R): Lists initializers in the order they run. *Ocre: one-time setup is the `#[event(start)]` function of src/lib.rs (once per Worker instance), read in the code.* [command_line](https://guides.rubyonrails.org/command_line.html)
 - [x] **bin/rails middleware** (R): Lists the Rack middleware stack. *Ocre: the `.layer(...)` calls of `routes()` in src/lib.rs, inside the fixed stack of `ocre::serve`.* [command_line](https://guides.rubyonrails.org/command_line.html)
 - [x] **bin/rails stats** (R): Reports code statistics (lines of code, classes, methods, code-to-test ratio); more directories can be added to the report. *Ocre: `ocre stats [dir...]`.* [command_line](https://guides.rubyonrails.org/command_line.html)
-- [ ] **bin/rails time:zones:all** (R): Lists every time zone Rails knows about. [command_line](https://guides.rubyonrails.org/command_line.html)
+- [x] **bin/rails time:zones:all** (R): Lists every time zone Rails knows about. *Ocre: `ocre time-zones` prints the IANA names (`--json` for a list).* [command_line](https://guides.rubyonrails.org/command_line.html)
 - [x] **Asset commands** (R): assets:precompile compiles production assets and assets:clobber removes them. *Ocre: the `build.command` of wrangler.config.ts builds assets on every `ocre dev` and `ocre deploy`, and `public/` is uploaded as Workers Static Assets.* [command_line](https://guides.rubyonrails.org/command_line.html)
 - [x] **db:create / db:drop** (R): Creates or drops the database for the current environment, or for every environment with db:create:all and db:drop:all. *Ocre: `ocre db create [--remote]`, `ocre db drop` (local only: production data is never deleted).* [command_line](https://guides.rubyonrails.org/command_line.html)
 - [x] **db:seed / db:seed:replant** (R): Loads db/seeds.rb; db:seed:replant empties the tables first. *Ocre: `ocre db seed` (SQL seeds), `--replant` (local).* [command_line](https://guides.rubyonrails.org/command_line.html)
