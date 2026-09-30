@@ -716,6 +716,25 @@ fn test_e2e_runs_request_tests_and_the_script_against_one_server() {
     let log = fs::read_to_string(sandbox.work.join("../state/cargo.log")).unwrap();
     assert!(log.contains("test posts -- --nocapture --ignored --test-threads=1 [http://localhost:8788"), "{log}");
 
+    // Browser tests of tests/system/ run with the app's Playwright.
+    fs::create_dir_all(root.join("tests/system")).unwrap();
+    fs::write(root.join("tests/system/home.spec.ts"), "").unwrap();
+    assert_eq!(
+        fails(&sandbox, &["test", "--e2e"], &root)["error"],
+        "tests/system has tests but Playwright is not installed"
+    );
+    fs::create_dir_all(root.join("node_modules/.bin")).unwrap();
+    let playwright = root.join("node_modules/.bin/playwright");
+    fs::write(&playwright, "#!/bin/sh\necho \"playwright $1 on $BASE_URL\"\n").unwrap();
+    fs::set_permissions(&playwright, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let output = sandbox.ocre(&["test", "--e2e", "--json"], &root);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["ran"][5], "playwright test (tests/system) against the test server on port 8788: ok", "{report}");
+    assert!(text(&output).1.contains("playwright test on http://localhost:8788"), "{}", text(&output).1);
+    fs::write(&playwright, "#!/bin/sh\nexit 1\n").unwrap();
+    assert_eq!(fails(&sandbox, &["test", "--e2e"], &root)["error"], "playwright test failed (exit status: 1)");
+    fs::remove_dir_all(root.join("tests/system")).unwrap();
+
     fs::write(root.join("tests/e2e.sh"), "exit 3\n").unwrap();
     assert_eq!(fails(&sandbox, &["test", "--e2e"], &root)["error"], "tests/e2e.sh failed (exit status: 3)");
     sandbox.set("ignored_fails");

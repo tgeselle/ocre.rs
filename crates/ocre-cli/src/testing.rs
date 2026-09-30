@@ -11,7 +11,8 @@
 //!    - `cargo test -- --ignored` (the request tests, `#[ignore]`d in plain
 //!      `cargo test`) with `OCRE_TEST_URL`, `OCRE_TEST_STATE` and
 //!      `OCRE_TEST_LOG` set for `ocre::testing`,
-//!    - `tests/e2e.sh` with `BASE_URL`, when the app has one.
+//!    - `tests/e2e.sh` with `BASE_URL`, when the app has one,
+//!    - the Playwright browser tests of `tests/system/` (`ocre g system_test`), when there are some.
 //!
 //!    The server stops when they end.
 //!
@@ -30,6 +31,7 @@ use crate::{
     CliResult,
     cloudflare::{Echo, LocalD1, Sql},
     fixtures,
+    generate::system_test::SYSTEM_TESTS,
     output::{CliError, Report},
     project::{Project, check_wasm_target},
 };
@@ -192,13 +194,50 @@ fn run_against(
     let name = "cargo test -- --ignored";
     cargo(project, name, &ignored_tests(cargo_args), &env, json)??;
     ran.push(format!("{name} against the test server on port {port}: ok"));
-    if !project.root.join(E2E_SCRIPT).is_file() {
-        return Ok(());
+    if project.root.join(E2E_SCRIPT).is_file() {
+        e2e_script(project, &base, json)?;
+        ran.push(format!("{E2E_SCRIPT} against the test server on port {port}: ok"));
     }
+    if has_system_tests(&project.root) {
+        system_tests(project, &base, json)?;
+        ran.push(format!("playwright test ({SYSTEM_TESTS}) against the test server on port {port}: ok"));
+    }
+    Ok(())
+}
+
+/// Whether `tests/system/` holds a Playwright test.
+fn has_system_tests(root: &Path) -> bool {
+    std::fs::read_dir(root.join(SYSTEM_TESTS)).is_ok_and(|entries| {
+        entries.filter_map(Result::ok).any(|entry| entry.file_name().to_string_lossy().ends_with(".spec.ts"))
+    })
+}
+
+/// The browser tests of `tests/system/` (`ocre g system_test`), with Playwright.
+fn system_tests(project: &Project, base: &str, json: bool) -> Result<(), CliError> {
+    let playwright = project.root.join("node_modules/.bin/playwright");
+    if !playwright.exists() {
+        return Err(CliError::new(format!("{SYSTEM_TESTS} has tests but Playwright is not installed"))
+            .hint("run `npm install` (package.json lists @playwright/test), then `npx playwright install chromium`"));
+    }
+    let status = Command::new(playwright)
+        .arg("test")
+        .current_dir(&project.root)
+        .env("BASE_URL", base)
+        .stdout(output(json))
+        .status()?;
+    if !status.success() {
+        return Err(CliError::new(format!("playwright test failed ({status})")).hint(
+            "its output above names the failing test; test-results/ has a screenshot and a trace of each (`npx playwright show-trace <file>`)",
+        ));
+    }
+    Ok(())
+}
+
+fn e2e_script(project: &Project, base: &str, json: bool) -> Result<(), CliError> {
     let status = Command::new("sh")
         .arg(E2E_SCRIPT)
         .current_dir(&project.root)
-        .env("BASE_URL", &base)
+        .env("BASE_URL", base)
         .stdout(output(json))
         .status()?;
     if !status.success() {
@@ -206,6 +245,5 @@ fn run_against(
             CliError::new(format!("{E2E_SCRIPT} failed ({status})")).hint("its output above shows the failing request")
         );
     }
-    ran.push(format!("{E2E_SCRIPT} against the test server on port {port}: ok"));
     Ok(())
 }

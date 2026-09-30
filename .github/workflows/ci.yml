@@ -95,6 +95,7 @@ jobs:
           ocre g api Document name:string file:attachment? --graphql --json
           ocre g cache --json
           ocre g data countries --json
+          ocre g system_test signing_up --json
           ocre g locale en fr --json
           printf 'fr:\n  app:\n    welcome: "Bienvenue"\n' > locales/fr.yml
           # Rich text (Trix), optimistic locking and a self join.

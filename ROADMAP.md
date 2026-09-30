@@ -4,7 +4,7 @@ Feature-level inventory of Rails 8.1 and Loco 1.2, with what Ocre has and how
 each part maps to Cloudflare's free plan. Collected from the official Rails
 guides and the Loco documentation source; every item links to its page.
 
-993 features: 726 done, 76 partial, 41 to do, 150 not applicable on Workers.
+993 features: 732 done, 76 partial, 35 to do, 150 not applicable on Workers.
 
 Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason given).
 (R) Rails, (L) Loco.
@@ -1099,7 +1099,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** Native unit tests for pure code; request tests need workerd (`cf dev`/Miniflare), which is slow, so Ocre should offer a harness that starts one server for a whole test run.
 
-78 features: 52 done, 11 partial, 7 to do, 8 not applicable.
+78 features: 58 done, 11 partial, 1 to do, 8 not applicable.
 
 ### Testing
 
@@ -1145,12 +1145,12 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [x] **Flash notice testing** (R): Tests can check flash messages after an action runs. *Ocre: `Client::flash`.* [testing](https://guides.rubyonrails.org/testing.html)
 - [x] **Integration tests** (R): ActionDispatch::IntegrationTest runs requests across several controllers through the full middleware stack. *Ocre: Request tests follow redirects and keep cookies across requests.* [testing](https://guides.rubyonrails.org/testing.html)
 - [x] **Integration test helpers** (R): follow_redirect!, https!, host!, open_session (for multiple sessions) and URL helpers are available in integration tests. *Ocre: `ocre::testing` functions in the app's tests/.* [testing](https://guides.rubyonrails.org/testing.html)
-- [ ] **System tests** (R): ActionDispatch::SystemTestCase uses Capybara to drive a real browser and test the app end to end, JavaScript included. [testing](https://guides.rubyonrails.org/testing.html)
-- [ ] **System test generator** (R): `bin/rails generate system_test` creates system test files and application_system_test_case.rb. [testing](https://guides.rubyonrails.org/testing.html)
-- [ ] **Configurable system test driver** (R): driven_by picks the driver (:selenium, :cuprite, :rack_test), the browser (chrome, headless_chrome, firefox), the screen size and driver options. [testing](https://guides.rubyonrails.org/testing.html)
-- [ ] **Multiple screen size testing** (R): Subclasses of the system test case can run the same tests at other screen sizes, such as mobile. [testing](https://guides.rubyonrails.org/testing.html)
-- [ ] **Capybara assertions** (R): assert_selector, assert_text, assert_current_path, assert_link, assert_button and similar assertions check page state in system tests. [testing](https://guides.rubyonrails.org/testing.html)
-- [ ] **Screenshot helper** (R): take_screenshot, plus an automatic screenshot when a test fails (take_failed_screenshot), captures what the browser shows. [testing](https://guides.rubyonrails.org/testing.html)
+- [x] **System tests** (R): ActionDispatch::SystemTestCase uses Capybara to drive a real browser and test the app end to end, JavaScript included. *Ocre: `ocre g system_test <name>` writes a Playwright test in tests/system/; `ocre test --e2e` runs it in a real browser against the test server, JavaScript included.* [testing](https://guides.rubyonrails.org/testing.html)
+- [x] **System test generator** (R): `bin/rails generate system_test` creates system test files and application_system_test_case.rb. *Ocre: `ocre g system_test <name>`; the first one adds playwright.config.ts and `@playwright/test` to package.json.* [testing](https://guides.rubyonrails.org/testing.html)
+- [x] **Configurable system test driver** (R): driven_by picks the driver (:selenium, :cuprite, :rack_test), the browser (chrome, headless_chrome, firefox), the screen size and driver options. *Ocre: playwright.config.ts `projects`: Chromium by default, Firefox or WebKit with `devices[...]`, headless unless `--headed`.* [testing](https://guides.rubyonrails.org/testing.html)
+- [x] **Multiple screen size testing** (R): Subclasses of the system test case can run the same tests at other screen sizes, such as mobile. *Ocre: the generated playwright.config.ts runs each test on a desktop and a phone screen (`devices["Pixel 7"]`).* [testing](https://guides.rubyonrails.org/testing.html)
+- [x] **Capybara assertions** (R): assert_selector, assert_text, assert_current_path, assert_link, assert_button and similar assertions check page state in system tests. *Ocre: Playwright's auto-waiting assertions: `expect(page.getByText(..)).toBeVisible()`, `toHaveURL`, `getByRole("link")`...* [testing](https://guides.rubyonrails.org/testing.html)
+- [x] **Screenshot helper** (R): take_screenshot, plus an automatic screenshot when a test fails (take_failed_screenshot), captures what the browser shows. *Ocre: `screenshot: "only-on-failure"` and a trace per failed test in test-results/; `await page.screenshot()` anywhere.* [testing](https://guides.rubyonrails.org/testing.html)
 - [x] **Custom test helpers in separate files** (R): Helper modules kept in their own files (for example test/test_helpers) can be included into test classes for reuse. *Ocre: Modules under tests/ (tests/factories is one).* [testing](https://guides.rubyonrails.org/testing.html)
 - [-] **Eagerly requiring helpers** (R): Requiring helper files from test_helper.rb makes them available in every test. *Not applicable: Rust modules are compiled, not loaded.* [testing](https://guides.rubyonrails.org/testing.html)
 - [~] **Route testing** (R): Routing assertions in separate tests check complex route definitions. *Ocre: Request tests hit routes; `ocre routes` lists them.* [testing](https://guides.rubyonrails.org/testing.html)

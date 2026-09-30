@@ -25,6 +25,7 @@ pub(crate) mod record;
 mod scaffold;
 mod schedule;
 pub(crate) mod storage;
+pub(crate) mod system_test;
 mod templates;
 mod test_files;
 
@@ -46,6 +47,7 @@ pub use model::model;
 pub use pwa::pwa;
 pub use scaffold::scaffold;
 pub use schedule::schedule;
+pub use system_test::system_test;
 pub use templates::{TemplateInfo, override_templates};
 
 use crate::{

@@ -449,6 +449,16 @@ enum GenerateCommand {
     ///
     /// Example: `ocre g cache`.
     Cache,
+    /// A browser test (Rails' system test): tests/system/<name>.spec.ts, run by
+    /// Playwright against the test server of `ocre test --e2e`. The first one
+    /// adds playwright.config.ts and `@playwright/test` to package.json.
+    ///
+    /// Example: `ocre g system_test signing_up`.
+    #[command(name = "system_test", alias = "system-test")]
+    SystemTest {
+        /// Name in snake_case (e.g. `signing_up`).
+        name: String,
+    },
     /// Read-only data shipped with the Worker: data/<name>.json, parsed once
     /// per Worker instance by src/data/<name>.rs (`crate::data::<name>::all()`).
     ///
@@ -800,6 +810,7 @@ fn generate_command(args: GenerateArgs) -> CliResult {
         GenerateCommand::Schedule { name, cron } => generate::schedule(project, &name, &cron),
         GenerateCommand::Cache => generate::cache(project),
         GenerateCommand::Data { name } => generate::data(project, &name),
+        GenerateCommand::SystemTest { name } => generate::system_test(project, &name),
         GenerateCommand::Ci => generate::ci(project),
         GenerateCommand::Pwa => generate::pwa(project),
         GenerateCommand::Locale { codes } => generate::locale(project, &codes),

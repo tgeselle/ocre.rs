@@ -621,3 +621,38 @@ fn generated_rust_is_formatted_by_rustfmt_when_available() {
     assert!(sandbox.json(&["g", "model", "Label", "name:string"], &root).1);
     assert!(fs::read_to_string(root.join("src/models/label.rs")).unwrap().contains("pub fn query() -> Query<Label>"));
 }
+
+#[test]
+fn system_tests_add_playwright_once() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    let (report, ok) = sandbox.json(&["g", "system_test", "signing_up"], &root);
+    assert!(ok, "{report}");
+    assert_eq!(report["created"], json!(["playwright.config.ts", "tests/system/signing_up.spec.ts"]));
+    assert_eq!(report["updated"], json!(["package.json", ".gitignore"]));
+    assert!(
+        fs::read_to_string(root.join("package.json"))
+            .unwrap()
+            .contains("\"devDependencies\": {\n    \"@playwright/test\": \"1.63.0\",\n")
+    );
+    assert!(fs::read_to_string(root.join("tests/system/signing_up.spec.ts")).unwrap().contains("test(\"Signing up\""));
+    let (report, ok) = sandbox.json(&["g", "system-test", "checkout"], &root);
+    assert!(ok, "{report}");
+    assert_eq!(report["created"], json!(["tests/system/checkout.spec.ts"]), "config and package once");
+
+    assert_eq!(sandbox.json(&["g", "system_test", "Bad"], &root).0["error"], "invalid system test name `Bad`");
+    assert_eq!(
+        sandbox.json(&["g", "system_test", "checkout"], &root).0["error"],
+        "tests/system/checkout.spec.ts already exists"
+    );
+    let other = sandbox.new_app("other", &[]);
+    fs::write(other.join("package.json"), "{}\n").unwrap();
+    assert_eq!(
+        sandbox.json(&["g", "system_test", "x"], &other).0["error"],
+        "package.json has no `\"devDependencies\": {` block"
+    );
+    fs::write(other.join("package.json"), "{\n  \"devDependencies\": {\n  }\n}\n").unwrap();
+    fs::write(other.join(".gitignore"), "target/\ntest-results/\n").unwrap();
+    let (report, _) = sandbox.json(&["g", "system_test", "x"], &other);
+    assert_eq!(report["updated"], json!(["package.json"]), "test-results/ already ignored");
+}
