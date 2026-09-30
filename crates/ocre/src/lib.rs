@@ -40,7 +40,10 @@
 //! |---|---|
 //! | crate root | [`serve`], [`Ctx`], [`Db`], [`params!`] and [`Query`] / [`Paginated`] (D1), [`Error`] / [`Result`], [`Json`] / [`ApiError`] / [`Page`] (JSON APIs), [`Session`] / [`Flash`], [`Validator`], [`NestedForm`] (bracketed form names), request helpers ([`Format`], [`RemoteIp`], [`RequestId`], [`redirect_back`]), `render` / `error_page` / `Htmx` / `HxRedirect` (feature `html`), serde helpers ([`optional`], [`patch`], [`bool_from_sql`], ...) |
 //! | [`cache`] | Read-through values in Workers KV, `Cache-Control`, `ETag` and `304 Not Modified` |
+//! | [`config`] | Typed app settings from Worker variables and secrets (`ctx.config::<Settings>()`), the environment (development or production) |
 //! | [`encryption`] | Encrypted model columns (AES-256-GCM keyed from `SECRET_KEY_BASE`), deterministic for lookups |
+//! | [`errors`] | Error reporting (Rails' `Rails.error`): `ctx.errors().report / handle / record`, subscribers such as Sentry |
+//! | [`events`] | Structured events (Rails' `Rails.event`): `ctx.events().notify(name, payload)`, tags, context, subscribers |
 #![cfg_attr(
     feature = "html",
     doc = "| [`filters`] | Ocre's view helpers as askama filters: `{{ price\\|number_to_currency(\"$\") }}` (feature `html`) |"
@@ -61,6 +64,7 @@
 //! | [`i18n`] | Translations from `locales/*.yml`, plurals, the request's locale |
 //! | [`jobs`] | Background jobs on Cloudflare Queues, scheduled tasks on Cron Triggers |
 //! | [`jwt`] | HS256 JSON Web Tokens for API clients |
+//! | [`log`] | Structured logging to Workers Logs: levels, request-scoped fields (`ctx.log()`), JSON lines |
 //! | [`mail`] | Sending email (log, Resend, Cloudflare adapters) and receiving it from Email Routing |
 //! | [`oauth`] | "Sign in with GitHub / Google": OAuth 2.0 code flow with PKCE |
 //! | [`password`] | PBKDF2-HMAC-SHA256 password digests |
@@ -138,6 +142,7 @@ pub mod config;
 pub mod encryption;
 mod error;
 pub mod errors;
+pub mod events;
 mod fields;
 #[cfg(feature = "html")]
 #[cfg_attr(docsrs, doc(cfg(feature = "html")))]

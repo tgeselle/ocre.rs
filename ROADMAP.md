@@ -4,7 +4,7 @@ Feature-level inventory of Rails 8.1 and Loco 1.2, with what Ocre has and how
 each part maps to Cloudflare's free plan. Collected from the official Rails
 guides and the Loco documentation source; every item links to its page.
 
-993 features: 707 done, 72 partial, 81 to do, 133 not applicable on Workers.
+993 features: 710 done, 72 partial, 77 to do, 134 not applicable on Workers.
 
 Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason given).
 (R) Rails, (L) Loco.
@@ -873,7 +873,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** Error pages and JSON errors exist. Logs through console output and Workers Logs. No interactive debugger on Workers; local debugging with `ocre dev` (`cf dev`).
 
-44 features: 29 done, 2 partial, 2 to do, 11 not applicable.
+44 features: 29 done, 2 partial, 1 to do, 12 not applicable.
 
 ### Errors
 
@@ -914,7 +914,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 - [~] **Verbose query logs** (R): Logs the source location that triggered each SQL query (config.active_record.verbose_query_logs). *Ocre: Each D1 statement is logged at debug with its SQL and duration, without the source location.* [debugging_rails_applications](https://guides.rubyonrails.org/debugging_rails_applications.html)
 - [~] **Verbose enqueue logs** (R): Logs the source location that enqueued each background job. *Ocre: Jobs log `[ocre jobs]` lines; no source location.* [debugging_rails_applications](https://guides.rubyonrails.org/debugging_rails_applications.html)
 - [ ] **Verbose redirect logs** (R): Logs the source location of each redirect (config.action_dispatch.verbose_redirect_logs). [debugging_rails_applications](https://guides.rubyonrails.org/debugging_rails_applications.html)
-- [ ] **SQL query comments (Query Logs)** (R): config.active_record.query_log_tags adds sqlcommenter-style comments to SQL (application, controller, action, job and custom tags). [debugging_rails_applications](https://guides.rubyonrails.org/debugging_rails_applications.html)
+- [-] **SQL query comments (Query Logs)** (R): config.active_record.query_log_tags adds sqlcommenter-style comments to SQL (application, controller, action, job and custom tags). *Not applicable: D1's query insights group identical SQL text, which per-request comments would split; each statement's debug log line carries the request id instead.* [debugging_rails_applications](https://guides.rubyonrails.org/debugging_rails_applications.html)
 - [x] **Tagged logging** (R): ActiveSupport::TaggedLogging adds tags such as request_id or subdomain to log lines, through config.log_tags or logger.tagged. *Ocre: `ctx.log().with(key, value)`; request lines carry request_id, method, path.* [debugging_rails_applications](https://guides.rubyonrails.org/debugging_rails_applications.html)
 - [x] **Log performance considerations** (R): Block-form logging and suitable log levels avoid building expensive strings in production. *Ocre: `Logger::enabled(level)` and `format_args!`; documented.* [debugging_rails_applications](https://guides.rubyonrails.org/debugging_rails_applications.html)
 - [-] **Debugger context commands** (R): info, backtrace (bt) and outline (ls) show local and instance variables, stack frames and available methods. *Not applicable: No interactive debugger in workerd; see the debugging guide (logs, DevTools inspector).* [debugging_rails_applications](https://guides.rubyonrails.org/debugging_rails_applications.html)
@@ -1186,7 +1186,7 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 
 **On Workers:** `ocre deploy` replaces Kamal/Docker: one command, free plan. Solid Queue/Cache/Cable map to Queues, Cache API/KV and Durable Objects.
 
-33 features: 21 done, 0 partial, 5 to do, 7 not applicable.
+33 features: 24 done, 0 partial, 2 to do, 7 not applicable.
 
 ### Deployment
 
@@ -1217,9 +1217,9 @@ Legend: `[x]` done, `[~]` partial, `[ ]` to do, `[-]` not applicable (reason giv
 ### Rails 8.1
 
 - [x] **Active Job Continuations** (R): ActiveJob::Continuable splits a job into steps (blocks or methods) with cursors (step.cursor, step.advance!) so an interrupted job resumes from its last completed step. *Ocre: a job does one slice within its CPU budget and enqueues itself with a cursor field for the rest (Jobs guide, "Long jobs").* [8_1_release_notes](https://guides.rubyonrails.org/8_1_release_notes.html)
-- [ ] **Structured Event Reporting** (R): Rails.event.notify emits named, structured events with a payload and source location to subscribers. [8_1_release_notes](https://guides.rubyonrails.org/8_1_release_notes.html)
-- [ ] **Event tags and context** (R): Rails.event.tagged adds tags to events in a block, and Rails.event.set_context adds request-wide context to every event. [8_1_release_notes](https://guides.rubyonrails.org/8_1_release_notes.html)
-- [ ] **Event subscribers** (R): Subscribers implement #emit to decide how structured events are serialized and where they are sent. [8_1_release_notes](https://guides.rubyonrails.org/8_1_release_notes.html)
+- [x] **Structured Event Reporting** (R): Rails.event.notify emits named, structured events with a payload and source location to subscribers. *Ocre: `ctx.events().notify("order.placed", payload)` logs an `event` line with the request's fields and queues it for subscribers (`ocre::events`).* [8_1_release_notes](https://guides.rubyonrails.org/8_1_release_notes.html)
+- [x] **Event tags and context** (R): Rails.event.tagged adds tags to events in a block, and Rails.event.set_context adds request-wide context to every event. *Ocre: `ctx.events().tagged(key, value)` and `ctx.events().set_context(key, value)`.* [8_1_release_notes](https://guides.rubyonrails.org/8_1_release_notes.html)
+- [x] **Event subscribers** (R): Subscribers implement #emit to decide how structured events are serialized and where they are sent. *Ocre: `ocre::events::subscribe` with a `Subscriber` whose `emit` returns the HTTP request to send, delivered after the handler.* [8_1_release_notes](https://guides.rubyonrails.org/8_1_release_notes.html)
 - [x] **Local CI** (R): A DSL in config/ci.rb (CI.run, step, success?, failure), run by bin/ci, runs setup, style, security and test steps on the developer's machine. *Ocre: `ocre ci` runs fmt, clippy, tests, the wasm32 check and `ocre i18n missing`, stopping at the first failure; `ocre g ci` writes the same steps as a GitHub workflow, then `ocre deploy` on main.* [8_1_release_notes](https://guides.rubyonrails.org/8_1_release_notes.html)
 - [x] **gh signoff integration** (R): Local CI can sign off a pull request through the gh CLI, so only PRs with a passing CI run can be merged. *Ocre: `ocre ci --signoff` runs `gh signoff` after a green run.* [8_1_release_notes](https://guides.rubyonrails.org/8_1_release_notes.html)
 - [x] **Markdown rendering** (R): `format.md` in respond_to and `render markdown:` return an object's #to_markdown output as a Markdown response. *Ocre: `ocre::Markdown(text)` answers `text/markdown`, and `Format::Markdown` matches `Accept: text/markdown`.* [8_1_release_notes](https://guides.rubyonrails.org/8_1_release_notes.html)

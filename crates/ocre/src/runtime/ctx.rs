@@ -8,7 +8,9 @@ use serde::de::DeserializeOwned;
 use worker::{D1Database, D1DatabaseSession, Env, js_sys::Array, send::SendWrapper};
 
 use super::{Db, d1::Handle};
-use crate::{Error, Result, cache::QUERY_CACHE_LIMIT, errors::Reporter, instrument::Timings, log::Logger};
+use crate::{
+    Error, Result, cache::QUERY_CACHE_LIMIT, errors::Reporter, events::Events, instrument::Timings, log::Logger,
+};
 
 /// Name of the D1 binding every Ocre app uses for its main database.
 const DB_BINDING: &str = "DB";
@@ -54,6 +56,7 @@ pub struct Ctx {
     memo: Arc<Memo>,
     log: Logger,
     errors: Reporter,
+    events: Events,
     timings: Timings,
 }
 
@@ -162,6 +165,7 @@ impl Ctx {
             env: SendWrapper::new(env),
             memo: Arc::default(),
             errors: Reporter::new(log.clone()),
+            events: Events::new(log.clone()),
             log,
             timings: Timings::default(),
         }
@@ -170,6 +174,7 @@ impl Ctx {
     /// The same context whose log lines and error reports carry `log`'s fields (the request id...).
     pub(crate) fn with_log(mut self, log: Logger) -> Self {
         self.errors = Reporter::new(log.clone());
+        self.events = Events::new(log.clone());
         self.log = log;
         self
     }
@@ -232,6 +237,24 @@ impl Ctx {
     /// ```
     pub fn errors(&self) -> &Reporter {
         &self.errors
+    }
+
+    /// Structured events of this request or job (Rails' `Rails.event`), see [`ocre::events`](crate::events).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use axum::extract::State;
+    /// use ocre::Ctx;
+    ///
+    /// async fn signup(State(ctx): State<Ctx>) -> &'static str {
+    ///     ctx.events().notify("user.signed_up", serde_json::json!({ "plan": "free" }));
+    ///     "welcome"
+    /// }
+    /// # let _ = signup;
+    /// ```
+    pub fn events(&self) -> &Events {
+        &self.events
     }
 
     /// The app's settings, read from Worker variables and secrets into `T` (see [`ocre::config`](crate::config)).
