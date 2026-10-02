@@ -76,7 +76,7 @@ fn guided_setup_logs_in_and_deploys() {
             "cf d1 create --name blog",
             "cf workers secrets list --worker blog",
             "cf d1 migrations apply uuid-blog",
-            "cf deploy --secrets-file .wrangler/ocre-secrets.env",
+            "cf deploy --secrets-file .wrangler/ocre-secrets.json",
             "secrets file ok",
             "build --release",
         ]
@@ -204,9 +204,9 @@ fn a_failing_deploy_shows_the_captured_cf_output() {
     let (output, code) = finish(s);
 
     assert_eq!(code, 1);
-    assert!(output.contains("error: `cf deploy --secrets-file .wrangler/ocre-secrets.env` failed"), "{output}");
+    assert!(output.contains("error: `cf deploy --secrets-file .wrangler/ocre-secrets.json` failed"), "{output}");
     assert!(output.contains("stdout before failure") && output.contains("deploy_fails"), "{output}");
-    assert!(!sandbox.work.join("broken/.wrangler/ocre-secrets.env").exists(), "secrets file deleted");
+    assert!(!sandbox.work.join("broken/.wrangler/ocre-secrets.json").exists(), "secrets file deleted");
 }
 
 #[test]

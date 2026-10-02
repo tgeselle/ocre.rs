@@ -74,7 +74,8 @@ fn deploy_creates_or_links_kv_namespaces_and_writes_their_ids() {
             "cf kv namespaces create --title shop-cache",
             "cf workers secrets list --worker shop",
             "cf d1 migrations apply uuid-shop",
-            "cf deploy",
+            "cf deploy --secrets-file .wrangler/ocre-secrets.json",
+            "secrets file ok",
             "build --release",
         ]
     );

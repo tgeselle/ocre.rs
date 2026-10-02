@@ -297,14 +297,16 @@ case "$1 $2" in
   "workers secrets")
     case "$3" in
       list)
-        # secret_list.json overrides the output; else SECRET_KEY_BASE with
-        # has_secret, OTHER, and the secrets uploaded by `bulk` (secret_<name>).
+        # secret_list.json overrides the output; else the Worker's deployed
+        # secrets: OTHER (until a deploy drops them), SECRET_KEY_BASE with
+        # has_secret, and those uploaded by `bulk` (deployed_secret_<name>).
         if [ -e "$state/secret_list_fails" ]; then replay secrets_list_missing_worker -e "s/ocre-cfcheck-missing/$5/g"; fi
         if [ -e "$state/secret_list_errors" ]; then api_error "[10000] Authentication error" "401 Unauthorized"; fi
         if [ -e "$state/secret_list.json" ]; then cat "$state/secret_list.json"; exit 0; fi
-        names="OTHER"
+        names=""
+        if [ ! -e "$state/secrets_dropped" ]; then names="OTHER"; fi
         if [ -e "$state/has_secret" ]; then names="SECRET_KEY_BASE $names"; fi
-        for file in "$state"/secret_*; do [ -e "$file" ] && names="$names ${file##*/secret_}"; done
+        for file in "$state"/deployed_secret_*; do [ -e "$file" ] && names="$names ${file##*/deployed_secret_}"; done
         printf '['
         sep=''
         for name in $names; do printf '%s\n  {\n    "name": "%s",\n    "type": "secret_text"\n  }' "$sep" "$name"; sep=','; done
@@ -319,7 +321,7 @@ case "$1 $2" in
         printf 'uploaded %s\n' "$body" >> "$state/calls.log"
         case "$body" in
           '{"secrets":{'*)
-            for name in $(printf '%s' "$body" | grep -o '"name":"[^"]*"' | cut -d'"' -f4); do touch "$state/secret_$name"; done
+            for name in $(printf '%s' "$body" | grep -o '"name":"[^"]*"' | cut -d'"' -f4); do touch "$state/deployed_secret_$name"; done
             ;;
         esac
         replay secrets_bulk -e s/OCRE_CFCHECK_A/UPLOADED_A/g -e s/OCRE_CFCHECK_B/UPLOADED_B/g
@@ -329,13 +331,20 @@ case "$1 $2" in
   "deploy "* | "deploy")
     fail_if deploy_fails
     if [ "$2" = "--secrets-file" ]; then
-      # The file must hold a fresh SECRET_KEY_BASE, readable by its owner only.
-      if ! grep -Eq '^SECRET_KEY_BASE=[0-9a-f]{128}$' "$3" || [ -z "$(find "$3" -perm 600)" ]; then
+      # Readable by its owner only: JSON (`{}`, or a fresh SECRET_KEY_BASE),
+      # or a non-empty .env (cf rejects an empty one). The Worker keeps its
+      # secrets and gets those of the file.
+      body="$(cat "$3")"
+      if ! printf '%s' "$body" | grep -Eqx '\{\}|\{"SECRET_KEY_BASE":"[0-9a-f]{128}"\}|SECRET_KEY_BASE=[0-9a-f]{128}' || [ -z "$(find "$3" -perm 600)" ]; then
         echo "✘ [ERROR] bad secrets file $3" >&2
         exit 1
       fi
       echo "secrets file ok" >> "$state/calls.log"
       cp "$3" "$state/uploaded_secrets"
+      secrets="keep"
+      case "$body" in *SECRET_KEY_BASE*) secrets="add" ;; esac
+    else
+      secrets="drop"
     fi
     echo "build $OCRE_BUILD" >> "$state/calls.log"
     worker="$(sed -n 's/^		name: "\(.*\)",$/\1/p' cloudflare.config.ts)"
@@ -347,6 +356,12 @@ case "$1 $2" in
       echo "id-$title" > "$state/kvns_$title"
       echo "autoprovisioned $title" >> "$state/calls.log"
     done
+    # The new version is uploaded: cf 1.0.0-beta.5 keeps the deployed
+    # secrets only with --secrets-file (`keepSecrets: keepVars || !!secretsFile`).
+    case "$secrets" in
+      add) touch "$state/has_secret" ;;
+      drop) rm -f "$state/has_secret" "$state"/deployed_secret_*; touch "$state/secrets_dropped" ;;
+    esac
     if [ -e "$state/deploy_no_url" ]; then replay deploy -e "s/ocre-cfcheck-demo/$worker/g" -e '/workers\.dev/d'; fi
     replay deploy -e "s/ocre-cfcheck-demo/$worker/g"
     ;;

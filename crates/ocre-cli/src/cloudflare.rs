@@ -301,6 +301,12 @@ impl<'a> Cloudflare<'a> {
     /// Cloudflare never gives a secret back, and losing it signs everyone
     /// out and makes encrypted columns unreadable. An existing one is never
     /// replaced. Migrations run before the new code goes live.
+    ///
+    /// `--secrets-file` is passed on every deploy, as `{}` when there is no
+    /// secret to add: cf 1.0.0-beta.5 uploads the new version with
+    /// `keepSecrets: keepVars || !!secretsFile`, so a deploy without it drops
+    /// every secret of the Worker (`ocre secrets push` values included).
+    /// cf rejects an empty `.env` file, hence JSON.
     pub fn deploy(&self, project: &Project) -> Result<Deployed, CliError> {
         require_install(self.root)?;
         let config = project.config()?;
@@ -317,15 +323,13 @@ impl<'a> Cloudflare<'a> {
         let kept = crate::secrets::read_vars(self.root, PROD_VARS)?.remove(SECRET_KEY_BASE);
         let new_secret = if has_secret { None } else { Some(kept.clone().unwrap_or_else(secret::generate)) };
         let secrets = match &new_secret {
-            Some(value) => Some(PrivateFile::create(self.root, SECRETS_FILE, &format!("{SECRET_KEY_BASE}={value}\n"))?),
-            None => None,
+            Some(value) => serde_json::json!({ (SECRET_KEY_BASE): value }),
+            None => serde_json::json!({}),
         };
+        let secrets_file = PrivateFile::create(self.root, SECRETS_FILE, &secrets.to_string())?;
         self.migrate_remote(&database)?;
-        let mut deploy = vec!["deploy"];
-        if secrets.is_some() {
-            deploy.extend(["--secrets-file", SECRETS_FILE]);
-        }
-        let output = self.run(&deploy)?;
+        let output = self.run(&["deploy", "--secrets-file", SECRETS_FILE])?;
+        drop(secrets_file);
         let url = output
             .split_whitespace()
             .find(|word| word.starts_with("https://") && word.contains(".workers.dev"))
@@ -338,7 +342,7 @@ impl<'a> Cloudflare<'a> {
             }
             _ => false,
         };
-        Ok(Deployed { url, secret_created: secrets.is_some(), secret_saved, provisioned })
+        Ok(Deployed { url, secret_created: new_secret.is_some(), secret_saved, provisioned })
     }
 
     /// Runs cf with its stdout routed by `echo`, and returns that stdout.
@@ -787,8 +791,9 @@ fn save_secret(root: &Path, value: &str) -> Result<(), CliError> {
     Ok(())
 }
 
-/// A new SECRET_KEY_BASE for `cf deploy --secrets-file`, relative to the app root.
-const SECRETS_FILE: &str = ".wrangler/ocre-secrets.env";
+/// The secrets `cf deploy --secrets-file` adds (a new SECRET_KEY_BASE, or
+/// none), as JSON, relative to the app root.
+const SECRETS_FILE: &str = ".wrangler/ocre-secrets.json";
 
 /// A file of secret values in the app's git-ignored `.wrangler/`, readable
 /// by its owner only; deleted when dropped.

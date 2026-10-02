@@ -110,3 +110,32 @@ fn push_refuses_missing_names_and_development_values() {
     assert_eq!(report["error"], "NOPE is not set in .dev.vars");
     assert!(sandbox.calls().iter().all(|call| !call.starts_with("uploaded")), "nothing uploaded");
 }
+
+#[test]
+fn a_redeploy_keeps_the_pushed_secrets() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    let deployed = |sandbox: &Sandbox| {
+        let (report, ok) = sandbox.json(&["secrets", "list"], &root);
+        assert!(ok, "{report}");
+        let secrets = report["secrets"].as_array().unwrap();
+        secrets
+            .iter()
+            .filter(|s| s["deployed"] == true)
+            .map(|s| s["name"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let (report, ok) = sandbox.json(&["deploy"], &root);
+    assert!(ok && report["secret_created"] == true, "{report}");
+    fs::write(root.join(".prod.vars"), format!("{}A=1\nB=2\n", fs::read_to_string(root.join(".prod.vars")).unwrap()))
+        .unwrap();
+    let (report, ok) = sandbox.json(&["secrets", "push", "A", "B", "--file", ".prod.vars"], &root);
+    assert!(ok, "{report}");
+    assert_eq!(deployed(&sandbox), ["A", "B", "OTHER", "SECRET_KEY_BASE"]);
+
+    // cf drops every secret on a deploy without --secrets-file: Ocre always passes one.
+    let (report, ok) = sandbox.json(&["deploy"], &root);
+    assert!(ok && report.get("secret_created").is_none(), "{report}");
+    assert_eq!(deployed(&sandbox), ["A", "B", "OTHER", "SECRET_KEY_BASE"]);
+    assert_eq!(fs::read_to_string(sandbox.work.join("../state/uploaded_secrets")).unwrap(), "{}");
+}

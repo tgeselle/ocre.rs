@@ -497,7 +497,8 @@ fn deploy_creates_missing_queues_once() {
             "cf queues create --queue-name shop-jobs-failed",
             "cf workers secrets list --worker shop",
             "cf d1 migrations apply uuid-shop",
-            "cf deploy",
+            "cf deploy --secrets-file .wrangler/ocre-secrets.json",
+            "secrets file ok",
             "build --release",
         ]
     );

@@ -1342,9 +1342,9 @@ In order, `ocre deploy`:
 1. Checks the locale files (when the app has translations) and the `wasm32-unknown-unknown` target, as `ocre dev` does.
 2. Looks up the D1 database named in `cloudflare.config.ts` (`blog`) with `cf d1 list` and creates it the first time.
 3. Creates the other Cloudflare resources `cloudflare.config.ts` names that are missing: queues, R2 buckets, KV namespaces without an `id`. This blog uses none of them.
-4. Asks `cf workers secrets list` whether the Worker has `SECRET_KEY_BASE`. A new Worker has none, so a fresh random one is uploaded with the deploy (`--secrets-file`). An existing secret is never replaced, since that would sign every user out.
+4. Asks `cf workers secrets list` whether the Worker has `SECRET_KEY_BASE`. A new Worker has none, so a fresh random one is uploaded with the deploy and saved in `.prod.vars`. An existing secret is never replaced, since that would sign every user out.
 5. Applies the pending migrations to the production database (`cf d1 migrations apply`), before the new code goes live.
-6. Deploys with `cf deploy`, which builds the Worker in release mode (optimized for size, slower to compile than `ocre dev`) and uploads it.
+6. Deploys with `cf deploy --secrets-file`, which builds the Worker in release mode (optimized for size, slower to compile than `ocre dev`) and uploads it. The secrets file (`.wrangler/ocre-secrets.json`, deleted afterwards) holds the new `SECRET_KEY_BASE`, or `{}`: it is passed on every deploy because cf keeps the Worker's other secrets only when one is given.
 
 cf's own output is shown as it runs; the command then ends with:
 
@@ -1355,7 +1355,7 @@ Saved it in .prod.vars (git-ignored): back it up, Cloudflare never gives it back
 https://blog.<your-subdomain>.workers.dev
 ```
 
-The first line appears only on the deploy that created the secret. With `--json`, the result is `{"command": "deploy", "ok": true, "secret_created": true, "url": "https://blog.<your-subdomain>.workers.dev"}`. Run `ocre deploy` again after each change: every deploy migrates the database first, so the new code never runs against an old schema.
+The first two lines appear only on the deploy that created the secret. With `--json`, the result is `{"command": "deploy", "ok": true, "secret_created": true, "secret_saved": ".prod.vars", "url": "https://blog.<your-subdomain>.workers.dev"}`. Run `ocre deploy` again after each change: every deploy migrates the database first, so the new code never runs against an old schema.
 
 Free-plan limits that matter for this blog (September 2026, [Workers limits](https://developers.cloudflare.com/workers/platform/limits/)): 100,000 Worker requests a day and 10 ms of CPU per request. Page views cost well under 10 ms; a login or sign-up uses about half of it for the password hash. The login, sign-up, token and email routes are rate limited by the `AUTH_RATE_LIMITER` binding (10 attempts a minute per IP address and Cloudflare location), which needs no storage and is free. [Free-plan limits](../reference/limits.md) lists the rest, including D1.
 

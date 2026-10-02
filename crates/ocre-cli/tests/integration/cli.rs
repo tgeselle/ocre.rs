@@ -274,12 +274,12 @@ fn new_with_deploy_logs_in_deploys_and_returns_the_url() {
             "cf d1 create --name shop",
             "cf workers secrets list --worker shop",
             "cf d1 migrations apply uuid-shop",
-            "cf deploy --secrets-file .wrangler/ocre-secrets.env",
+            "cf deploy --secrets-file .wrangler/ocre-secrets.json",
             "secrets file ok",
             "build --release",
         ]
     );
-    assert!(!sandbox.work.join("shop/.wrangler/ocre-secrets.env").exists(), "secrets file deleted");
+    assert!(!sandbox.work.join("shop/.wrangler/ocre-secrets.json").exists(), "secrets file deleted");
 }
 
 // ---------- ocre login ----------
@@ -862,7 +862,8 @@ fn deploy_migrates_an_existing_database_before_the_code_goes_live() {
             "cf d1 list --name shop",
             "cf workers secrets list --worker shop",
             "cf d1 migrations apply uuid-shop",
-            "cf deploy",
+            "cf deploy --secrets-file .wrangler/ocre-secrets.json",
+            "secrets file ok",
             "build --release"
         ]
     );
@@ -880,7 +881,7 @@ fn deploy_migrates_an_existing_database_before_the_code_goes_live() {
 fn deploy_creates_secret_key_base_only_when_the_worker_has_none() {
     let sandbox = Sandbox::new();
     let root = sandbox.new_app("shop", &[]);
-    let secrets_file = root.join(".wrangler/ocre-secrets.env");
+    let secrets_file = root.join(".wrangler/ocre-secrets.json");
     let deploy_calls = || sandbox.calls().into_iter().filter(|call| call.starts_with("cf deploy")).collect::<Vec<_>>();
 
     // Deployed Worker without the secret, no database yet; a stale file
@@ -897,12 +898,14 @@ fn deploy_creates_secret_key_base_only_when_the_worker_has_none() {
         "{stdout}"
     );
     assert!(sandbox.calls().contains(&"secrets file ok".to_owned()));
-    assert_eq!(deploy_calls(), ["cf deploy --secrets-file .wrangler/ocre-secrets.env"]);
+    assert_eq!(deploy_calls(), ["cf deploy --secrets-file .wrangler/ocre-secrets.json"]);
     assert!(!secrets_file.exists(), "deleted after the deploy");
     // The only copy: kept in .prod.vars, readable by its owner only.
     let uploaded = fs::read_to_string(sandbox.work.join("../state/uploaded_secrets")).unwrap();
     let prod_vars = fs::read_to_string(root.join(".prod.vars")).unwrap();
-    assert!(prod_vars.starts_with("# Created by `ocre deploy`") && prod_vars.ends_with(&uploaded), "{prod_vars}");
+    let value: serde_json::Value = serde_json::from_str(&uploaded).unwrap();
+    let line = format!("SECRET_KEY_BASE={}\n", value["SECRET_KEY_BASE"].as_str().unwrap());
+    assert!(prod_vars.starts_with("# Created by `ocre deploy`") && prod_vars.ends_with(&line), "{prod_vars}");
     let mode = std::os::unix::fs::PermissionsExt::mode(&fs::metadata(root.join(".prod.vars")).unwrap().permissions());
     assert_eq!(mode & 0o777, 0o600);
 
@@ -922,7 +925,8 @@ fn deploy_creates_secret_key_base_only_when_the_worker_has_none() {
     let (report, ok) = sandbox.json(&["deploy"], &root);
     assert!(ok, "{report}");
     assert!(report.get("secret_created").is_none(), "{report}");
-    assert_eq!(deploy_calls().last().unwrap(), "cf deploy");
+    assert_eq!(deploy_calls().last().unwrap(), "cf deploy --secrets-file .wrangler/ocre-secrets.json");
+    assert_eq!(fs::read_to_string(sandbox.work.join("../state/uploaded_secrets")).unwrap(), "{}", "no secret to add");
 }
 
 #[test]
@@ -973,9 +977,9 @@ fn deploy_failures_carry_hints() {
     sandbox.set("deploy_fails");
     let (report, _) = sandbox.json(&["deploy"], &root);
     assert!(
-        report["error"].as_str().unwrap().starts_with("`cf deploy --secrets-file .wrangler/ocre-secrets.env` failed")
+        report["error"].as_str().unwrap().starts_with("`cf deploy --secrets-file .wrangler/ocre-secrets.json` failed")
     );
-    assert!(!root.join(".wrangler/ocre-secrets.env").exists(), "deleted after a failed deploy");
+    assert!(!root.join(".wrangler/ocre-secrets.json").exists(), "deleted after a failed deploy");
 
     // Only a missing Worker means "no secret yet"; other failures stop the deploy.
     sandbox.clear_calls();
