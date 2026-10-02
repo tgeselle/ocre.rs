@@ -400,6 +400,26 @@ impl ImportFinished {
 
 The page shows `<p id="import_status">Importing...</p>` inside `<div hx-ext="ws" ws-connect="/realtime/user:{{ user.id }}">`. Returning the broadcast's error makes the queue retry the job; use `.ok()` when an update that nobody sees is not worth a retry. A job may run twice, so a repeated broadcast must be harmless (replacing contents, as here, is).
 
+## Progress of a long task
+
+A task that runs elsewhere (a GPU job, a transcoding) reports its progress to the app, and every page showing it should follow. Give each task its own channel, named by an unguessable id, and broadcast a progress bar with a fixed element id: the WebSocket extension replaces the bar in every open tab.
+
+`ocre::helpers::progress_bar(id, percent, label)` is that bar: `<div id="<id>" class="progress-bar"><progress max="100" value="40">40%</progress> <span>Encoding</span></div>` (the label escaped, the percent kept within 0-100).
+
+`ocre g external_job upscale video_id:integer --realtime` wires it all for jobs run by another service (see [Run work on another service](webhooks.md#run-work-on-another-service)):
+
+- each job has a `public_id`, and its channel is `upscale_jobs:<public_id>`; `src/realtime.rs` accepts the channels starting with `upscale_jobs:` (`channel if channel.starts_with("upscale_jobs:") => {}`), so nobody can list or guess them;
+- `changed`, run after every change of a job (a webhook event, the sweep), broadcasts `progress_html(&job)`, the bar with the id `upscale_jobs_<public_id>`;
+- `GET /upscale_jobs/<public_id>/progress` answers the bar wrapped in its subscription, `<div hx-ext="ws" ws-connect="/realtime/upscale_jobs:<public_id>">...</div>`. A page that has htmx and the `ws` extension loads it with:
+
+```html
+<div hx-get="/upscale_jobs/{{ job.public_id }}/progress" hx-trigger="load"></div>
+```
+
+An event from the service then moves the bar in every tab showing that job, typically within a few hundred milliseconds (checked in `ocre dev` with two tabs and a 1-second limit). Each event costs one Durable Object request for the broadcast; open tabs cost nothing between messages.
+
+For your own tasks, do the same by hand: a channel per record named by its `public_id` (accepted in `connect` by prefix), and `ocre::realtime::broadcast(&ctx, &channel, &ocre::helpers::progress_bar(&id, percent, label))` from the handler, job or webhook that learns the progress.
+
 ## Free-plan costs
 
 Limits of the Workers Free plan (September 2026):

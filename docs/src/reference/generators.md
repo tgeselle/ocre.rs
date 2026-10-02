@@ -797,7 +797,7 @@ That second run (`ocre g webhook gpu --standard`) reuses the table, so it has no
 ## ocre g external_job
 
 ```text
-ocre g external_job <name> [FIELDS]... [--sweep <WHEN>]
+ocre g external_job <name> [FIELDS]... [--sweep <WHEN>] [--realtime]
 ```
 
 Work done by an external service (a GPU on RunPod or Modal, a container, any HTTP API), tracked in the table `<name>_jobs` (a `_job` or `_jobs` suffix in the name is dropped). `FIELDS` are the job's input (`name:type`, sent as JSON; no attachments, enums or rich text, and not the names of the table's own columns). It creates:
@@ -806,6 +806,8 @@ Work done by an external service (a GPU on RunPod or Modal, a container, any HTT
 - the `create_<name>_jobs` migration;
 - `src/schedules/<name>_jobs_sweep.rs`, a Cron Trigger (`--sweep`, default `*/5 * * * *`, plain English accepted) that fails jobs without news for an hour and resubmits failed submissions (3 attempts);
 - `<NAME>_URL`, `<NAME>_SECRET` and `APP_URL` in `.dev.vars` (those missing).
+
+Each job also has a random `public_id` (`find_by_public_id`), for pages and channels. With `--realtime`, every change of a job broadcasts its progress bar (`progress_html`, built with `ocre::helpers::progress_bar`) on the channel `<name>_jobs:<public_id>` (added to `src/realtime.rs`, which the first use creates along with the `realtime` feature and the `OcreChannel` Durable Object), and `GET /<name>_jobs/<public_id>/progress` answers the bar subscribed to its updates. See [Progress of a long task](../guides/realtime.md#progress-of-a-long-task).
 
 ```sh
 ocre g external_job upscale video_id:integer scale:float

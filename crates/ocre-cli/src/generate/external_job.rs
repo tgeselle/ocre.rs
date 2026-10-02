@@ -25,7 +25,7 @@ use crate::{
 /// The default schedule of the sweep.
 const SWEEP: &str = "*/5 * * * *";
 
-pub fn external_job(project: &Project, name: &str, specs: &[String], sweep: Option<&str>) -> CliResult {
+pub fn external_job(project: &Project, name: &str, specs: &[String], sweep: Option<&str>, realtime: bool) -> CliResult {
     let name = name.strip_suffix("_jobs").or_else(|| name.strip_suffix("_job")).unwrap_or(name);
     if !is_identifier(name) || name.chars().any(|c| c.is_ascii_uppercase()) || RUST_KEYWORDS.contains(&name) {
         return Err(CliError::new(format!("invalid external job name `{name}`"))
@@ -50,6 +50,7 @@ pub fn external_job(project: &Project, name: &str, specs: &[String], sweep: Opti
     let command = std::iter::once(format!("ocre g external_job {name}"))
         .chain(specs.iter().cloned())
         .chain(sweep.map(|sweep| format!("--sweep \"{sweep}\"")))
+        .chain(realtime.then(|| "--realtime".to_owned()))
         .collect::<Vec<_>>()
         .join(" ");
     let mut edits = Edits::new(project);
@@ -57,7 +58,10 @@ pub fn external_job(project: &Project, name: &str, specs: &[String], sweep: Opti
         return Err(CliError::new(format!("src/{name}_webhook.rs already answers /webhooks/{name}"))
             .hint("pick another name for the external job"));
     }
-    edits.create(&format!("src/{module}.rs"), module_rs(name, &upper, &fields, &command))?;
+    edits.create(&format!("src/{module}.rs"), module_rs(name, &upper, &fields, &command, realtime))?;
+    if realtime {
+        super::realtime::add_channel_prefix(&mut edits, &module, &command)?;
+    }
     let mut columns = vec![
         "id INTEGER PRIMARY KEY".to_owned(),
         "status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'submitted', 'running', 'done', 'failed'))"
@@ -110,10 +114,11 @@ pub fn external_job(project: &Project, name: &str, specs: &[String], sweep: Opti
 }
 
 /// The columns after `id`, `status`, `external_id` and the input fields.
-const COLUMNS: [(&str, &str); 10] = [
+const COLUMNS: [(&str, &str); 11] = [
     ("id", ""),
     ("status", ""),
     ("external_id", ""),
+    ("public_id", "TEXT NOT NULL UNIQUE"),
     ("progress", "INTEGER NOT NULL DEFAULT 0"),
     ("result", "TEXT"),
     ("error", "TEXT"),
@@ -123,7 +128,7 @@ const COLUMNS: [(&str, &str); 10] = [
     ("updated_at", "INTEGER NOT NULL"),
 ];
 
-fn module_rs(name: &str, upper: &str, fields: &[super::fields::Field], command: &str) -> String {
+fn module_rs(name: &str, upper: &str, fields: &[super::fields::Field], command: &str, realtime: bool) -> String {
     let module = format!("{name}_jobs");
     let model = format!("{}Job", pascal(name));
     let mut struct_fields = String::new();
@@ -146,13 +151,77 @@ fn module_rs(name: &str, upper: &str, fields: &[super::fields::Field], command: 
     let placeholders: String = (0..names.len()).map(|i| format!("?{}, ", i + 1)).collect();
     let n = names.len();
     let insert = format!(
-        "INSERT INTO {module} ({column_list}token, created_at, updated_at) VALUES ({placeholders}?{}, ?{}, ?{}) RETURNING *",
+        "INSERT INTO {module} ({column_list}public_id, token, created_at, updated_at) VALUES ({placeholders}?{}, ?{}, ?{}, ?{}) RETURNING *",
         n + 1,
         n + 2,
-        n + 2
+        n + 3,
+        n + 3
     );
-    let insert_params =
-        names.iter().map(|n| format!("{n}, ")).collect::<String>() + "ocre::token::generate(), ocre::now()";
+    let insert_params = names.iter().map(|n| format!("{n}, ")).collect::<String>()
+        + "ocre::token::public_id(), ocre::token::generate(), ocre::now()";
+    let (live_imports, live_route, changed) = if realtime {
+        (
+            "\n    response::Html,",
+            format!("\n        .route(\"/{module}/{{public_id}}/progress\", get(progress))"),
+            format!(
+                r##"/// Runs after every change of a job (submitted, an event, failed by the
+/// sweep): its progress bar moves in every page showing it. Add more: notify
+/// the user, enqueue the next job.
+async fn changed(ctx: &Ctx, job: &{model}) -> Result<()> {{
+    // Best effort: Ocre logs a failed broadcast; the job goes on.
+    ocre::realtime::broadcast(ctx, &channel(job), &progress_html(job)).await.ok();
+    Ok(())
+}}
+
+/// The realtime channel of a job, named by its public id.
+fn channel(job: &{model}) -> String {{
+    format!("{module}:{{}}", job.public_id)
+}}
+
+/// The job's progress bar (`ocre::helpers::progress_bar`); a broadcast of
+/// a new one replaces it, as they share the element id.
+pub fn progress_html(job: &{model}) -> String {{
+    let label = match (job.status.as_str(), &job.error) {{
+        ("queued", _) => "Waiting".to_owned(),
+        ("submitted", _) => "Sent".to_owned(),
+        ("running", _) => "Running".to_owned(),
+        ("done", _) => "Done".to_owned(),
+        (_, Some(error)) => format!("Failed: {{error}}"),
+        _ => "Failed".to_owned(),
+    }};
+    ocre::helpers::progress_bar(&format!("{module}_{{}}", job.public_id), job.progress, &label)
+}}
+
+/// `GET /{module}/<public_id>/progress`: the job's progress bar, kept up to
+/// date over a WebSocket. Load it in a page that has htmx and its `ws`
+/// extension: `<div hx-get="/{module}/<public_id>/progress" hx-trigger="load"></div>`.
+async fn progress(State(ctx): State<Ctx>, Path(public_id): Path<String>) -> Result<Html<String>> {{
+    let job = find_by_public_id(&ctx, &public_id).await?.ok_or(Error::NotFound)?;
+    Ok(Html(format!(
+        r#"<div hx-ext="ws" ws-connect="/realtime/{{}}">{{}}</div>"#,
+        channel(&job),
+        progress_html(&job)
+    )))
+}}
+"##,
+                module = module
+            ),
+        )
+    } else {
+        (
+            "",
+            String::new(),
+            format!(
+                r#"/// Runs after every change of a job (submitted, an event, failed by the
+/// sweep), e.g. `ocre::realtime::broadcast(ctx, &format!("{name}:{{}}", job.public_id), &html)`
+/// (or generate with `--realtime`).
+async fn changed(_ctx: &Ctx, _job: &{model}) -> Result<()> {{
+    Ok(())
+}}
+"#
+            ),
+        )
+    };
     format!(
         r##"//! `{name}` jobs, run by an external service (a GPU on RunPod or Modal, a
 //! Cloudflare Container, any HTTP API). Generated by `{command}`.
@@ -182,12 +251,15 @@ fn module_rs(name: &str, upper: &str, fields: &[super::fields::Field], command: 
 //! - `changed(&ctx, &job)` runs after every change: notify the user, enqueue
 //!   the next job, broadcast the progress (see the realtime guide).
 
+// `start`, `find_by_public_id`... are generated before a handler calls them.
+#![allow(dead_code)]
+
 use axum::{{
     Json, Router,
     body::Bytes,
     extract::{{Path, Query, State}},
-    http::HeaderMap,
-    routing::post,
+    http::HeaderMap,{live_imports}
+    routing::{routing},
 }};
 use ocre::{{
     Ctx, Error, Result, params,
@@ -211,6 +283,8 @@ pub struct {model} {{
     pub status: String,
     /// The service's id for the job, from its answer to the submission.
     pub external_id: Option<String>,
+    /// Random, for pages and channels: `find_by_public_id`.
+    pub public_id: String,
 {struct_fields}    /// 0 to 100, as the service reports it.
     pub progress: i64,
     /// The service's output, as JSON text.
@@ -233,12 +307,17 @@ impl {model} {{
 }}
 
 pub fn routes() -> Router<Ctx> {{
-    Router::new().route("/webhooks/{name}/{{id}}", post(receive))
+    Router::new().route("/webhooks/{name}/{{id}}", post(receive)){live_route}
 }}
 
 /// The job `id`, or `Error::NotFound`.
 pub async fn find(ctx: &Ctx, id: i64) -> Result<{model}> {{
     ctx.db()?.first("SELECT * FROM {module} WHERE id = ?1", params![id]).await?.ok_or(Error::NotFound)
+}}
+
+/// The job with this public id, if any.
+pub async fn find_by_public_id(ctx: &Ctx, public_id: &str) -> Result<Option<{model}>> {{
+    ctx.db()?.first("SELECT * FROM {module} WHERE public_id = ?1", params![public_id]).await
 }}
 
 /// Creates a job and submits it. The job comes back `submitted`, or
@@ -371,17 +450,13 @@ pub async fn sweep(ctx: &Ctx) -> Result<()> {{
     Ok(())
 }}
 
-/// Runs after every change of a job (submitted, an event, failed by the
-/// sweep), e.g. `ocre::realtime::broadcast(ctx, &format!("{name}:{{}}", job.id), &html)`.
-async fn changed(_ctx: &Ctx, _job: &{model}) -> Result<()> {{
-    Ok(())
-}}
-
+{changed}
 fn secret(ctx: &Ctx) -> Result<String> {{
     Ok(ctx.env().secret("{upper}_SECRET").map_err(|_| Error::internal("{upper}_SECRET is not set"))?.to_string())
 }}
 "##,
         input = input.join(", "),
+        routing = if realtime { "{get, post}" } else { "post" },
         params = params.iter().map(|param| format!(", {param}")).collect::<String>(),
     )
 }

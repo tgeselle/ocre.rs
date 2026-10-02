@@ -753,7 +753,7 @@ fn external_job_adds_its_table_webhook_sweep_and_settings() {
     assert_eq!(report["created"][0], "src/upscale_jobs.rs");
     assert_eq!(report["created"][2], "src/schedules/upscale_jobs_sweep.rs");
     let migration = read(&root, report["created"][1].as_str().unwrap());
-    assert!(migration.contains("video_id INTEGER NOT NULL,\n  hdr INTEGER NOT NULL DEFAULT 0,\n  meta TEXT CHECK (json_valid(meta)),\n  spec TEXT NOT NULL CHECK (json_valid(spec)),\n  progress INTEGER"), "{migration}");
+    assert!(migration.contains("video_id INTEGER NOT NULL,\n  hdr INTEGER NOT NULL DEFAULT 0,\n  meta TEXT CHECK (json_valid(meta)),\n  spec TEXT NOT NULL CHECK (json_valid(spec)),\n  public_id TEXT NOT NULL UNIQUE,\n  progress INTEGER"), "{migration}");
     assert!(read(&root, "cloudflare.config.ts").contains("triggers.scheduled({ schedule: \"*/5 * * * *\" }),"));
     let vars = read(&root, ".dev.vars");
     assert!(
@@ -762,9 +762,13 @@ fn external_job_adds_its_table_webhook_sweep_and_settings() {
     );
 
     // A second one: its own sweep time; APP_URL is not added twice.
-    ok(&sandbox, &["g", "external_job", "transcribe", "--sweep", "every 10 minutes"], &root);
+    ok(&sandbox, &["g", "external_job", "transcribe", "--sweep", "every 10 minutes", "--realtime"], &root);
     assert_eq!(read(&root, ".dev.vars").matches("APP_URL=").count(), 1);
-    assert!(read(&root, "src/transcribe_jobs.rs").contains("pub async fn start(ctx: &Ctx) -> Result<TranscribeJob>"));
+    let code = read(&root, "src/transcribe_jobs.rs");
+    assert!(code.contains("pub async fn start(ctx: &Ctx) -> Result<TranscribeJob>"));
+    assert!(code.contains(".route(\"/transcribe_jobs/{public_id}/progress\", get(progress))"), "{code}");
+    assert!(read(&root, "src/realtime.rs").contains("channel if channel.starts_with(\"transcribe_jobs:\") => {}"));
+    assert!(read(&root, "Cargo.toml").contains("\"realtime\""));
 
     ok(&sandbox, &["g", "webhook", "payments"], &root);
     fs::remove_file(root.join(".dev.vars")).unwrap();

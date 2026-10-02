@@ -473,6 +473,11 @@ enum GenerateCommand {
         /// When the sweep runs (default "*/5 * * * *"): plain English or cron.
         #[arg(long)]
         sweep: Option<String>,
+        /// Live progress: every change moves the job's progress bar in the
+        /// pages showing it (`GET /<name>_jobs/<public_id>/progress`), over a
+        /// realtime channel per job.
+        #[arg(long)]
+        realtime: bool,
     },
     /// Webhook endpoint `POST /webhooks/<name>` (src/<name>_webhook.rs): checks
     /// the signature (HMAC-SHA256 in `X-Signature`, or Standard Webhooks with
@@ -858,8 +863,8 @@ fn generate_command(args: GenerateArgs) -> CliResult {
             generate::job(project, &name, &fields, queue.as_deref(), &generate::JobSteps { steps, lock })
         }
         GenerateCommand::Schedule { name, cron } => generate::schedule(project, &name, &cron),
-        GenerateCommand::ExternalJob { name, fields, sweep } => {
-            generate::external_job(project, &name, &fields, sweep.as_deref())
+        GenerateCommand::ExternalJob { name, fields, sweep, realtime } => {
+            generate::external_job(project, &name, &fields, sweep.as_deref(), realtime)
         }
         GenerateCommand::Webhook { name, standard } => generate::webhook(project, &name, standard),
         GenerateCommand::Cache => generate::cache(project),
