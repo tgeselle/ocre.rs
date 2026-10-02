@@ -70,6 +70,9 @@ pub struct Report {
     /// `ocre secret`: a new random value for SECRET_KEY_BASE.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secret: Option<String>,
+    /// `ocre push-keys`: a new VAPID key pair, `{"public_key", "private_key"}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vapid: Option<serde_json::Value>,
     /// `ocre time-zones`: IANA time zone names.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time_zones: Option<Vec<&'static str>>,
@@ -198,6 +201,13 @@ fn print_human(report: &Report) {
     }
     if let Some(secret) = &report.secret {
         println!("{secret}");
+    }
+    if let Some(vapid) = &report.vapid {
+        println!(
+            "VAPID_PUBLIC_KEY={}\nVAPID_PRIVATE_KEY={}",
+            vapid["public_key"].as_str().unwrap_or_default(),
+            vapid["private_key"].as_str().unwrap_or_default()
+        );
     }
     if let Some(domains) = &report.domains {
         if domains.is_empty() {

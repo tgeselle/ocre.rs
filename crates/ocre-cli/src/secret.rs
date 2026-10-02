@@ -21,3 +21,10 @@ pub fn generate() -> String {
 pub fn run() -> CliResult {
     Ok(Report { secret: Some(generate()), ..Report::new("secret") })
 }
+
+/// `ocre push-keys`: a new VAPID key pair for web push.
+pub fn push_keys() -> CliResult {
+    let keys = ocre::push::VapidKeys::generate();
+    let vapid = serde_json::json!({ "public_key": keys.public_key, "private_key": keys.private_key });
+    Ok(Report { vapid: Some(vapid), ..Report::new("push-keys") })
+}

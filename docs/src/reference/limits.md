@@ -59,6 +59,18 @@ This page lists the Cloudflare Workers Free plan limits that matter to an Ocre a
 | Deletes, egress | free | [R2 pricing](https://developers.cloudflare.com/r2/pricing/#free-operations) | |
 | Activation | R2 must be enabled once in the dashboard, which asks for a payment method even for the free tier | [R2 pricing](https://developers.cloudflare.com/r2/pricing/) | `ocre deploy` stops with a hint when the account lacks it (API code 10042). |
 
+Past the free tier, R2 bills (October 2026, [R2 pricing](https://developers.cloudflare.com/r2/pricing/)): Standard storage $0.015 per GB-month, Class A operations $4.50 per million, Class B $0.36 per million; egress stays free. Rounding is up to the next unit (1.1 GB-month bills 2). Video is where this shows: a 4K video is several GB, so a few of them pass the 10 GB. Examples for Standard storage: 100 GB kept a month is (100 - 10) × $0.015 = $1.35; 1 TB is $14.85. A 5 GB file sent with `storage::multipart_uploads` is 514 Class A operations (512 parts, the create and the complete), well within the free million. Keep storage in check by deleting what users no longer need (a schedule that deletes files older than N days, `storage::purge_unattached` for abandoned uploads).
+
+## Beyond the Worker: programs and heavy compute
+
+A Worker runs WebAssembly in a V8 isolate: it cannot start a program (`ffmpeg`, `ffprobe`, ImageMagick, Python), has no filesystem, and gets 10 ms of CPU per invocation on the free plan. Work of that kind runs elsewhere and reports back, with `ocre g external_job` ([Run work on another service](../guides/webhooks.md#run-work-on-another-service)):
+
+- a GPU service billed per second (RunPod serverless, Modal, Replicate...) for AI inference and video encoding;
+- [Cloudflare Containers](https://developers.cloudflare.com/containers/), which run any image (`ffmpeg` included) next to the Worker, on the Workers Paid plan;
+- any server or function of your own that answers HTTP.
+
+Probing a video (duration, resolution) to price it belongs there too: the service reports it in an event's `output`. Cloudflare's Media Transformations and Stream (paid) cover some video work without a container.
+
 ## Workers KV (cache, binding `CACHE`)
 
 | Limit | Free plan (September 2026) | Source | What Ocre does |

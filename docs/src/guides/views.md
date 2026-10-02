@@ -426,6 +426,16 @@ async fn feed(State(ctx): State<Ctx>) -> Result<impl IntoResponse> {
 
 Plain text is a `String` (`text/plain`), JavaScript is `([(header::CONTENT_TYPE, "text/javascript")], body)`, and a CSV or any generated file goes out with `ocre::storage::send_data` (see [Controllers](controllers.md#files-and-downloads)). One handler answering HTML or JSON uses `ocre::Format` (Rails' `respond_to`, see [Controllers](controllers.md#formats-respond_to)).
 
+## Structured data, sitemap and llms.txt
+
+`ocre::seo` covers what search engines and language models read besides the page itself:
+
+- `ocre::seo::json_ld(&data)` turns any serializable value (`serde_json::json!({...})` or a struct) into `<script type="application/ld+json">...</script>` for the page's `<head>`: Organization, FAQPage, BreadcrumbList... The JSON is escaped for HTML (`<`, `>`, `&` become `\u003c`, `\u003e`, `\u0026`), so a value containing `</script>` cannot end the element and the data parses back unchanged. In a template: `{{ ocre::seo::json_ld(&faq)|safe }}`.
+- `ocre::seo::Sitemap` builds `/sitemap.xml` (`add`, or `add_localized` for a page in every locale with `hreflang` alternates and `x-default`; 50,000 URLs per file). It is a response: return it from a handler.
+- `ocre::seo::LlmsTxt` builds `/llms.txt` ([llmstxt.org](https://llmstxt.org)): a title, a one-line summary, optional details and sections of links.
+
+`ocre g seo` writes `src/seo.rs` with both routes and `PAGES`, the list of public pages (path, title, description) they share; records with a page of their own (posts, products) go in `sitemap` with their `updated_at` as `lastmod`. The base URL comes from `APP_URL` (added to `.dev.vars`; set it in `worker.env` for production), and `public/robots.txt` should name the sitemap (`Sitemap: https://<your host>/sitemap.xml`). For translated pages, see [canonical and hreflang](i18n.md#search-engines-canonical-and-hreflang).
+
 ## Localized views
 
 Translated text comes from `locales/*.yml` through the `I18n` extractor, passed to the view as a field (`{{ i18n.t("posts.title") }}`; see [Translations](i18n.md)). For pages whose whole markup differs per language (Rails' `show.fr.html.erb`), define one view struct per language and pick it with `match i18n.locale()`.

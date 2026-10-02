@@ -7,7 +7,7 @@ This page documents every `ocre` command and flag, what each one does step by st
 - The `ocre` CLI, installed with `cargo install --git https://github.com/tgeselle/ocre.rs ocre-cli` (see [Installation](../getting-started/installation.md)).
 - Node.js 22 or newer, and the app's npm packages (`npm install`, which `ocre new` runs): commands that touch Cloudflare or the dev server run the app's Cloudflare [`cf` CLI](https://www.npmjs.com/package/cf) (`node_modules/.bin/cf`, pinned in `package.json`; outside an app, `npx --yes cf@1.0.0-beta.5`), and local database commands run the app's own wrangler (see [Why wrangler still appears](../guides/deployment.md#why-wrangler-still-appears)).
 - A rustup toolchain with the `wasm32-unknown-unknown` target for `ocre dev` and `ocre deploy`.
-- Except `ocre new`, `ocre login`, `ocre secret`, `ocre version`, `ocre doctor` and `ocre help`, commands run inside an Ocre app: the CLI walks up from the current directory to the nearest `cloudflare.config.ts`, and reads the `name` of its `DB: bindings.d1({ name })` entry (see [Configuration](configuration.md#cloudflareconfigts)). A directory with only a `wrangler.toml` (an app made by an older Ocre) is refused with a hint pointing to [Upgrading from wrangler.toml](../guides/upgrading.md).
+- Except `ocre new`, `ocre login`, `ocre secret`, `ocre push-keys`, `ocre version`, `ocre doctor` and `ocre help`, commands run inside an Ocre app: the CLI walks up from the current directory to the nearest `cloudflare.config.ts`, and reads the `name` of its `DB: bindings.d1({ name })` entry (see [Configuration](configuration.md#cloudflareconfigts)). A directory with only a `wrangler.toml` (an app made by an older Ocre) is refused with a hint pointing to [Upgrading from wrangler.toml](../guides/upgrading.md).
 - Commands with `--remote`, `ocre login` and `ocre deploy` need a Cloudflare account (free) and a login (`ocre login`) or the `CLOUDFLARE_API_TOKEN` environment variable that cf reads (plus `CLOUDFLARE_ACCOUNT_ID` when the token sees several accounts).
 
 The examples below come from `ocre 0.1.0` on apps created by `ocre new ... --starter blog`; the lines printed by wrangler come from wrangler 4.143.0 (local database commands, and `cf dev`, which delegates to it). Commands that need Cloudflare (`login`, `deploy`, `--remote`, `new --login/--deploy`) are shown with the fake cf of the CLI's integration tests, so the lines cf prints there are the fake's, while the lines and JSON printed by `ocre` itself are Ocre's.
@@ -29,6 +29,8 @@ The examples below come from `ocre 0.1.0` on apps created by `ocre new ... --sta
 | [`ocre db drop`](#ocre-db-drop) | Local only: deletes the local database |
 | [`ocre db truncate`](#ocre-db-truncate) | Local only: deletes every row, keeps tables and migrations |
 | [`ocre db version`](#ocre-db-version) | Prints the last applied migration |
+| [`ocre db load`](#ocre-db-load) | Runs the statements of a SQL file (local unless `--remote`) |
+| [`ocre db import-postgres`](#ocre-db-import-postgres) | Converts a Postgres dump into a migration and a data file for D1 |
 | [`ocre db schema`](#ocre-db-schema) | Writes the database's `CREATE` statements to `db/schema.sql` |
 | [`ocre db dump`](#ocre-db-dump) | Writes table rows to fixture files `db/fixtures/<table>.yml` |
 | [`ocre sql QUERY`](#ocre-sql) | Runs SQL on D1 and prints the rows |
@@ -36,6 +38,7 @@ The examples below come from `ocre 0.1.0` on apps created by `ocre new ... --sta
 | [`ocre test`](#ocre-test) | Runs `cargo test`, the wasm32 check and, with `--e2e`, the request tests, `tests/e2e.sh` and the browser tests against a local server |
 | [`ocre deploy`](#ocre-deploy) | Creates missing Cloudflare resources, applies remote migrations, then runs `cf deploy` |
 | [`ocre logs`](#ocre-logs) | Streams the deployed Worker's live logs (`wrangler tail`) |
+| [`ocre push-keys`](#ocre-push-keys) | Prints a new VAPID key pair for web push |
 | [`ocre secret`](#ocre-secret) | Prints a new random value for `SECRET_KEY_BASE` |
 | [`ocre secrets list` / `push` / `fetch`](#ocre-secrets) | Lists secret names locally and on the Worker; uploads values from a git-ignored file; prints one local value |
 | [`ocre domains [add\|remove HOST]`](#ocre-domains) | The Worker's custom domains in `cloudflare.config.ts` |
@@ -677,6 +680,40 @@ ocre db version
 
 Before any migration it prints `no migration applied` (`"version": null`). With `--remote`, the human output ends with `Target: remote D1 database on Cloudflare` and the JSON has `"remote": true`.
 
+## ocre db load
+
+```text
+ocre db load <FILE> [--remote] [--json]
+```
+
+Runs the statements of a SQL file (relative to the app root) on the local database, or with `--remote` on the D1 database on Cloudflare; prints `loaded <file> (--local)`. For data files such as the one of `ocre db import-postgres`. Errors: `<file> not found`; the tool's error when a statement fails.
+
+## ocre db import-postgres
+
+```text
+ocre db import-postgres <DUMP> [--name <NAME>] [--json]
+```
+
+Converts a Postgres dump in plain SQL (`pg_dump --no-owner --no-acl <database> > dump.sql`) for D1, and loads nothing: `migrations/NNNN_<name>.sql` holds the tables in SQLite's types (constraints and indexes folded in), `db/<name>.sql` the rows of the dump's `COPY` blocks as `INSERT`s (100 rows, at most 90 KB, per statement). `--name` defaults to `import_from_postgres`. It prints the rows per table and a note for each type it changes, default it drops and statement it skips (functions, triggers, views, expression indexes). See [Migrating from Postgres](../guides/postgres.md).
+
+```text
+  create  migrations/0001_import_from_postgres.sql
+  create  db/import_from_postgres.sql
+  users: 2 rows
+  videos: 2 rows
+  note: videos.id: uuid -> TEXT; new rows need an id from the app (`ocre::token::public_id()`, or a UUID crate)
+  note: videos.inserted_at: timestamp with time zone -> TEXT `YYYY-MM-DD HH:MM:SS`, converted to UTC (`datetime('now')`'s format)
+  note: 1 triggers skipped: rewrite their logic in Rust (models' callbacks, jobs)
+
+Next:
+  read the notes, and edit the migration if needed
+  ocre migrate
+  ocre db load db/import_from_postgres.sql
+  production: ocre migrate --remote, then ocre db load db/import_from_postgres.sql --remote
+```
+
+Errors: ``no CREATE TABLE in the dump`` (hint: dump the schema too, in plain SQL); ``<table>: row <n> has <a> values for <b> columns``; `<path> already exists` (pass another `--name`).
+
 ## ocre db schema
 
 ```text
@@ -982,6 +1019,14 @@ ocre logs --search checkout --format json
 | `--search <text>` | Keep events whose console lines contain the text |
 
 Errors: outside an app, the usual "no cloudflare.config.ts found" error; without `npm install`, the hint names it; when wrangler fails (not logged in, Worker never deployed), the error carries wrangler's output and the hint `wrangler tail uses wrangler's own login: run npx wrangler login ... the Worker must be deployed (ocre deploy)`. See [Errors, logging and debugging](../guides/debugging.md).
+
+## ocre push-keys
+
+```text
+ocre push-keys [--json]
+```
+
+Prints a new VAPID key pair for web push (`ocre g push`): `VAPID_PUBLIC_KEY=<65-byte P-256 point>` and `VAPID_PRIVATE_KEY=<32 bytes>`, URL-safe base64, one per line, ready to append to `.prod.vars`. With `--json`: `{"command": "push-keys", "ok": true, "vapid": {"public_key": "...", "private_key": "..."}}`. It works anywhere and writes nothing. See [Web push notifications](../guides/push.md#production).
 
 ## ocre secret
 

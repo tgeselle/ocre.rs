@@ -116,6 +116,19 @@ pub(crate) fn load_data(project: &Project, database: &Database, dir: &str) -> Re
     Ok(ran)
 }
 
+/// `ocre db load <file>`: runs the statements of a SQL file (relative to the app root).
+pub fn load(file: &str, remote: bool, json: bool) -> CliResult {
+    let project = Project::find()?;
+    if !project.root.join(file).is_file() {
+        return Err(
+            CliError::new(format!("{file} not found")).hint("pass the path of a .sql file, relative to the app root")
+        );
+    }
+    let database = Database::open(&project, Echo::for_json(json), remote)?;
+    database.run_file(file)?;
+    Ok(Report { ran: vec![format!("loaded {file} ({})", database.target())], remote, ..Report::new("db load") })
+}
+
 /// Runs `query`; human mode prints each statement's rows as a table.
 pub fn sql(query: &str, remote: bool, json: bool) -> CliResult {
     let project = Project::find()?;

@@ -14,6 +14,8 @@ pub(crate) mod jobs;
 pub(crate) mod jwt;
 pub(crate) mod mail;
 pub(crate) mod oauth;
+#[cfg(feature = "push")]
+pub(crate) mod push;
 mod query;
 #[cfg(feature = "realtime")]
 pub(crate) mod realtime;

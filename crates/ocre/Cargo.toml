@@ -48,6 +48,9 @@ hkdf = "0.12.4"
 # The per-request query cache keeps D1 rows as JavaScript values and
 # deserializes them like `worker` does (already one of its dependencies).
 serde-wasm-bindgen = "0.6.5"
+# Web push (`ocre::push`, feature `push`): VAPID signatures (ES256) and the
+# aes128gcm message encryption of RFC 8291 need P-256.
+p256 = { version = "0.13", default-features = false, features = ["ecdh", "ecdsa", "arithmetic"], optional = true }
 
 [features]
 default = ["html"]
@@ -61,6 +64,8 @@ realtime = []
 # Test helpers (`ocre::testing`, native builds only): generated apps enable it
 # in `[dev-dependencies]`, so it is never in the WebAssembly build.
 testing = ["dep:ureq", "dep:pollster"]
+# Web push notifications (`ocre::push`); `ocre g push` turns it on.
+push = ["dep:p256"]
 
 [dev-dependencies]
 pollster = "1.0.1"

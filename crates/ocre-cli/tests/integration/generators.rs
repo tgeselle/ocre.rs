@@ -851,3 +851,70 @@ fn public_ids_keep_integer_ids_out_of_urls() {
     ok(&sandbox, &["g", "resource", "Tag", "label:string", "public_id:token"], &root);
     assert!(read(&root, "templates/tags/index.html").contains("paths::show(tag.public_id)"));
 }
+
+#[test]
+fn seo_lists_pages_in_every_locale_when_the_app_has_translations() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    let report = ok(&sandbox, &["g", "seo"], &root);
+    assert_eq!(report["created"], json!(["src/seo.rs"]));
+    assert_eq!(report["updated"], json!([".dev.vars", "src/lib.rs"]));
+    assert!(read(&root, ".dev.vars").ends_with("APP_URL=http://localhost:8787\n"));
+    assert!(read(&root, "src/seo.rs").contains("sitemap.add(SitemapUrl {"));
+
+    let root = sandbox.new_app("intl", &[]);
+    ok(&sandbox, &["g", "locale", "en", "fr"], &root);
+    fs::write(root.join(".dev.vars"), "APP_URL=https://intl.example").unwrap();
+    let report = ok(&sandbox, &["g", "seo"], &root);
+    assert_eq!(report["updated"], json!(["src/lib.rs"]), "APP_URL is set already");
+    assert!(read(&root, "src/seo.rs").contains("sitemap.add_localized(&urls, None);"));
+}
+
+#[test]
+fn push_needs_the_pwa_and_links_users_after_auth() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    let error = fails(&sandbox, &["g", "push"], &root);
+    assert_eq!(error["error"], "public/service-worker.js not found");
+    ok(&sandbox, &["g", "pwa"], &root);
+    let report = ok(&sandbox, &["g", "push"], &root);
+    assert_eq!(
+        report["next"][2],
+        "send: let message = ocre::push::message(\"Title\", \"Body\", \"/path\"); crate::push::notify_all(&ctx, &message).await?"
+    );
+    let vars = read(&root, ".dev.vars");
+    let public = vars.lines().find_map(|line| line.strip_prefix("VAPID_PUBLIC_KEY=")).unwrap();
+    assert_eq!(public.len(), 87, "an uncompressed P-256 point");
+    assert!(read(&root, "templates/layout.html").contains("<script src=\"/push.js\" defer></script>\n</head>"));
+    assert!(read(&root, "Cargo.toml").contains("\"push\""));
+    // Again, keeping the files: no second migration, script tag or key pair.
+    let report = sandbox.json(&["g", "push", "--skip"], &root).0;
+    assert!(report.get("created").is_none(), "every file exists: {report}");
+    assert_eq!(report["skipped"].as_array().unwrap().len(), 3, "{report}");
+    assert_eq!(read(&root, "templates/layout.html").matches("/push.js").count(), 1);
+    assert_eq!(read(&root, ".dev.vars").matches("VAPID_PUBLIC_KEY=").count(), 1);
+
+    let root = sandbox.new_app("members", &[]);
+    ok(&sandbox, &["g", "pwa"], &root);
+    ok(&sandbox, &["g", "auth"], &root);
+    let layout = read(&root, "templates/layout.html");
+    fs::write(root.join("templates/layout.html"), layout.replace("</head>", "")).unwrap();
+    assert_eq!(fails(&sandbox, &["g", "push"], &root)["error"], "templates/layout.html has no </head>");
+    fs::write(root.join("templates/layout.html"), layout).unwrap();
+    fs::remove_file(root.join(".dev.vars")).unwrap();
+    let report = ok(&sandbox, &["g", "push"], &root);
+    assert!(report["next"][2].as_str().unwrap().contains("crate::push::notify_user(&ctx, user_id, &message)"));
+    let migration = report["created"][3].as_str().unwrap();
+    assert!(read(&root, migration).contains("user_id INTEGER REFERENCES users(id) ON DELETE CASCADE"));
+    assert!(read(&root, "src/push.rs").contains("OptionalUser(user): OptionalUser,"));
+}
+
+#[test]
+fn push_keys_prints_a_new_vapid_pair() {
+    let sandbox = Sandbox::new();
+    let (report, ok) = sandbox.json(&["push-keys"], &sandbox.work);
+    assert!(ok, "{report}");
+    assert_eq!(report["vapid"]["private_key"].as_str().unwrap().len(), 43);
+    let (stdout, _) = text(&sandbox.ocre(&["push-keys"], &sandbox.work));
+    assert!(stdout.starts_with("VAPID_PUBLIC_KEY=B") && stdout.contains("\nVAPID_PRIVATE_KEY="), "{stdout}");
+}

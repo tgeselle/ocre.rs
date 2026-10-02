@@ -19,6 +19,7 @@
 - [Sessions, flash and security](guides/security.md)
 - [Authentication](guides/authentication.md)
 - [Email](guides/email.md)
+- [Web push notifications](guides/push.md)
 - [Background jobs and schedules](guides/jobs.md)
 - [File storage](guides/files.md)
 - [Webhooks and external services](guides/webhooks.md)
@@ -29,6 +30,7 @@
 - [Testing an Ocre app](guides/testing.md)
 - [Deployment](guides/deployment.md)
 - [Upgrading from wrangler.toml](guides/upgrading.md)
+- [Migrating from Postgres](guides/postgres.md)
 
 # Reference
 

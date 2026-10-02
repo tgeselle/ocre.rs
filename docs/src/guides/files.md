@@ -901,6 +901,8 @@ R2 is free every month within these amounts ([R2 pricing](https://developers.clo
 | Deletes | free | `delete`, `delete_attachments` |
 | Egress | free | Downloads cost no bandwidth fee |
 
+Past the free tier, R2 Standard storage costs $0.015 per GB-month and Class A operations $4.50 per million (October 2026): see [Free-plan limits: R2](../reference/limits.md#r2-files-binding-storage) for video-sized examples.
+
 Worker limits that shape uploads ([Workers limits](https://developers.cloudflare.com/workers/platform/limits/), September 2026):
 
 - **Memory**: a Worker has 128 MB, and the `Multipart` extractor holds the whole request in memory while R2 gets a copy. Keep `max_bytes` in the tens of MB.

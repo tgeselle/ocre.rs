@@ -307,3 +307,14 @@ fn check_reports_syntax_and_missing_keys() {
     );
     assert_eq!(check(&[("en", EN)]), []);
 }
+
+#[test]
+fn alternate_links_name_every_locale_and_escape_urls() {
+    let links = LOCALES.locale("pt-BR").alternate_links("https://ex.com/a?b=1&c=\"", "/faq");
+    assert!(
+        links.starts_with("<link rel=\"canonical\" href=\"https://ex.com/a?b=1&amp;c=&quot;/pt-BR/faq\">\n"),
+        "{links}"
+    );
+    assert_eq!(links.matches("rel=\"alternate\"").count(), 5, "4 locales and x-default: {links}");
+    assert!(links.ends_with("hreflang=\"x-default\" href=\"https://ex.com/a?b=1&amp;c=&quot;/en/faq\">"), "{links}");
+}

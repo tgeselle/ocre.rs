@@ -70,6 +70,11 @@
 //! | [`oauth`] | "Sign in with GitHub / Google": OAuth 2.0 code flow with PKCE |
 //! | [`password`] | PBKDF2-HMAC-SHA256 password digests |
 #![cfg_attr(
+    feature = "push",
+    doc = "| [`push`] | Web push notifications: VAPID keys, RFC 8291 encryption, sending (feature `push`) |"
+)]
+#![cfg_attr(not(feature = "push"), doc = "| `push` | Web push notifications (feature `push`, off in this build) |")]
+#![cfg_attr(
     feature = "realtime",
     doc = "| [`realtime`] | WebSocket channels on a Durable Object, htmx broadcasts (feature `realtime`) |"
 )]
@@ -79,6 +84,7 @@
 )]
 //! | [`replicas`] | D1 read replicas: reads from a nearby copy, each visitor still reading their own writes (`D1_REPLICAS=on`) |
 //! | [`security`] | Content-Security-Policy (nonces), Permissions-Policy, rate limits, safe redirects, `sanitize` / `strip_tags`, log filtering, HTTP Basic auth |
+//! | [`seo`] | JSON-LD (`seo::json_ld`), `/sitemap.xml` (`Sitemap`, with `hreflang` alternates) and `/llms.txt` (`LlmsTxt`) |
 //! | [`sse`] | Server-Sent Events: stream events to the browser as they happen |
 //! | [`storage`] | Files in Cloudflare R2: multipart uploads, attachments, streamed downloads |
 //! | [`token`] | Random tokens for emailed links and API keys, stored as SHA-256 digests |
@@ -168,6 +174,9 @@ mod names;
 pub mod oauth;
 pub mod password;
 mod protect;
+#[cfg(feature = "push")]
+#[cfg_attr(docsrs, doc(cfg(feature = "push")))]
+pub mod push;
 mod query;
 #[cfg(feature = "realtime")]
 #[cfg_attr(docsrs, doc(cfg(feature = "realtime")))]
@@ -176,6 +185,7 @@ pub mod replicas;
 mod request;
 mod runtime;
 pub mod security;
+pub mod seo;
 mod session;
 mod sql;
 pub mod sse;

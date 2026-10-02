@@ -21,6 +21,7 @@ mod names;
 mod new;
 mod notes;
 mod output;
+mod pg_import;
 mod project;
 mod routes;
 mod schedules;
@@ -185,6 +186,12 @@ enum Command {
     ///
     /// Example: `ocre secret` for a value to put in a git-ignored env file, then `ocre secrets push`.
     Secret,
+    /// Print a new VAPID key pair for web push (`ocre g push`), as
+    /// `VAPID_PUBLIC_KEY=...` and `VAPID_PRIVATE_KEY=...` lines.
+    ///
+    /// Example: `ocre push-keys >> .prod.vars`, then `ocre secrets push VAPID_PRIVATE_KEY --file .prod.vars`.
+    #[command(name = "push-keys")]
+    PushKeys,
     /// Print the IANA time zone names `ocre::helpers::time_zone_options` offers
     /// (Rails' `bin/rails time:zones:all`).
     ///
@@ -493,6 +500,19 @@ enum GenerateCommand {
         #[arg(long)]
         standard: bool,
     },
+    /// Search engines and language models: src/seo.rs lists the public pages
+    /// (`PAGES`) and answers `/sitemap.xml` (every locale of each page when
+    /// the app has translations) and `/llms.txt`. Adds APP_URL to .dev.vars.
+    ///
+    /// Example: `ocre g seo`.
+    Seo,
+    /// Web push notifications (after `ocre g pwa`): src/push.rs stores the
+    /// browsers' subscriptions and sends to them (`notify_all`, or
+    /// `notify_user` after `ocre g auth`), push.js subscribes from a button
+    /// with `data-push-subscribe`, and a VAPID key pair goes to .dev.vars.
+    ///
+    /// Example: `ocre g push`.
+    Push,
     /// `CACHE` Workers KV binding in cloudflare.config.ts for `ocre::cache::fetch`
     /// (read-through cache of JSON values). `ocre deploy` creates the namespace.
     ///
@@ -689,6 +709,31 @@ enum DbCommand {
     Prepare,
     /// Local only: delete the local database, apply every migration, then load db/fixtures and db/seeds.sql if present.
     Reset,
+    /// Run the statements of a SQL file (local database unless --remote), e.g.
+    /// the data file of `ocre db import-postgres`.
+    ///
+    /// Example: `ocre db load db/import_from_postgres.sql`.
+    Load {
+        /// Path of the .sql file, relative to the app root.
+        file: String,
+        /// Run it on the production database on Cloudflare.
+        #[arg(long)]
+        remote: bool,
+    },
+    /// Convert a Postgres dump (`pg_dump --no-owner --no-acl db > dump.sql`,
+    /// plain SQL) for D1: a migration with the tables in SQLite's types, and
+    /// db/<name>.sql with the rows. Prints a note for every type it changes and
+    /// everything it leaves behind (functions, triggers, views). Loads nothing.
+    ///
+    /// Example: `ocre db import-postgres dump.sql`, then `ocre migrate` and `ocre db load db/import_from_postgres.sql`.
+    #[command(name = "import-postgres")]
+    ImportPostgres {
+        /// Path of the dump.
+        dump: String,
+        /// Name of the migration and of the data file.
+        #[arg(long, default_value = "import_from_postgres")]
+        name: String,
+    },
     /// Write the database's CREATE statements to db/schema.sql (local unless --remote).
     ///
     /// A snapshot to read, and the input of `ocre g migration rebuild_<table>`.
@@ -798,12 +843,17 @@ fn main() -> ExitCode {
         }
         Command::Db(DbCommand::Reset) => db::reset(json),
         Command::Db(DbCommand::Schema { remote }) => db::schema(remote, json),
+        Command::Db(DbCommand::Load { file, remote }) => db::load(&file, remote, json),
+        Command::Db(DbCommand::ImportPostgres { dump, name }) => {
+            Project::find().and_then(|project| pg_import::import(&project, &dump, &name))
+        }
         Command::Db(DbCommand::Dump { tables, dir, force, remote }) => db::dump(&tables, &dir, force, remote),
         Command::Sql { query, remote } => db::sql(&query, remote, json),
         Command::Dev { port, cache, no_cache } => cloudflare::dev(port, toggle(cache, no_cache), json),
         Command::Deploy => cloudflare::deploy(json),
         Command::Logs { format, status, search } => cloudflare::logs(&format, &status, search.as_deref(), json),
         Command::Secret => secret::run(),
+        Command::PushKeys => secret::push_keys(),
         Command::TimeZones => Ok(output::Report {
             time_zones: Some(ocre::helpers::TIME_ZONES.to_vec()),
             ..output::Report::new("time-zones")
@@ -867,6 +917,8 @@ fn generate_command(args: GenerateArgs) -> CliResult {
             generate::external_job(project, &name, &fields, sweep.as_deref(), realtime)
         }
         GenerateCommand::Webhook { name, standard } => generate::webhook(project, &name, standard),
+        GenerateCommand::Seo => generate::seo(project),
+        GenerateCommand::Push => generate::push(project),
         GenerateCommand::Cache => generate::cache(project),
         GenerateCommand::Data { name } => generate::data(project, &name),
         GenerateCommand::SystemTest { name } => generate::system_test(project, &name),

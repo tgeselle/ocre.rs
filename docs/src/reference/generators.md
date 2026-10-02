@@ -831,6 +831,25 @@ Next:
 
 Errors: ``invalid external job name `<name>` ``; ``external job field `<field>` cannot be of that type``; ``external job field `<field>` is a column of the jobs table``; ``src/<name>_webhook.rs already answers /webhooks/<name>``; ``cron `<cron>` is already scheduled in cloudflare.config.ts`` (pass another `--sweep`). See [Run work on another service](../guides/webhooks.md#run-work-on-another-service).
 
+## ocre g seo
+
+```text
+ocre g seo
+```
+
+No arguments. Creates `src/seo.rs`: `PAGES`, the list of public pages (path without locale prefix, title, one-sentence description), and the routes `/sitemap.xml` (`ocre::seo::Sitemap`; each page in every locale with `hreflang` alternates when `src/lib.rs` declares `static LOCALES`) and `/llms.txt` (`ocre::seo::LlmsTxt`). Adds `APP_URL=http://localhost:8787` to `.dev.vars` when missing (the URLs are absolute). See [Views: structured data, sitemap and llms.txt](../guides/views.md#structured-data-sitemap-and-llmstxt).
+
+```text
+  create  src/seo.rs
+  update  .dev.vars
+  update  src/lib.rs
+
+Next:
+  list the public pages in PAGES (src/seo.rs), and their records in `sitemap`
+  ocre dev, then open http://localhost:8787/sitemap.xml and http://localhost:8787/llms.txt
+  production: APP_URL (the public origin) in worker.env of cloudflare.config.ts; add `Sitemap: https://<your host>/sitemap.xml` to public/robots.txt
+```
+
 ## ocre g job
 
 ```text
@@ -1035,6 +1054,14 @@ Next:
 ```
 
 Error: `.github/workflows/ci.yml already exists` (the shared hint; `--force` rewrites it).
+
+## ocre g push
+
+```text
+ocre g push
+```
+
+No arguments; needs `ocre g pwa` first (its service worker shows the messages). Creates `src/push.rs` (routes `GET /push/key`, `POST /push/subscriptions`, `POST /push/subscriptions/delete`; `notify_all`, or `notify_user` and a `user_id` column after `ocre g auth`), `public/push.js` (subscribes from a click on `data-push-subscribe`), `tests/push.rs` and the `create_push_subscriptions` migration; adds `push.js` to the layout, Ocre's `push` feature to `Cargo.toml` and a VAPID key pair with `VAPID_SUBJECT` to `.dev.vars`. Run again with `--skip`, it adds nothing twice. Errors: `public/service-worker.js not found` (hint: run `ocre g pwa` first); `templates/layout.html has no </head>`. See [Web push notifications](../guides/push.md).
 
 ## ocre g pwa
 

@@ -377,3 +377,38 @@ fn migrations_rename_drop_and_index_from_their_name() {
     let sql = fs::read_to_string(root.join("migrations/0002_rename_title_to_headline_in_posts.sql")).unwrap();
     assert!(sql.ends_with("ALTER TABLE posts RENAME COLUMN title TO headline;\n"), "{sql}");
 }
+
+// ---------- ocre db import-postgres, ocre db load ----------
+
+#[test]
+fn a_postgres_dump_becomes_a_migration_and_a_data_file_to_load() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    fs::write(
+        root.join("dump.sql"),
+        "CREATE TABLE public.videos (\n    id uuid NOT NULL,\n    live boolean\n);\nCOPY public.videos (id, live) FROM stdin;\nabc\tt\n\\.\n",
+    )
+    .unwrap();
+    let (report, ok) = sandbox.json(&["db", "import-postgres", "dump.sql"], &root);
+    assert!(ok, "{report}");
+    assert_eq!(report["created"], json!(["migrations/0001_import_from_postgres.sql", "db/import_from_postgres.sql"]));
+    assert_eq!(report["ran"][0], "videos: 1 rows");
+    assert!(report["ran"][1].as_str().unwrap().starts_with("note: videos.id: uuid -> TEXT"), "{report}");
+    let data = fs::read_to_string(root.join("db/import_from_postgres.sql")).unwrap();
+    assert!(data.ends_with("INSERT INTO videos (id, live) VALUES\n('abc', 1);\n"), "{data}");
+    assert!(sandbox.calls().is_empty(), "nothing is loaded");
+
+    // A second import needs another name.
+    let (report, ok) = sandbox.json(&["db", "import-postgres", "dump.sql"], &root);
+    assert!(!ok);
+    assert_eq!(report["error"], "db/import_from_postgres.sql already exists");
+    let (report, _) = sandbox.json(&["db", "import-postgres", "missing.sql"], &root);
+    assert!(report["error"].as_str().unwrap().starts_with("cannot read missing.sql"), "{report}");
+
+    let (report, ok) = sandbox.json(&["db", "load", "db/import_from_postgres.sql"], &root);
+    assert!(ok, "{report}");
+    assert_eq!(report["ran"], json!(["loaded db/import_from_postgres.sql (--local)"]));
+    assert_eq!(sandbox.calls(), [local_d1("d1 execute DB --local --file db/import_from_postgres.sql --yes")]);
+    let (report, _) = sandbox.json(&["db", "load", "db/nope.sql"], &root);
+    assert_eq!(report["error"], "db/nope.sql not found");
+}

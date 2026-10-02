@@ -768,6 +768,64 @@ impl I18n {
         }
     }
 
+    /// The absolute URL of `path` in every locale, the default first:
+    /// `(code, base_url + "/<code>" + path)`, for a sitemap's alternates
+    /// ([`Sitemap::add_localized`](crate::seo::Sitemap::add_localized)).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::LazyLock;
+    /// static LOCALES: ocre::i18n::Locales =
+    ///     LazyLock::new(|| ocre::i18n::Catalog::load(&[("en", "en:\n"), ("zh-Hans", "zh-Hans:\n")]));
+    /// let urls = LOCALES.locale("zh-Hans").alternates("https://ex.com/", "/pricing");
+    /// assert_eq!(urls, [("en", "https://ex.com/en/pricing".to_owned()), ("zh-Hans", "https://ex.com/zh-Hans/pricing".to_owned())]);
+    /// ```
+    pub fn alternates(&self, base_url: &str, path: &str) -> Vec<(&'static str, String)> {
+        let base = base_url.trim_end_matches('/');
+        self.codes().map(|code| (code, format!("{base}{}", self.in_locale(code).path(path)))).collect()
+    }
+
+    /// The `<link>` elements a localized page's `<head>` needs: `canonical`
+    /// (this locale's URL), one `alternate` per locale with its `hreflang`,
+    /// and `x-default` (the default locale's URL). `base_url` is the app's
+    /// public origin (`APP_URL`, [`ocre::mail::url`](crate::mail::url)),
+    /// `path` the page without its locale prefix. Values are escaped; in
+    /// askama: `{{ i18n.alternate_links(base_url, "/pricing")|safe }}`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::LazyLock;
+    /// static LOCALES: ocre::i18n::Locales =
+    ///     LazyLock::new(|| ocre::i18n::Catalog::load(&[("en", "en:\n"), ("fr", "fr:\n")]));
+    /// assert_eq!(
+    ///     LOCALES.locale("fr").alternate_links("https://ex.com", "/"),
+    ///     "<link rel=\"canonical\" href=\"https://ex.com/fr\">\n\
+    ///      <link rel=\"alternate\" hreflang=\"en\" href=\"https://ex.com/en\">\n\
+    ///      <link rel=\"alternate\" hreflang=\"fr\" href=\"https://ex.com/fr\">\n\
+    ///      <link rel=\"alternate\" hreflang=\"x-default\" href=\"https://ex.com/en\">"
+    /// );
+    /// ```
+    pub fn alternate_links(&self, base_url: &str, path: &str) -> String {
+        let base = base_url.trim_end_matches('/');
+        let attribute = |text: &str| text.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;");
+        let mut links =
+            vec![format!("<link rel=\"canonical\" href=\"{}\">", attribute(&format!("{base}{}", self.path(path))))];
+        let alternates = self.alternates(base, path);
+        for (code, url) in &alternates {
+            links.push(format!(
+                "<link rel=\"alternate\" hreflang=\"{}\" href=\"{}\">",
+                attribute(code),
+                attribute(url)
+            ));
+        }
+        if let Some((_, default)) = alternates.first() {
+            links.push(format!("<link rel=\"alternate\" hreflang=\"x-default\" href=\"{}\">", attribute(default)));
+        }
+        links.join("\n")
+    }
+
     /// `.title` with the scope `posts.index` is `posts.index.title`.
     fn resolve<'a>(&self, key: &'a str) -> Cow<'a, str> {
         match key.strip_prefix('.') {

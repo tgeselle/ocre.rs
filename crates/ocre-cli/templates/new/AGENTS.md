@@ -41,6 +41,8 @@ on stdout (`"ok": true|false`, plus `error` and `hint` on failure).
 | Authentication (users, login, magic link, password reset, JWT, API keys; once) | `ocre g auth` (`--db-sessions` to list/revoke devices, `--oauth github,google`) |
 | Emails to send (one function per email; previews at `/ocre/dev/mailers` in `ocre dev`) | `ocre g mailer User welcome password_reset` |
 | Receive email (Email Routing) | `ocre g mailbox` |
+| Push notifications to browsers (after `ocre g pwa`) | `ocre g push` |
+| Sitemap, llms.txt; JSON-LD with `ocre::seo::json_ld`; hreflang with `i18n.alternate_links` | `ocre g seo` |
 | Signed webhook from a service (payments, GPU jobs), each event once | `ocre g webhook payments` (`--standard` for Standard Webhooks) |
 | Work a Worker cannot do (ffmpeg, GPU, AI): submit to a service, track its state | `ocre g external_job upscale video_id:integer` |
 | Unguessable ids in URLs (`/videos/Xq3v9L...`, not `/videos/42`) | add `public_id:token` to the scaffold/api/resource fields |
