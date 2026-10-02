@@ -151,3 +151,11 @@ fn time_zone_options_mark_the_selected_zone() {
     assert!(options.starts_with("<option>UTC</option>"));
     assert!(options.contains("<option selected>Asia/Tokyo</option>") && !options.contains("selected>UTC"));
 }
+
+#[test]
+fn progress_bars_escape_their_id_and_label_and_clamp_the_percent() {
+    assert_eq!(
+        progress_bar("a\"b", -5, "x & y"),
+        "<div id=\"a&quot;b\" class=\"progress-bar\"><progress max=\"100\" value=\"0\">0%</progress> <span>x &amp; y</span></div>"
+    );
+}

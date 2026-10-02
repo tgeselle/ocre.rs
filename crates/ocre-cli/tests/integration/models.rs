@@ -313,7 +313,7 @@ fn many_attachments_get_a_child_model_and_api_routes() {
     for expected in [
         ".route(\"/api/albums/{id}/photos\", get(list_photos).post(attach_photos))",
         ".route(\"/api/albums/{id}/photos/{file_id}\", get(photo_file).delete(delete_photo))",
-        "const PHOTOS_LIMIT: usize = 10 * crate::models::album_photo::FILE.max_bytes + 64 * 1024;",
+        "const PHOTOS_LIMIT: usize = 10 * crate::models::album_photo::FILE.max_bytes as usize + 64 * 1024;",
         "    let uploads = form.files(\"photos\");",
         ", FieldError, storage::{self, Disposition, Multipart}",
     ] {

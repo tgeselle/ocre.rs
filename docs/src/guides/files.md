@@ -157,7 +157,7 @@ Besides the five REST routes (see [JSON APIs and GraphQL](json-apis.md)), each a
 | `PUT /api/documents/{id}/file` | Multipart body with the file as `file`; stores it and deletes the one it replaces; 422 when the file is missing or not allowed |
 | `DELETE /api/documents/{id}/file` | Removes the file; answers the updated record |
 
-The request limit of `PUT` is `document::FILE.max_bytes + 64 * 1024` (the file plus room for the multipart framing). GraphQL (`--graphql`) exposes the four columns; files go through these REST routes.
+The request limit of `PUT` is `document::FILE.max_bytes as usize + 64 * 1024` (the file plus room for the multipart framing). GraphQL (`--graphql`) exposes the four columns; files go through these REST routes.
 
 A session with `ocre dev` running (output captured from a real run):
 
@@ -349,7 +349,7 @@ use ocre::{
 /// What an import accepts: CSV or plain text, 2 MB at most (no wildcards: list exact types).
 const IMPORT: Rules = Rules { max_bytes: 2 * 1024 * 1024, content_types: &["text/csv", "text/plain"] };
 /// Largest request: the file at its limit plus room for the text fields and the multipart framing.
-const LIMIT: usize = IMPORT.max_bytes + 64 * 1024;
+const LIMIT: usize = IMPORT.max_bytes as usize + 64 * 1024;
 
 pub fn routes() -> Router<Ctx> {
     Router::new().route("/api/imports", put(create))
@@ -716,7 +716,47 @@ The browser `PUT`s to R2's host, a different origin, so the bucket needs a CORS 
 ]
 ```
 
-Ocre does not set it for you and this guide's authors have not run this step against a live bucket: check the dashboard's current wording, and that the preflight (`OPTIONS`) answers before debugging anything else when `onerror` fires.
+Ocre does not set it for you and this guide's authors have not run this step against a live bucket: check the dashboard's current wording, and that the preflight (`OPTIONS`) answers before debugging anything else when `onerror` fires. [Multipart uploads](#large-files-multipart-uploads-that-resume) also need `"ExposeHeaders": ["ETag"]`, so the script can read each part's ETag.
+
+## Large files: multipart uploads that resume
+
+One `PUT` is fine for photos. For videos of several gigabytes, a dropped connection would restart the whole file, and R2 takes at most 5 GB in one `PUT`. `storage::multipart_uploads` sends a file in parts (S3 multipart uploads), four at a time, each retried; the parts already sent are remembered in the browser, so choosing the same file again after a lost connection or a closed tab sends only the missing ones.
+
+```rust,ignore
+use ocre::storage::{self, Rules};
+
+// `u64`: files over 4 GB.
+pub static VIDEO: Rules = Rules { max_bytes: 20 * 1024 * 1024 * 1024, content_types: &["video/mp4", "video/quicktime"] };
+
+// in routes():
+.merge(storage::multipart_uploads("/videos/uploads", "uploads/videos", "video", &VIDEO))
+.merge(storage::direct_upload_script())
+```
+
+```html
+<script src="/ocre/direct-upload.js" defer></script>
+<form action="/videos" method="post">
+  <input type="file" name="video" data-multipart-upload-url="/videos/uploads">
+  <button>Upload</button>
+</form>
+```
+
+The form is then submitted with `video_key` and `video_filename`, exactly as after a direct upload: the handler calls `storage::attach_direct_upload(&ctx, "video", &form.video_key, &form.video_filename, &VIDEO)`, which checks the assembled object's size and type and returns the `Attachment` to save. The script dispatches the same events (`direct-upload:progress` covers the whole file).
+
+What happens, with the routes under `/videos/uploads`:
+
+1. `POST /videos/uploads` with the file's name, type and size: checked against `VIDEO`, then the upload is created in R2 (one class A operation). The answer is the signed key, R2's `upload_id`, the part size (10 MiB, larger for files that would need over 10,000 parts) and the number of parts.
+2. `POST /videos/uploads/parts` with the part numbers still to send: where to `PUT` each one.
+3. Each part is `PUT` there (one class A operation each: a 5 GB video is 512 parts). The script keeps every finished part's number and ETag in `localStorage`, under the URL, file name, size and modification date.
+4. `POST /videos/uploads/complete` with every part: R2 assembles the object (one class A operation).
+5. `POST /videos/uploads/abort` drops an upload; R2 also deletes the parts of an upload left unfinished, after a while set by the bucket's lifecycle rules.
+
+Where the parts go:
+
+- **Straight to R2** in a release build with the `R2_*` [settings](#settings): presigned `PUT` URLs (valid 24 hours), so the file never passes through the Worker, whatever its size. The bucket's [CORS rule](#bucket-cors-rule) must allow `PUT` and expose `ETag`.
+- **Through the Worker** otherwise: in `ocre dev` (whose local R2 has no S3 API) and without the `R2_*` settings. Each part is one request to `PUT /videos/uploads/parts/<n>`, streamed into R2 (parts of at most 95 MB, under the 100 MB request limit; files up to about 950 GB). It works on the free plan, but every part costs a Worker request and the CPU of copying it through WebAssembly: prefer the direct mode in production.
+
+The upload's key is signed with `R2_SECRET_ACCESS_KEY`, or `SECRET_KEY_BASE` without it. The through-the-Worker mode was checked in `ocre dev` with a browser (a 25 MB file in three parts, the third failing until the form was sent again, then only that part resent); the direct mode has not been run against a live bucket (October 2026).
 
 ## Purging unattached uploads
 

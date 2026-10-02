@@ -164,3 +164,13 @@ fn heads_become_attachments_once_they_pass_the_rules() {
     let err = attachment_from_head("image", Some(&big), "me.png", &PHOTO).unwrap_err();
     assert_eq!(err.to_string(), "invalid: Image is too large (maximum is 100 bytes)");
 }
+
+#[test]
+fn upload_keys_are_signed_with_the_r2_secret_else_secret_key_base() {
+    let vars = |pairs: &'static [(&str, &str)]| {
+        move |name: &str| pairs.iter().find(|(n, _)| *n == name).map(|(_, v)| (*v).to_owned())
+    };
+    assert_eq!(upload_secret(&vars(&[("R2_SECRET_ACCESS_KEY", "r2"), ("SECRET_KEY_BASE", "base")])).unwrap(), "r2");
+    assert_eq!(upload_secret(&vars(&[("R2_SECRET_ACCESS_KEY", " "), ("SECRET_KEY_BASE", "base")])).unwrap(), "base");
+    assert!(upload_secret(&vars(&[])).unwrap_err().to_string().contains("R2_SECRET_ACCESS_KEY or SECRET_KEY_BASE"));
+}

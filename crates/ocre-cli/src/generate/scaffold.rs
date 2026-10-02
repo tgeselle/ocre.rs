@@ -403,7 +403,8 @@ impl Files {
                 handlers: String::new(),
             };
         }
-        let limit: String = files.iter().map(|f| format!("{singular}::{}.max_bytes + ", f.rules_const())).collect();
+        let limit: String =
+            files.iter().map(|f| format!("{singular}::{}.max_bytes as usize + ", f.rules_const())).collect();
         let takes: String = files.iter().map(|f| format!("{0}: multipart.file(\"{0}\"), ", f.name)).collect();
         let items = format!(
             r#"
@@ -501,7 +502,7 @@ impl Many {
             .expect("writing to a String");
             write!(
                 items,
-                "\n/// Largest request adding {name}: ten files at their limit, plus room for the multipart framing.\nconst {limit}: usize = 10 * crate::models::{module}::FILE.max_bytes + 64 * 1024;\n"
+                "\n/// Largest request adding {name}: ten files at their limit, plus room for the multipart framing.\nconst {limit}: usize = 10 * crate::models::{module}::FILE.max_bytes as usize + 64 * 1024;\n"
             )
             .expect("writing to a String");
             write!(
@@ -584,7 +585,7 @@ const EMBED: ocre::storage::Rules = ocre::storage::Rules {
 };
 
 /// Largest embed request: the image at its limit, plus room for the multipart framing.
-const EMBED_LIMIT: usize = EMBED.max_bytes + 64 * 1024;
+const EMBED_LIMIT: usize = EMBED.max_bytes as usize + 64 * 1024;
 "#,
     );
     write!(

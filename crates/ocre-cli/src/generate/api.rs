@@ -181,7 +181,7 @@ fn module_rs(names: &ModelNames, fields: &[Field], many: &[String], command: &st
             file_items,
             r#"
 /// Largest `PUT .../{name}` body: the file at its limit, plus room for the multipart framing.
-const {limit}: usize = {singular}::{rules}.max_bytes + 64 * 1024;
+const {limit}: usize = {singular}::{rules}.max_bytes as usize + 64 * 1024;
 
 async fn {name}_file(State(ctx): State<Ctx>, Path(id): Path<i64>, headers: HeaderMap) -> ApiResult<Response> {{
     let record = {singular}::find(&ctx, id).await?.or_404()?;
@@ -294,7 +294,7 @@ fn many_attachments_api(names: &ModelNames, name: &str) -> (String, String, Stri
     let items = format!(
         r#"
 /// Largest `POST .../{name}` body: ten files at their limit, plus room for the multipart framing.
-const {limit}: usize = 10 * crate::models::{module}::FILE.max_bytes + 64 * 1024;
+const {limit}: usize = 10 * crate::models::{module}::FILE.max_bytes as usize + 64 * 1024;
 
 async fn list_{name}(State(ctx): State<Ctx>, Path(id): Path<i64>) -> ApiResult<Json<Vec<crate::models::{module}::{model}>>> {{
     let record = {singular}::find(&ctx, id).await?.or_404()?;

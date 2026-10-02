@@ -13,11 +13,11 @@ use crate::{
         Attachment, ByteRange, DirectUpload, DirectUploadRequest, Disposition, Fetch, KEYS_PER_QUERY, Listing,
         MAX_LIST, Purged, Rules, S3Endpoint, STORAGE_BINDING, STORAGE_PUBLIC_URL, StoredObject, Upload,
         attachment_from_head, essence, file_response, join_public_url, missing_binding, not_modified, presign_get_url,
-        r2_endpoint, redirect_response, referenced_keys_sql, stale_keys, unsatisfiable, verify_key,
+        r2_endpoint, redirect_response, referenced_keys_sql, stale_keys, unsatisfiable, upload_secret, verify_key,
     },
 };
 
-fn bucket(env: &Env) -> Result<Bucket> {
+pub(super) fn bucket(env: &Env) -> Result<Bucket> {
     env.bucket(STORAGE_BINDING).map_err(|err| missing_binding(&err.to_string()))
 }
 
@@ -593,7 +593,7 @@ pub fn direct_upload(
     DirectUpload::sign(&endpoint(ctx.env())?, prefix, field, request, rules, crate::now(), DIRECT_UPLOAD_EXPIRES_IN)
 }
 
-/// Finishes a direct upload: checks the object behind `signed_key` against `rules` and returns its [`Attachment`].
+/// Finishes a direct upload (or a [`multipart_uploads`](crate::storage::multipart_uploads) one): checks the object behind `signed_key` against `rules` and returns its [`Attachment`].
 ///
 /// Rails' `attach(signed_blob_id)`. `signed_key` must come from
 /// [`direct_upload`] (a key this app signed, so a client cannot claim
@@ -611,8 +611,9 @@ pub fn direct_upload(
 /// - [`Error::Invalid`](crate::Error::Invalid) (422) on `field`: "is not a
 ///   valid upload" (bad signature), "was not uploaded" (no object), or the
 ///   messages of [`Validator::file`](crate::Validator::file).
-/// - [`Error::Internal`](crate::Error::Internal) (500) when an `R2_*`
-///   setting or the `STORAGE` binding is missing, or R2 fails.
+/// - [`Error::Internal`](crate::Error::Internal) (500) when neither
+///   `R2_SECRET_ACCESS_KEY` nor `SECRET_KEY_BASE` is set (the secret that
+///   signs upload keys), the `STORAGE` binding is missing, or R2 fails.
 ///
 /// # Examples
 ///
@@ -653,7 +654,7 @@ pub fn attach_direct_upload(
     let env = ctx.env().clone();
     let (field, signed_key, filename, rules) = (field.to_owned(), signed_key.to_owned(), filename.to_owned(), *rules);
     SendFuture::new(async move {
-        let key = verify_key(&field, &endpoint(&env)?.secret_access_key, &signed_key)?;
+        let key = verify_key(&field, &upload_secret(&|name| env.var(name).ok().map(|v| v.to_string()))?, &signed_key)?;
         let bucket = bucket(&env)?;
         let object = bucket.head(key).await?.as_ref().map(stored);
         let attached = attachment_from_head(&field, object.as_ref(), &filename, &rules);

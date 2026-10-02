@@ -331,6 +331,21 @@ pub(crate) fn verify_key(field: &str, secret: &str, signed_key: &str) -> Result<
     Ok(key.to_owned())
 }
 
+/// The secret that signs upload keys: `R2_SECRET_ACCESS_KEY` (which direct
+/// uploads need anyway), else `SECRET_KEY_BASE` for uploads that go through
+/// the Worker.
+pub(crate) fn upload_secret(var: &dyn Fn(&str) -> Option<String>) -> Result<String> {
+    [R2_SECRET_ACCESS_KEY, crate::session::SECRET_KEY_BASE]
+        .iter()
+        .find_map(|name| var(name).map(|value| value.trim().to_owned()).filter(|value| !value.is_empty()))
+        .ok_or_else(|| {
+            Error::internal(
+                "uploads need R2_SECRET_ACCESS_KEY or SECRET_KEY_BASE to sign their keys (neither is set). Fix: \
+                 `ocre secret` makes a SECRET_KEY_BASE for .dev.vars; `ocre deploy` sets it in production",
+            )
+        })
+}
+
 /// The endpoint of the `R2_*` variables and secrets read with `var`; the error names every missing one.
 pub(crate) fn r2_endpoint(var: &dyn Fn(&str) -> Option<String>) -> Result<S3Endpoint> {
     let names = [R2_ACCOUNT_ID, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY];

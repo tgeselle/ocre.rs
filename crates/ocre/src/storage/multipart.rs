@@ -52,7 +52,7 @@ use crate::{ApiError, Error, Result};
 /// use serde::Deserialize;
 ///
 /// const IMAGE: Rules = Rules { max_bytes: 10 * 1024 * 1024, content_types: &["image/png", "image/jpeg"] };
-/// const FORM_LIMIT: usize = IMAGE.max_bytes + 1024 * 1024;
+/// const FORM_LIMIT: usize = IMAGE.max_bytes as usize + 1024 * 1024;
 ///
 /// #[derive(Deserialize)]
 /// struct NewPhoto {

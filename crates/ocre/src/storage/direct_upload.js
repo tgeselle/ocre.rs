@@ -10,6 +10,13 @@
 // with hidden fields `video_key` (the signed key) and `video_filename` for
 // `storage::attach_direct_upload`. With `multiple`, the fields repeat.
 //
+// <input type="file" name="video" data-multipart-upload-url="/videos/uploads">
+//
+// Large files (`storage::multipart_uploads`): the file is sent in parts, 4 at
+// a time, each retried 3 times. The finished parts are kept in localStorage,
+// so after a lost connection or a closed tab, choosing the same file again
+// sends only the missing parts. The form then gets the same hidden fields.
+//
 // Events, dispatched on the input and bubbling (Active Storage's names):
 // direct-uploads:start / direct-uploads:end on the form, and per file
 // direct-upload:start, direct-upload:progress (detail.progress, 0 to 100),
@@ -46,6 +53,110 @@
       throw new Error(fields || (body.error && body.error.message) || `the app answered ${response.status}`);
     }
     return body;
+  };
+
+  const json = async (url, body) => {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify(body),
+    });
+    const answer = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const fields = answer.error && answer.error.fields ? Object.values(answer.error.fields).flat().join(", ") : "";
+      throw new Error(fields || (answer.error && answer.error.message) || `the app answered ${response.status}`);
+    }
+    return answer;
+  };
+
+  // PUTs one part and resolves with its ETag; `onprogress(bytes)` reports the bytes sent.
+  const putPart = (url, blob, onprogress) =>
+    new Promise((resolve, reject) => {
+      const request = new XMLHttpRequest();
+      request.open("PUT", url);
+      request.upload.addEventListener("progress", (event) => onprogress(event.loaded));
+      request.addEventListener("load", () => {
+        if (request.status < 200 || request.status >= 300) {
+          return reject(Object.assign(new Error(`the part was refused (${request.status})`), { status: request.status }));
+        }
+        // Straight to R2: the ETag header (the bucket's CORS rule must expose it); through the Worker: JSON.
+        const etag = request.getResponseHeader("etag") || (JSON.parse(request.responseText || "{}").etag ?? "");
+        etag ? resolve(etag) : reject(new Error("R2 did not expose the part's ETag: add ETag to the bucket's CORS ExposeHeaders"));
+      });
+      request.addEventListener("error", () => reject(new Error("the upload failed")));
+      request.send(blob);
+    });
+
+  const retried = async (attempt, tries = 3) => {
+    for (let i = 1; ; i++) {
+      try {
+        return await attempt();
+      } catch (error) {
+        if (i >= tries) throw error;
+        await new Promise((done) => setTimeout(done, 1000 * 2 ** i));
+      }
+    }
+  };
+
+  // Sends `file` in parts and resolves with its signed key, resuming a
+  // previous attempt at the same file (same URL, name, size and date).
+  const multipart = async (input, file) => {
+    const url = input.dataset.multipartUploadUrl;
+    const memory = `ocre-multipart:${url}:${file.name}:${file.size}:${file.lastModified}`;
+    const resumed = localStorage.getItem(memory) !== null;
+    try {
+      return await sendParts(input, file, url, memory);
+    } catch (error) {
+      // The upload R2 kept is gone (completed, aborted or expired): start over once.
+      if (!resumed || error.status !== 404) throw error;
+      localStorage.removeItem(memory);
+      return sendParts(input, file, url, memory);
+    }
+  };
+
+  const sendParts = async (input, file, url, memory) => {
+    let state = JSON.parse(localStorage.getItem(memory) || "null");
+    if (!state) {
+      const upload = await json(url, { filename: file.name, content_type: file.type || "application/octet-stream", size: file.size });
+      state = { ...upload, done: {} };
+      localStorage.setItem(memory, JSON.stringify(state));
+    }
+    const sent = {};
+    const report = () => {
+      const bytes = Object.values(sent).reduce((sum, value) => sum + value, 0);
+      emit(input, "direct-upload:progress", { file, progress: file.size ? (bytes / file.size) * 100 : 100 });
+    };
+    const missing = [];
+    for (let part = 1; part <= state.part_count; part++) {
+      if (state.done[part]) sent[part] = Math.min(state.part_size, file.size - (part - 1) * state.part_size);
+      else missing.push(part);
+    }
+    report();
+    const ids = { signed_key: state.signed_key, upload_id: state.upload_id };
+    for (let first = 0; first < missing.length; first += 1000) {
+      const { urls } = await json(`${url}/parts`, { ...ids, parts: missing.slice(first, first + 1000) });
+      const queue = Object.entries(urls).map(([part, partUrl]) => [Number(part), partUrl]);
+      const worker = async () => {
+        while (queue.length) {
+          const [part, partUrl] = queue.shift();
+          const blob = file.slice((part - 1) * state.part_size, part * state.part_size);
+          const etag = await retried(() =>
+            putPart(partUrl, blob, (bytes) => {
+              sent[part] = bytes;
+              report();
+            }),
+          );
+          sent[part] = blob.size;
+          state.done[part] = etag;
+          localStorage.setItem(memory, JSON.stringify(state));
+        }
+      };
+      await Promise.all([worker(), worker(), worker(), worker()]);
+    }
+    const parts = Object.entries(state.done).map(([part, etag]) => ({ part_number: Number(part), etag }));
+    await json(`${url}/complete`, { ...ids, parts });
+    localStorage.removeItem(memory);
+    return state.signed_key;
   };
 
   const hidden = (form, name, value) => {
@@ -86,7 +197,7 @@
 
   document.addEventListener("submit", async (event) => {
     const form = event.target;
-    const inputs = [...form.querySelectorAll("input[type=file][data-direct-upload-url]")].filter(
+    const inputs = [...form.querySelectorAll("input[type=file][data-direct-upload-url], input[type=file][data-multipart-upload-url]")].filter(
       (input) => !input.disabled && input.files.length > 0,
     );
     if (inputs.length === 0) return;
@@ -99,9 +210,15 @@
         for (const file of input.files) {
           emit(input, "direct-upload:start", { file });
           try {
-            const upload = await sign(input, file);
-            await put(upload, file, input);
-            hidden(form, `${input.name}_key`, upload.signed_key);
+            let signedKey;
+            if (input.dataset.multipartUploadUrl) {
+              signedKey = await multipart(input, file);
+            } else {
+              const upload = await sign(input, file);
+              await put(upload, file, input);
+              signedKey = upload.signed_key;
+            }
+            hidden(form, `${input.name}_key`, signedKey);
             hidden(form, `${input.name}_filename`, file.name);
             emit(input, "direct-upload:end", { file });
           } catch (error) {

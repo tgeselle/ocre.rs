@@ -55,7 +55,7 @@
 //! use ocre::{Ctx, Error, IntoParam, OptionExt, Result, Validator, params};
 //!
 //! const AVATAR: Rules = Rules { max_bytes: 5 * 1024 * 1024, content_types: &["image/png", "image/jpeg"] };
-//! const FORM_LIMIT: usize = AVATAR.max_bytes + 1024 * 1024;
+//! const FORM_LIMIT: usize = AVATAR.max_bytes as usize + 1024 * 1024;
 //!
 //! async fn upload(
 //!     State(ctx): State<Ctx>,
@@ -87,6 +87,7 @@
 mod analyze;
 mod multipart;
 mod presign;
+mod resumable;
 mod variant;
 
 use std::fmt::Write as _;
@@ -99,6 +100,7 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
+pub use crate::runtime::resumable::multipart_uploads;
 pub use crate::runtime::storage::{
     attach_direct_upload, delete, delete_attachments, direct_upload, exists, head, list, presign_get, presign_put,
     public_url, purge_unattached, read, read_first, serve, serve_redirect, store, store_body, store_bytes,
@@ -110,7 +112,12 @@ pub use presign::{
     DirectUpload, DirectUploadRequest, MAX_EXPIRES_IN, R2_ACCESS_KEY_ID, R2_ACCOUNT_ID, R2_BUCKET,
     R2_SECRET_ACCESS_KEY, S3Endpoint,
 };
-pub(crate) use presign::{attachment_from_head, presign_get_url, r2_endpoint, verify_key};
+pub(crate) use presign::{attachment_from_head, presign_get_url, r2_endpoint, sign_key, upload_secret, verify_key};
+pub(crate) use resumable::check_part_numbers;
+pub use resumable::{
+    CompletedPart, FinishRequest, MAX_PART, MAX_PARTS, MAX_PARTS_PER_REQUEST, MAX_WORKER_PART, MultipartUpload,
+    PART_SIZE, PartUrls, PartsRequest, check_multipart, part_layout, presign_parts,
+};
 pub use variant::{Fit, Variant};
 
 /// Name of the R2 binding holding every file: `STORAGE: bindings.r2({ name: "<app>-storage" })` in cloudflare.config.ts.
@@ -471,15 +478,17 @@ pub(crate) fn referenced_keys_sql(table: &str, column: &str, count: usize) -> Re
 /// use ocre::storage::Rules;
 ///
 /// const AVATAR: Rules = Rules { max_bytes: 5 * 1024 * 1024, content_types: &["image/png", "image/jpeg"] };
-/// const FORM_LIMIT: usize = AVATAR.max_bytes + 1024 * 1024;
+/// const FORM_LIMIT: usize = AVATAR.max_bytes as usize + 1024 * 1024;
 /// assert_eq!(FORM_LIMIT, 6 * 1024 * 1024);
 /// assert!(AVATAR.allows("image/PNG"));
 /// assert!(!AVATAR.allows("image/svg+xml"));
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rules {
-    /// Largest accepted file, in bytes.
-    pub max_bytes: usize,
+    /// Largest accepted file, in bytes (`u64`: multipart uploads take files
+    /// over 4 GB, more than a `usize` holds in WebAssembly). Request limits
+    /// are `usize`: `RULES.max_bytes as usize`.
+    pub max_bytes: u64,
     /// Accepted content types, exact and lowercase (`image/png`).
     ///
     /// There is no wildcard: `image/*` would admit SVG, which can carry scripts.
@@ -547,8 +556,8 @@ impl Validator {
         content_type: &str,
         rules: &Rules,
     ) -> &mut Self {
-        let too_large = size > rules.max_bytes as u64;
-        self.check(field, too_large, format!("is too large (maximum is {})", human_size(rules.max_bytes as u64)));
+        let too_large = size > rules.max_bytes;
+        self.check(field, too_large, format!("is too large (maximum is {})", human_size(rules.max_bytes)));
         let allowed = rules.content_types.join(", ");
         self.check(field, !rules.allows(content_type), format!("has an unsupported type (allowed: {allowed})"))
     }

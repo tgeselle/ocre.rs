@@ -633,6 +633,34 @@ fn escape_into(out: &mut String, text: &[char]) {
     }
 }
 
+/// A progress bar with the element id `id`: a `<progress>` at `percent`
+/// (clamped to 0-100) and a `label` (escaped), as HTML.
+///
+/// Render it in a page, then broadcast a new one with the same `id` to
+/// move it: htmx's WebSocket extension replaces the element that has the
+/// id (`ocre::realtime::broadcast`; `ocre g external_job --realtime` does it).
+/// Style it with the `progress-bar` class.
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(
+///     ocre::helpers::progress_bar("upload_1", 40, "Encoding <4K>"),
+///     "<div id=\"upload_1\" class=\"progress-bar\"><progress max=\"100\" value=\"40\">40%</progress> <span>Encoding &lt;4K&gt;</span></div>"
+/// );
+/// assert!(ocre::helpers::progress_bar("x", 140, "").contains("value=\"100\""));
+/// ```
+pub fn progress_bar(id: &str, percent: i64, label: &str) -> String {
+    let percent = percent.clamp(0, 100);
+    let mut out = String::from("<div id=\"");
+    escape_into(&mut out, &id.chars().collect::<Vec<_>>());
+    write!(out, "\" class=\"progress-bar\"><progress max=\"100\" value=\"{percent}\">{percent}%</progress> <span>")
+        .expect("writing to a String");
+    escape_into(&mut out, &label.chars().collect::<Vec<_>>());
+    out.push_str("</span></div>");
+    out
+}
+
 /// IANA time zone names, as browsers list them (`Intl.supportedValuesOf("timeZone")`): what
 /// [`time_zone_options`] offers and `ocre time-zones` prints.
 ///
