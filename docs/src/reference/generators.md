@@ -763,10 +763,76 @@ Next:
 
 Errors: `src/mailbox.rs already exists`; `src/lib.rs already handles the `email` event` with the hint ``a Worker has one email entry point: call `ocre::mail::receive(message, env, mailbox::receive)` from it``. See [Email](../guides/email.md).
 
+## ocre g webhook
+
+```text
+ocre g webhook <name> [--standard]
+```
+
+An endpoint a service calls back, `POST /webhooks/<name>` in `src/<name>_webhook.rs` (a `_webhook` suffix in the name is dropped). It checks the signature (HMAC-SHA256 of the raw body in `X-Signature`; with `--standard`, [Standard Webhooks](https://www.standardwebhooks.com) headers and a `whsec_` secret), records each event in `webhook_events` and runs `handle(&ctx, &event)` once per event id (`ocre::webhooks::once`). The first webhook adds the `create_webhook_events` migration; `<NAME>_WEBHOOK_SECRET` is appended to `.dev.vars` with a random value; `tests/<name>_webhook.rs` has request tests (a wrong signature is refused, the same event twice is processed once). See [Webhooks and external services](../guides/webhooks.md).
+
+```sh
+ocre g webhook payments
+```
+
+```text
+  create  src/payments_webhook.rs
+  create  tests/payments_webhook.rs
+  create  migrations/0001_create_webhook_events.sql
+  update  .dev.vars
+  update  src/lib.rs
+
+Next:
+  ocre migrate
+  write the effect in `handle` (src/payments_webhook.rs), then `ocre test --e2e`
+  give the sender https://<your host>/webhooks/payments and the secret; production: put PAYMENTS_WEBHOOK_SECRET in .prod.vars, then `ocre secrets push PAYMENTS_WEBHOOK_SECRET --file .prod.vars`
+```
+
+```json
+{"command":"generate webhook","created":["src/gpu_webhook.rs","tests/gpu_webhook.rs"],"next":["write the effect in `handle` (src/gpu_webhook.rs), then `ocre test --e2e`","give the sender https://<your host>/webhooks/gpu and the secret; production: put GPU_WEBHOOK_SECRET in .prod.vars, then `ocre secrets push GPU_WEBHOOK_SECRET --file .prod.vars`"],"ok":true,"updated":[".dev.vars","src/lib.rs"]}
+```
+
+That second run (`ocre g webhook gpu --standard`) reuses the table, so it has no migration. Errors: ``invalid webhook name `<name>` `` (snake_case, not a Rust keyword); `src/<name>_webhook.rs already exists`.
+
+## ocre g external_job
+
+```text
+ocre g external_job <name> [FIELDS]... [--sweep <WHEN>]
+```
+
+Work done by an external service (a GPU on RunPod or Modal, a container, any HTTP API), tracked in the table `<name>_jobs` (a `_job` or `_jobs` suffix in the name is dropped). `FIELDS` are the job's input (`name:type`, sent as JSON; no attachments, enums or rich text, and not the names of the table's own columns). It creates:
+
+- `src/<name>_jobs.rs`: the `<Name>Job` row (`status`: `queued`, `submitted`, `running`, `done` or `failed`; `external_id`, `progress`, `result`, `error`, `attempts`), `start(&ctx, <fields>)` (insert and submit with a signed POST to `<NAME>_URL`), `submit`, `find`, `sweep`, the route `POST /webhooks/<name>/{id}` for the service's events (signed with `<NAME>_SECRET`, or carrying the job's token), and the functions to adapt: `request_body`, `handle_event`, `changed`;
+- the `create_<name>_jobs` migration;
+- `src/schedules/<name>_jobs_sweep.rs`, a Cron Trigger (`--sweep`, default `*/5 * * * *`, plain English accepted) that fails jobs without news for an hour and resubmits failed submissions (3 attempts);
+- `<NAME>_URL`, `<NAME>_SECRET` and `APP_URL` in `.dev.vars` (those missing).
+
+```sh
+ocre g external_job upscale video_id:integer scale:float
+```
+
+```text
+  create  src/upscale_jobs.rs
+  create  migrations/0001_create_upscale_jobs.sql
+  create  src/schedules/upscale_jobs_sweep.rs
+  create  src/schedules/mod.rs
+  update  cloudflare.config.ts
+  update  src/lib.rs
+  update  .dev.vars
+
+Next:
+  ocre migrate
+  set UPSCALE_URL in .dev.vars to the service's endpoint, and adapt `request_body` and `handle_event` in src/upscale_jobs.rs to its API
+  start a job from a handler: upscale_jobs::start(&ctx, ...).await?
+  production: UPSCALE_URL and APP_URL in worker.env of cloudflare.config.ts; UPSCALE_SECRET (and UPSCALE_TOKEN for a bearer API key) in .prod.vars, then `ocre secrets push UPSCALE_SECRET --file .prod.vars`
+```
+
+Errors: ``invalid external job name `<name>` ``; ``external job field `<field>` cannot be of that type``; ``external job field `<field>` is a column of the jobs table``; ``src/<name>_webhook.rs already answers /webhooks/<name>``; ``cron `<cron>` is already scheduled in cloudflare.config.ts`` (pass another `--sweep`). See [Run work on another service](../guides/webhooks.md#run-work-on-another-service).
+
 ## ocre g job
 
 ```text
-ocre g job <NAME> [FIELDS]... [--queue <QUEUE>]
+ocre g job <NAME> [FIELDS]... [--queue <QUEUE>] [--steps <STEP,...>] [--lock <FIELD>]
 ```
 
 | Argument | Required | Meaning |
@@ -774,6 +840,8 @@ ocre g job <NAME> [FIELDS]... [--queue <QUEUE>]
 | `NAME` | yes | Job name, PascalCase or snake_case, a verb phrase; a `Job` suffix is dropped (`ImportCsvJob` gives `import_csv` and `ImportCsv`) |
 | `FIELDS` | no | The job's arguments as `name:type`; no `attachment`, no `^` |
 | `--queue <QUEUE>` | no | The queue the job is sent to, lowercase letters, digits and `-` (default `default`): its own Cloudflare queue and consumer, for jobs that must not wait behind others |
+| `--steps <STEP,...>` | no | Run in steps, one queue message each, in this order (snake_case names): a failed step is retried on its own, from that step |
+| `--lock <FIELD>` | no | One run per value of this field at a time (a lock row in `job_locks`; the first such job adds its migration). Without `--steps`, the job has one `work` step |
 
 Creates `src/jobs/<name>.rs`: a struct holding the arguments (serialized as JSON in the queue message, 128 KB at most) with `fn perform_later(self, ctx)`, which sends it to its queue, and an `async fn perform(self, ctx: &Ctx) -> Result<()>` to fill in. It adds a variant to the `Job` enum and an arm to the `perform` match in `src/jobs/mod.rs`. The first job creates `src/jobs/mod.rs`, adds `mod jobs;` and the Worker's `queue` event to `src/lib.rs`, and, unless a `JOBS` producer exists, adds to `cloudflare.config.ts` the `JOBS: bindings.queue({ name: "<app>-jobs" })` producer (after `// ocre:env`) and its `triggers.queue(...)` consumer (after `// ocre:triggers`) (batches of up to 10 messages, 5 retries, dead-letter queue `<app>-jobs-failed`). `--queue urgent` also adds, unless a `JOBS_URGENT` binding exists, `JOBS_URGENT: bindings.queue({ name: "<app>-jobs-urgent" })` and its consumer (`maxBatchTimeout: 1`, dead-letter queue `<app>-jobs-urgent-failed`).
 
@@ -809,6 +877,25 @@ Errors:
 | `src/jobs/<name>.rs already exists` | the generic hint |
 | ``invalid queue name `Urgent` `` | ``use lowercase letters, digits and `-`, e.g. `--queue urgent` `` |
 | ``src/lib.rs already handles the `queue` event`` (first job only) | ``a Worker has one queue entry point: call `ocre::jobs::consume(batch, env, jobs::perform)` from it and create src/jobs/mod.rs by hand`` |
+
+With `--steps` (or `--lock`), the struct also has `step` (the next step) and `run` (the run's id, the lock's owner), `new(<fields>)` starts a run, `perform` runs the current step's method (`async fn <step>(&self, ctx) -> Result<()>`, one per step) and enqueues the next, and `--lock` adds the lock: taken at each step for an hour, released after the last; a second run for the same value is enqueued again every 30 s until the lock is free. See [Long jobs: continue in steps](../guides/jobs.md#long-jobs-continue-in-steps).
+
+```sh
+ocre g job ProcessVideo video_id:integer --steps fetch,split,upscale --lock video_id
+```
+
+```text
+  create  src/jobs/process_video.rs
+  create  migrations/0003_create_job_locks.sql
+  update  src/jobs/mod.rs
+
+Next:
+  ocre migrate
+  enqueue it from a handler: jobs::ProcessVideo::new(video_id).perform_later(&ctx).await?
+  ocre dev (jobs run locally; look for `[ocre jobs]` lines in the output)
+```
+
+More errors with `--steps` and `--lock`: ``--lock <field> is not a field of the job``; ``invalid step name `<step>` `` (not snake_case, a Rust keyword, `new`, `perform` or `perform_later`); ``step `<step>` is listed twice``; ``step `<step>` has the name of a field``.
 
 See [Background jobs and schedules](../guides/jobs.md).
 

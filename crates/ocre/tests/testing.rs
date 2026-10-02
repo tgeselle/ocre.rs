@@ -243,15 +243,15 @@ fn an_unreachable_server_panics_with_the_url() {
 }
 
 #[test]
-fn secret_key_base_prefers_the_environment_then_dev_vars() {
+fn vars_prefer_the_environment_then_dev_vars() {
     let dir = temp_dir("dotenv");
     let dotenv = dir.join(".dev.vars");
     std::fs::write(&dotenv, "OTHER=1\nSECRET_KEY_BASEX=1\nSECRET_KEY_BASE = \"abc\"\n").unwrap();
-    assert_eq!(secret_key_base(None, &dotenv).as_deref(), Some("abc"));
-    assert_eq!(secret_key_base(Some("env".into()), &dotenv).as_deref(), Some("env"));
+    assert_eq!(dev_var("SECRET_KEY_BASE", None, &dotenv).as_deref(), Some("abc"));
+    assert_eq!(dev_var("SECRET_KEY_BASE", Some("env".into()), &dotenv).as_deref(), Some("env"));
     std::fs::write(&dotenv, "OTHER=1\n").unwrap();
-    assert_eq!(secret_key_base(None, &dotenv), None);
-    assert_eq!(secret_key_base(None, &dir.join("missing")), None);
+    assert_eq!(dev_var("SECRET_KEY_BASE", None, &dotenv), None);
+    assert_eq!(dev_var("SECRET_KEY_BASE", None, &dir.join("missing")), None);
     assert!(decrypt_session("%%%;", SECRET).is_none());
 }
 

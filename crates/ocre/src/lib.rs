@@ -82,6 +82,7 @@
 //! | [`sse`] | Server-Sent Events: stream events to the browser as they happen |
 //! | [`storage`] | Files in Cloudflare R2: multipart uploads, attachments, streamed downloads |
 //! | [`token`] | Random tokens for emailed links and API keys, stored as SHA-256 digests |
+//! | [`webhooks`] | Signed webhooks: HMAC-SHA256 and Standard Webhooks verification, signing outgoing calls, each event processed once |
 //!
 //! # A complete app
 //!
@@ -189,6 +190,7 @@ pub mod token;
 mod validate;
 #[cfg(feature = "html")]
 mod view;
+pub mod webhooks;
 
 pub use api::{ApiError, ApiResult, Created, Json, Page, PageLinks};
 pub use clock::now;

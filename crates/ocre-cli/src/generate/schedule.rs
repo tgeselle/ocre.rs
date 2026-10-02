@@ -18,7 +18,7 @@ const DISPATCH_MARKER: &str = "// ocre:schedule-dispatch";
 /// Local endpoint of `ocre dev` that fires the `scheduled` event.
 const LOCAL_ENDPOINT: &str = "http://localhost:8787/cdn-cgi/local/scheduled";
 /// Cron Triggers per account on the Workers Free plan.
-const FREE_CRONS: usize = 5;
+pub(crate) const FREE_CRONS: usize = 5;
 
 const REGISTRY: &str = r#"//! Scheduled tasks (Cloudflare Cron Triggers). `ocre g schedule` adds them
 //! below and their cron expression to the triggers of cloudflare.config.ts.
@@ -57,11 +57,28 @@ pub fn schedule(project: &Project, name: &str, schedule: &str) -> CliResult {
     }
     let cron = parse_cron(schedule)?;
     let mut edits = Edits::new(project);
-    let path = format!("src/schedules/{module}.rs");
     let phrase = schedule.split_whitespace().collect::<Vec<_>>().join(" ");
-    edits.create(&path, task_rs(&module, &cron, name, &phrase))?;
+    let count = add_task(&mut edits, &module, &cron, task_rs(&module, &cron, name, &phrase))?;
+    let mut report = edits.apply("generate schedule")?;
+    report.next = vec![
+        format!("ocre dev, then: ocre schedules run {module}"),
+        format!("ocre deploy (Cron Triggers only fire on the deployed Worker; this one runs at `{cron}`, UTC)"),
+    ];
+    if count > FREE_CRONS {
+        report.next.push(format!(
+            "this app now has {count} crons; the free plan allows {FREE_CRONS} per account: run several tasks from one cron"
+        ));
+    }
+    Ok(report)
+}
 
-    let crons = with_cron(&read_config(&edits)?, &cron)?;
+/// Adds the task `src/schedules/<module>.rs` (`source`, with a
+/// `pub async fn run(ctx: &Ctx) -> Result<()>`), its cron to
+/// cloudflare.config.ts and its arm to `src/schedules/mod.rs`, wiring the
+/// `scheduled` event the first time. Returns the number of crons afterwards.
+pub(crate) fn add_task(edits: &mut Edits, module: &str, cron: &str, source: String) -> Result<usize, CliError> {
+    edits.create(&format!("src/schedules/{module}.rs"), source)?;
+    let crons = with_cron(&read_config(edits)?, cron)?;
     edits.update(config::FILE, crons.text);
 
     let registry = match edits.read("src/schedules/mod.rs")? {
@@ -92,19 +109,7 @@ pub fn schedule(project: &Project, name: &str, schedule: &str) -> CliResult {
         insert_after_marker(&registry, DISPATCH_MARKER, &format!("\"{cron}\" => {module}::run(&ctx).await,"))
             .ok_or_else(|| missing(DISPATCH_MARKER))?;
     edits.update("src/schedules/mod.rs", registry);
-
-    let mut report = edits.apply("generate schedule")?;
-    report.next = vec![
-        format!("ocre dev, then: ocre schedules run {module}"),
-        format!("ocre deploy (Cron Triggers only fire on the deployed Worker; this one runs at `{cron}`, UTC)"),
-    ];
-    if crons.count > FREE_CRONS {
-        report.next.push(format!(
-            "this app now has {} crons; the free plan allows {FREE_CRONS} per account: run several tasks from one cron",
-            crons.count
-        ));
-    }
-    Ok(report)
+    Ok(crons.count)
 }
 
 /// A schedule as Cloudflare's five cron fields (minute, hour, day of month,

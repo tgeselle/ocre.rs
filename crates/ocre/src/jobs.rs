@@ -96,7 +96,16 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
-pub use crate::runtime::jobs::{Queue, consume, cron, enqueue, enqueue_all, enqueue_in, queue};
+pub use crate::runtime::jobs::{Queue, consume, cron, enqueue, enqueue_all, enqueue_in, lock, queue, unlock};
+
+/// The `job_locks` table of [`lock`] and [`unlock`], created by the
+/// migration of `ocre g job --lock`.
+pub const LOCKS_TABLE_SQL: &str = "CREATE TABLE job_locks (
+  key TEXT PRIMARY KEY,
+  owner TEXT NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+";
 
 use crate::{Error, Result, mail::Email};
 

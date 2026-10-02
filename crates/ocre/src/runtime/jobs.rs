@@ -482,3 +482,54 @@ where
     }
     super::errors::flush(&ctx).await;
 }
+
+/// Takes the lock `key` for `owner` until `ttl` seconds from now; `false`
+/// when another owner holds it and it has not expired. The owner holding it
+/// takes it again (extending it), so a job that continues in several queue
+/// messages keeps its lock from step to step. One D1 write.
+///
+/// The `job_locks` table comes from the migration of `ocre g job --lock`
+/// ([`LOCKS_TABLE_SQL`](crate::jobs::LOCKS_TABLE_SQL)).
+///
+/// # Errors
+///
+/// A D1 error (the table is missing: run the migration).
+///
+/// # Examples
+///
+/// ```no_run
+/// use ocre::{Ctx, Error, Result, jobs};
+///
+/// async fn import(ctx: &Ctx, account_id: i64, run: &str) -> Result<()> {
+///     let db = ctx.db()?;
+///     let key = format!("import:{account_id}");
+///     if !jobs::lock(&db, &key, run, 600).await? {
+///         return Err(Error::internal("another import of this account is running")); // retried later
+///     }
+///     // ... the work
+///     jobs::unlock(&db, &key, run).await
+/// }
+/// # let _ = import;
+/// ```
+pub async fn lock(db: &crate::Db, key: &str, owner: &str, ttl: i64) -> Result<bool> {
+    let now = crate::now();
+    let taken = db
+        .execute(
+            "INSERT INTO job_locks (key, owner, expires_at) VALUES (?1, ?2, ?3) \
+             ON CONFLICT (key) DO UPDATE SET owner = ?2, expires_at = ?3 \
+             WHERE job_locks.owner = ?2 OR job_locks.expires_at < ?4",
+            crate::params![key, owner, now + ttl, now],
+        )
+        .await?;
+    Ok(taken > 0)
+}
+
+/// Releases the lock `key` if `owner` holds it. One D1 write.
+///
+/// # Errors
+///
+/// A D1 error.
+pub async fn unlock(db: &crate::Db, key: &str, owner: &str) -> Result<()> {
+    db.execute("DELETE FROM job_locks WHERE key = ?1 AND owner = ?2", crate::params![key, owner]).await?;
+    Ok(())
+}

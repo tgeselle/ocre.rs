@@ -21,6 +21,7 @@
 - [Email](guides/email.md)
 - [Background jobs and schedules](guides/jobs.md)
 - [File storage](guides/files.md)
+- [Webhooks and external services](guides/webhooks.md)
 - [Realtime](guides/realtime.md)
 - [Caching](guides/caching.md)
 - [Translations](guides/i18n.md)

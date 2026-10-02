@@ -411,7 +411,7 @@ impl Client {
     /// ```
     pub fn session(&self) -> Map<String, Value> {
         let Some(value) = self.cookies.get(SESSION_COOKIE) else { return Map::new() };
-        let secret = secret_key_base(std::env::var("SECRET_KEY_BASE").ok(), Path::new(".dev.vars"))
+        let secret = var("SECRET_KEY_BASE")
             .expect("SECRET_KEY_BASE is not set (environment or .dev.vars): cannot read the session");
         decrypt_session(value, &secret).expect("the session cookie does not decrypt with SECRET_KEY_BASE")
     }
@@ -642,14 +642,28 @@ pub struct PerformedJob {
 /// ```
 pub use pollster::block_on;
 
-/// `SECRET_KEY_BASE` from the environment, else from the `dotenv` file (`.dev.vars`).
-fn secret_key_base(env: Option<String>, dotenv: &Path) -> Option<String> {
+/// A variable of the app under test: the environment variable `name`, else
+/// its value in `.dev.vars` (the file `ocre dev` loads), as the Worker sees
+/// it. Request tests use it for the secrets they sign with (a webhook's).
+///
+/// # Examples
+///
+/// ```no_run
+/// let secret = ocre::testing::var("PAYMENTS_WEBHOOK_SECRET").expect("in .dev.vars");
+/// # let _ = secret;
+/// ```
+pub fn var(name: &str) -> Option<String> {
+    dev_var(name, std::env::var(name).ok(), Path::new(".dev.vars"))
+}
+
+/// `name` from the environment (`env`), else from the `dotenv` file.
+fn dev_var(name: &str, env: Option<String>, dotenv: &Path) -> Option<String> {
     if env.is_some() {
         return env;
     }
     let text = std::fs::read_to_string(dotenv).ok()?;
     text.lines().find_map(|line| {
-        let value = line.trim().strip_prefix("SECRET_KEY_BASE")?.trim_start().strip_prefix('=')?.trim();
+        let value = line.trim().strip_prefix(name)?.trim_start().strip_prefix('=')?.trim();
         Some(value.trim_matches('"').to_owned())
     })
 }

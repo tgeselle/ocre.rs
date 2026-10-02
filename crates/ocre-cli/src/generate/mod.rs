@@ -12,6 +12,7 @@ mod ci;
 mod controller;
 mod custom;
 mod data;
+mod external_job;
 mod fields;
 mod job;
 mod locale;
@@ -28,6 +29,7 @@ pub(crate) mod storage;
 pub(crate) mod system_test;
 mod templates;
 mod test_files;
+mod webhook;
 
 use std::{fmt::Write as _, path::PathBuf};
 
@@ -38,7 +40,8 @@ pub use ci::ci;
 pub use controller::{controller, resource};
 pub use custom::{custom, generator};
 pub use data::data;
-pub use job::job;
+pub use external_job::external_job;
+pub use job::{JobSteps, job};
 pub use locale::locale;
 pub use mailbox::mailbox;
 pub use mailer::mailer;
@@ -49,6 +52,7 @@ pub use scaffold::scaffold;
 pub use schedule::schedule;
 pub use system_test::system_test;
 pub use templates::{TemplateInfo, override_templates};
+pub use webhook::webhook;
 
 use crate::{
     config::{self, Config},

@@ -19,6 +19,7 @@ mod query;
 pub(crate) mod realtime;
 pub(crate) mod security;
 pub(crate) mod storage;
+pub(crate) mod webhooks;
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) use crypto::{pbkdf2_sha256, unix_millis};

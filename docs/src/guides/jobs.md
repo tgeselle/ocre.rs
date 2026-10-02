@@ -298,33 +298,26 @@ D1 has no transaction that stays open across `await`s: a group of writes is one 
 Cloudflare runs several consumer invocations of a queue in parallel when messages pile up. Rails' `limits_concurrency` has two Ocre forms:
 
 - For a whole queue, add `maxConcurrency: 1` to its `triggers.queue({ ... })` entry in `cloudflare.config.ts`: one batch at a time. Combine it with a [named queue](#urgent-jobs-named-queues) for the jobs that must not overlap.
-- For jobs sharing a key (one import per account), claim a row in D1 first, with an expiry in case a run dies, and return an error to retry later when it is taken:
+- For jobs sharing a key (one import per account, one GPU task per user), generate the job with `--lock`: `ocre g job ImportCsv account_id:integer --lock account_id`. The job takes the lock `import_csv:<account_id>` (a row in `job_locks`) before running and releases it after; a second run for the same account is enqueued again every 30 s until the lock is free, without using up its retries. A run that dies loses the lock after an hour. In code of your own, `ocre::jobs::lock(&db, key, owner, ttl_seconds)` returns whether `owner` got the lock (the owner holding it gets it again, extended) and `ocre::jobs::unlock(&db, key, owner)` releases it:
 
   ```rust
-  // CREATE TABLE job_locks (key TEXT PRIMARY KEY, expires_at INTEGER NOT NULL);
   let db = ctx.db()?;
   let key = format!("import:{}", self.account_id);
-  let now = ocre::now();
-  let claimed = db
-      .execute(
-          "INSERT INTO job_locks (key, expires_at) VALUES (?1, ?2) \
-           ON CONFLICT (key) DO UPDATE SET expires_at = ?2 WHERE job_locks.expires_at < ?3",
-          params![key.clone(), now + 300, now],
-      )
-      .await?;
-  if claimed == 0 {
+  if !ocre::jobs::lock(&db, &key, &self.run, 3600).await? {
       return Err(Error::internal("another import of this account is running")); // retried later
   }
   let result = self.import(ctx).await;
-  db.execute("DELETE FROM job_locks WHERE key = ?1", params![key]).await?;
+  ocre::jobs::unlock(&db, &key, &self.run).await?;
   result
   ```
 
-  Each claim and release is one D1 row written (100,000 a day on the free plan).
+  Each lock and unlock is one D1 row written (100,000 a day on the free plan); the table is `ocre::jobs::LOCKS_TABLE_SQL`.
 
 ## Long jobs: continue in steps
 
-A queue batch has the limits of a request: 10 ms of CPU on the free plan, and 50 D1 queries and 50 subrequests (`fetch`) per invocation; past those, calls fail. A job over many rows does a slice, then enqueues itself with a cursor for the rest, like Rails' `ActiveJob::Continuable`. `ocre::jobs::Budget` counts the calls the job may still make, and `run_steps` runs steps while the budget covers them:
+Work made of distinct stages (download, split, process, notify) is a job with steps: `ocre g job ProcessVideo video_id:integer --steps fetch,split,upscale,merge,notify --lock video_id`. Each step is its own queue message and its own invocation, with its own 10 ms of CPU and 50 subrequests: `perform` runs the current step's method, then enqueues the job again with the next step. A step that fails is retried on its own, from that step (the steps before it do not run again), and the run keeps its id (`run`) through retries, so with `--lock` no second run for the same video starts until the last step is done. Steps must be safe to repeat, like every job.
+
+Within one step, or in a job of one piece, a loop over many rows uses a budget. A queue batch has the limits of a request: 10 ms of CPU on the free plan, and 50 D1 queries and 50 subrequests (`fetch`) per invocation; past those, calls fail. A job over many rows does a slice, then enqueues itself with a cursor for the rest, like Rails' `ActiveJob::Continuable`. `ocre::jobs::Budget` counts the calls the job may still make, and `run_steps` runs steps while the budget covers them:
 
 ```rust,ignore
 use ocre::jobs::{Budget, Step, run_steps};

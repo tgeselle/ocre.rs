@@ -41,6 +41,9 @@ on stdout (`"ok": true|false`, plus `error` and `hint` on failure).
 | Authentication (users, login, magic link, password reset, JWT, API keys; once) | `ocre g auth` (`--db-sessions` to list/revoke devices, `--oauth github,google`) |
 | Emails to send (one function per email; previews at `/ocre/dev/mailers` in `ocre dev`) | `ocre g mailer User welcome password_reset` |
 | Receive email (Email Routing) | `ocre g mailbox` |
+| Signed webhook from a service (payments, GPU jobs), each event once | `ocre g webhook payments` (`--standard` for Standard Webhooks) |
+| Work a Worker cannot do (ffmpeg, GPU, AI): submit to a service, track its state | `ocre g external_job upscale video_id:integer` |
+| Job in steps, one run per key at a time | `ocre g job ProcessVideo video_id:integer --steps fetch,split,notify --lock video_id` |
 | Background job (Cloudflare Queues) | `ocre g job SendWelcome user_id:integer` |
 | Job on its own queue (never waits behind others) | `ocre g job SendCode user_id:integer --queue urgent` |
 | Scheduled task (Cron Trigger, UTC; English or cron) | `ocre g schedule nightly_cleanup "every day at 3am"` |

@@ -656,3 +656,147 @@ fn system_tests_add_playwright_once() {
     let (report, _) = sandbox.json(&["g", "system_test", "x"], &other);
     assert_eq!(report["updated"], json!(["package.json"]), "test-results/ already ignored");
 }
+
+#[test]
+fn webhook_adds_an_endpoint_its_secret_and_the_events_table_once() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    let report = ok(&sandbox, &["g", "webhook", "payments_webhook"], &root);
+    let migration = report["created"][2].as_str().unwrap().to_owned();
+    assert_eq!(report["created"], json!(["src/payments_webhook.rs", "tests/payments_webhook.rs", migration]));
+    assert!(migration.ends_with("_create_webhook_events.sql"), "{migration}");
+    assert_eq!(report["updated"], json!([".dev.vars", "src/lib.rs"]));
+    let secret = |name: &str| {
+        let vars = read(&root, ".dev.vars");
+        vars.lines().find_map(|line| line.strip_prefix(&format!("{name}=")).map(str::to_owned)).unwrap()
+    };
+    assert_eq!(secret("PAYMENTS_WEBHOOK_SECRET").len(), 128);
+    assert!(read(&root, "src/lib.rs").contains(".merge(payments_webhook::routes())"));
+
+    // A second webhook shares the table; a Standard Webhooks one gets a whsec_ secret.
+    let report = ok(&sandbox, &["g", "webhook", "gpu", "--standard"], &root);
+    assert_eq!(report["created"], json!(["src/gpu_webhook.rs", "tests/gpu_webhook.rs"]));
+    assert!(report["next"][0].as_str().unwrap().starts_with("write the effect"), "no migration to run");
+    assert!(secret("GPU_WEBHOOK_SECRET").starts_with("whsec_"));
+
+    for (name, error) in [("Payments", "invalid webhook name `Payments`"), ("fn", "invalid webhook name `fn`")] {
+        assert_eq!(fails(&sandbox, &["g", "webhook", name], &root)["error"], error);
+    }
+    assert_eq!(fails(&sandbox, &["g", "webhook", "gpu"], &root)["error"], "src/gpu_webhook.rs already exists");
+
+    // A fresh clone has no .dev.vars: the secret is left to the developer.
+    fs::remove_file(root.join(".dev.vars")).unwrap();
+    let report = ok(&sandbox, &["g", "webhook", "mail"], &root);
+    assert_eq!(report["updated"], json!(["src/lib.rs"]));
+    assert!(!root.join(".dev.vars").exists());
+}
+
+#[test]
+fn stepped_jobs_run_their_steps_in_order_with_an_optional_lock() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    let report = ok(
+        &sandbox,
+        &["g", "job", "ProcessVideo", "video_id:integer", "--steps", "fetch,split", "--lock", "video_id"],
+        &root,
+    );
+    let migration = report["created"][1].as_str().unwrap().to_owned();
+    assert!(migration.ends_with("_create_job_locks.sql"), "{report}");
+    assert_eq!(report["next"][0], "ocre migrate");
+    assert_eq!(
+        report["next"][1],
+        "enqueue it from a handler: jobs::ProcessVideo::new(video_id).perform_later(&ctx).await?"
+    );
+    let code = read(&root, "src/jobs/process_video.rs");
+    assert!(code.contains("pub const STEPS: [&str; 2] = [\"fetch\", \"split\"];"), "{code}");
+    assert!(code.contains("jobs::lock(&db, &key, &self.run, LOCK_TTL)"), "{code}");
+
+    // A lock alone is one `work` step; the table exists already. Named queues work too.
+    let report = ok(
+        &sandbox,
+        &["g", "job", "Import", "account_id:integer", "--lock", "account_id", "--queue", "imports"],
+        &root,
+    );
+    assert!(
+        !report["created"].as_array().unwrap().iter().any(|path| path.as_str().unwrap().ends_with(".sql")),
+        "{report}"
+    );
+    let code = read(&root, "src/jobs/import.rs");
+    assert!(
+        code.contains("0 => self.work(ctx).await?,") && code.contains("queue(ctx, \"imports\").enqueue_in("),
+        "{code}"
+    );
+    // Steps without a lock, no fields.
+    ok(&sandbox, &["g", "job", "Nightly", "--steps", "a,b"], &root);
+    assert!(!read(&root, "src/jobs/nightly.rs").contains("jobs::lock"));
+
+    for (args, error) in [
+        (&["g", "job", "X", "a:integer", "--lock", "b"][..], "--lock b is not a field of the job"),
+        (&["g", "job", "X", "--steps", "One"], "invalid step name `One`"),
+        (&["g", "job", "X", "--steps", "perform"], "invalid step name `perform`"),
+        (&["g", "job", "X", "--steps", "a,a"], "step `a` is listed twice"),
+        (&["g", "job", "X", "a:integer", "--steps", "a"], "step `a` has the name of a field"),
+    ] {
+        assert_eq!(fails(&sandbox, args, &root)["error"], error);
+    }
+}
+
+#[test]
+fn external_job_adds_its_table_webhook_sweep_and_settings() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    let report = ok(
+        &sandbox,
+        &["g", "external_job", "upscale_jobs", "video_id:integer", "hdr:boolean", "meta:json?", "spec:json"],
+        &root,
+    );
+    assert_eq!(report["created"][0], "src/upscale_jobs.rs");
+    assert_eq!(report["created"][2], "src/schedules/upscale_jobs_sweep.rs");
+    let migration = read(&root, report["created"][1].as_str().unwrap());
+    assert!(migration.contains("video_id INTEGER NOT NULL,\n  hdr INTEGER NOT NULL DEFAULT 0,\n  meta TEXT CHECK (json_valid(meta)),\n  spec TEXT NOT NULL CHECK (json_valid(spec)),\n  progress INTEGER"), "{migration}");
+    assert!(read(&root, "cloudflare.config.ts").contains("triggers.scheduled({ schedule: \"*/5 * * * *\" }),"));
+    let vars = read(&root, ".dev.vars");
+    assert!(
+        vars.contains("UPSCALE_URL=http://localhost:8787/fake\n") && vars.contains("APP_URL=http://localhost:8787\n"),
+        "{vars}"
+    );
+
+    // A second one: its own sweep time; APP_URL is not added twice.
+    ok(&sandbox, &["g", "external_job", "transcribe", "--sweep", "every 10 minutes"], &root);
+    assert_eq!(read(&root, ".dev.vars").matches("APP_URL=").count(), 1);
+    assert!(read(&root, "src/transcribe_jobs.rs").contains("pub async fn start(ctx: &Ctx) -> Result<TranscribeJob>"));
+
+    ok(&sandbox, &["g", "webhook", "payments"], &root);
+    fs::remove_file(root.join(".dev.vars")).unwrap();
+    for (args, error) in [
+        (&["g", "external_job", "Upscale"][..], "invalid external job name `Upscale`"),
+        (&["g", "external_job", "x", "photo:attachment"], "external job field `photo` cannot be of that type"),
+        (
+            &["g", "external_job", "x", "progress:integer"],
+            "external job field `progress` is a column of the jobs table",
+        ),
+        (&["g", "external_job", "payments"], "src/payments_webhook.rs already answers /webhooks/payments"),
+        (
+            &["g", "external_job", "x", "--sweep", "*/5 * * * *"],
+            "cron `*/5 * * * *` is already scheduled in cloudflare.config.ts",
+        ),
+    ] {
+        assert_eq!(fails(&sandbox, args, &root)["error"], error);
+    }
+    let report = ok(&sandbox, &["g", "external_job", "ocr", "--sweep", "every 15 minutes"], &root);
+    assert!(!report["updated"].as_array().unwrap().iter().any(|path| path == ".dev.vars"), "{report}");
+    ok(&sandbox, &["g", "external_job", "a", "--sweep", "every 20 minutes"], &root);
+    ok(&sandbox, &["g", "external_job", "b", "--sweep", "every 30 minutes"], &root);
+    let report = ok(&sandbox, &["g", "external_job", "c", "--sweep", "every hour"], &root);
+    assert!(
+        report["next"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .contains("6 crons; the free plan allows 5"),
+        "{report}"
+    );
+}

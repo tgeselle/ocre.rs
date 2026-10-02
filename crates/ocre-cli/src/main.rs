@@ -436,6 +436,14 @@ enum GenerateCommand {
         /// queue and consumer, so it never waits behind the `default` queue.
         #[arg(long)]
         queue: Option<String>,
+        /// Run in steps, one queue message each (comma-separated, e.g.
+        /// `--steps download,transcode,notify`): a failed step is retried on its own.
+        #[arg(long, value_delimiter = ',')]
+        steps: Vec<String>,
+        /// One run per value of this field at a time (e.g. `--lock user_id`):
+        /// a lock row in `job_locks`, whose migration the first such job adds.
+        #[arg(long)]
+        lock: Option<String>,
     },
     /// Scheduled task: `src/schedules/<name>.rs`, run by a Cron Trigger (UTC)
     /// added to the triggers of cloudflare.config.ts, dispatched by cron in
@@ -448,6 +456,37 @@ enum GenerateCommand {
         /// When, in UTC, quoted: plain English ("every 15 minutes", "every monday at 9am",
         /// "midnight on tuesdays") or five cron fields ("*/15 * * * *").
         cron: String,
+    },
+    /// Work done by an external service (GPU, container, HTTP API), tracked
+    /// in `<name>_jobs` (queued, submitted, running, done, failed): src/<name>_jobs.rs
+    /// submits with a signed POST, receives events on `POST /webhooks/<name>/<id>`
+    /// (signed, or with the job's token), and a Cron Trigger sweeps failed
+    /// submissions and jobs without news.
+    ///
+    /// Example: `ocre g external_job upscale video_id:integer`.
+    #[command(name = "external_job", alias = "external-job")]
+    ExternalJob {
+        /// Name in snake_case (e.g. `upscale`).
+        name: String,
+        /// The job's input as `name:type`, sent to the service as JSON.
+        fields: Vec<String>,
+        /// When the sweep runs (default "*/5 * * * *"): plain English or cron.
+        #[arg(long)]
+        sweep: Option<String>,
+    },
+    /// Webhook endpoint `POST /webhooks/<name>` (src/<name>_webhook.rs): checks
+    /// the signature (HMAC-SHA256 in `X-Signature`, or Standard Webhooks with
+    /// `--standard`), records each event in `webhook_events` (the first one
+    /// adds the migration) and runs its effect once per event id. Adds
+    /// `<NAME>_WEBHOOK_SECRET` to .dev.vars and request tests.
+    ///
+    /// Example: `ocre g webhook payments`.
+    Webhook {
+        /// Name in snake_case (e.g. `payments`).
+        name: String,
+        /// Standard Webhooks (`webhook-id`, `webhook-timestamp`, `webhook-signature`, `whsec_` secret).
+        #[arg(long)]
+        standard: bool,
     },
     /// `CACHE` Workers KV binding in cloudflare.config.ts for `ocre::cache::fetch`
     /// (read-through cache of JSON values). `ocre deploy` creates the namespace.
@@ -815,8 +854,14 @@ fn generate_command(args: GenerateArgs) -> CliResult {
         GenerateCommand::Model { name, fields } => generate::model(project, &name, &fields),
         GenerateCommand::Mailer { name, actions } => generate::mailer(project, &name, &actions),
         GenerateCommand::Mailbox => generate::mailbox(project),
-        GenerateCommand::Job { name, fields, queue } => generate::job(project, &name, &fields, queue.as_deref()),
+        GenerateCommand::Job { name, fields, queue, steps, lock } => {
+            generate::job(project, &name, &fields, queue.as_deref(), &generate::JobSteps { steps, lock })
+        }
         GenerateCommand::Schedule { name, cron } => generate::schedule(project, &name, &cron),
+        GenerateCommand::ExternalJob { name, fields, sweep } => {
+            generate::external_job(project, &name, &fields, sweep.as_deref())
+        }
+        GenerateCommand::Webhook { name, standard } => generate::webhook(project, &name, standard),
         GenerateCommand::Cache => generate::cache(project),
         GenerateCommand::Data { name } => generate::data(project, &name),
         GenerateCommand::SystemTest { name } => generate::system_test(project, &name),
