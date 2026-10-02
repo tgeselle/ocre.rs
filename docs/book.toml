@@ -20,8 +20,11 @@ git-repository-url = "https://github.com/tgeselle/ocre.rs"
 edit-url-template = "https://github.com/tgeselle/ocre.rs/edit/main/docs/src/{path}"
 no-section-label = true
 site-url = "/"
-# ```mermaid diagrams (see js/mermaid.js).
-additional-js = ["js/mermaid.js"]
+default-theme = "light"
+preferred-dark-theme = "coal"
+# The Ocre look (css/ocre.css, js/ocre.js) and ```mermaid diagrams (js/mermaid.js).
+additional-css = ["css/ocre.css"]
+additional-js = ["js/mermaid.js", "js/ocre.js"]
 
 [output.html.playground]
 runnable = false

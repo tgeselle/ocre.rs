@@ -2,7 +2,9 @@
 //!
 //! - `cargo docs-site build`: HTML site (mdBook) plus a raw Markdown twin of
 //!   every page, `llms.txt`, `llms-full.txt`, `api-index.md` and rustdoc under
-//!   `/api/`, all in `docs/book/`.
+//!   `/api/`, all in `docs/book/`. The home page and its files come from
+//!   `docs/site/` (copied over mdBook's `index.html`, a copy of the
+//!   introduction, which stays at `/introduction`).
 //! - `cargo docs-site serve [wrangler args]`: build, then `wrangler dev` on
 //!   the Workers Static Assets config in `docs/wrangler.toml`.
 //! - `cargo docs-site deploy`: build, then `wrangler deploy`.
@@ -99,6 +101,7 @@ fn build() -> Res<PathBuf> {
     let pages = summary(&src)?;
     check_links(&pages, &src)?;
     mdbook(&docs)?;
+    home(&docs.join("site"), &out)?;
 
     for page in &pages {
         write(&out.join(&page.path), &read(&src.join(&page.path))?)?;
@@ -108,6 +111,18 @@ fn build() -> Res<PathBuf> {
     write(&out.join("llms-full.txt"), &llms_full(&pages, &src, &base)?)?;
     rustdoc(&repo, &out.join("api"))?;
     Ok(out)
+}
+
+/// The hand-written home page (`docs/site/`, flat) replaces mdBook's
+/// `index.html`.
+fn home(site: &Path, out: &Path) -> Res<()> {
+    let entries = fs::read_dir(site).map_err(|e| format!("{}: {e}", site.display()))?;
+    for entry in entries {
+        let from = entry.map_err(|e| format!("{}: {e}", site.display()))?.path();
+        let to = out.join(from.file_name().expect("a directory entry has a name"));
+        fs::copy(&from, &to).map_err(|e| format!("{} -> {}: {e}", from.display(), to.display()))?;
+    }
+    Ok(())
 }
 
 fn mdbook(docs: &Path) -> Res<()> {

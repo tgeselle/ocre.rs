@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ocre — the Rails way, on Cloudflare's free plan</title>
+<meta name="description" content="Ocre is a Rails-like Rust web framework for Cloudflare Workers: generators write plain Rust, the app runs on the free plan, and one command deploys it.">
+<meta property="og:title" content="Ocre — the Rails way, on Cloudflare's free plan">
+<meta property="og:description" content="A Rails-like Rust web framework for Cloudflare Workers, built for the free plan and for AI agents.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://ocre.rs/">
+<link rel="icon" href="/mark.svg" type="image/svg+xml">
+<link rel="alternate" type="text/plain" href="/llms.txt" title="llms.txt">
+<script>
+  // Same choice as the docs (mdBook keeps it under "mdbook-theme").
+  (function () {
+    var saved = localStorage.getItem("mdbook-theme");
+    var dark = saved ? saved !== "light" && saved !== "rust" : matchMedia("(prefers-color-scheme: dark)").matches;
+    document.documentElement.dataset.theme = dark ? "dark" : "light";
+  })();
+</script>
+<style>
+:root {
+  --paper: #fbf6ec; --paper-2: #f4ecdd; --card: #fffdf8; --ink: #1b1812; --ink-2: #585247; --ink-3: #8a8173;
+  --line: #e7ddcb; --ochre: #c4661c; --ochre-ink: #a8520f; --ochre-soft: #f7e3c8; --sky: #2a6f97;
+  --code-bg: #1d1913; --code-fg: #ece2d3; --code-muted: #9c9283; --code-kw: #ff9a6b; --code-fn: #ffd479;
+  --code-str: #c3e88d; --code-type: #8fb6ff; --code-bar: #26201a; --code-line: #332b22;
+  --shadow: 0 1px 0 #ffffff80 inset, 0 24px 60px -30px #4a321680;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, system-ui, sans-serif;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+  --hand: "Caveat", "Segoe Print", "Bradley Hand", "Chalkboard SE", cursive;
+}
+[data-theme="dark"] {
+  --paper: #15120d; --paper-2: #1c1812; --card: #1f1a13; --ink: #f1e9dc; --ink-2: #c1b7a5; --ink-3: #8b8170;
+  --line: #2f281d; --ochre: #f09a3e; --ochre-ink: #f5ad5c; --ochre-soft: #3a2a17; --sky: #7fc2e8;
+  --code-bg: #120f0b; --code-bar: #1d1813; --code-line: #2a231b;
+  --shadow: 0 30px 70px -35px #000000c0;
+}
+* { box-sizing: border-box; }
+html { color-scheme: light; }
+[data-theme="dark"] { color-scheme: dark; }
+body { margin: 0; background: var(--paper); color: var(--ink); font: 17px/1.6 var(--sans); -webkit-font-smoothing: antialiased; }
+a { color: inherit; }
+.wrap { max-width: 1160px; margin: 0 auto; padding: 0 28px; }
+code, pre, kbd { font-family: var(--mono); }
+
+/* Header */
+header.top { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--paper) 86%, transparent); backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); }
+header.top .wrap { display: flex; align-items: center; gap: 28px; height: 64px; }
+.brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font-weight: 800; font-size: 21px; letter-spacing: -.02em; }
+.brand img { width: 30px; height: 30px; }
+nav.links { display: flex; gap: 26px; margin: 0 auto; }
+nav.links a { text-decoration: none; color: var(--ink-2); font-weight: 500; font-size: 15px; }
+nav.links a:hover { color: var(--ink); }
+.actions { display: flex; align-items: center; gap: 10px; }
+.pill { display: inline-flex; align-items: center; gap: 7px; height: 38px; padding: 0 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); color: var(--ink-2); text-decoration: none; font-size: 14px; font-weight: 600; cursor: pointer; }
+.pill:hover { color: var(--ink); }
+.btn { display: inline-flex; align-items: center; gap: 8px; height: 46px; padding: 0 22px; border-radius: 11px; background: var(--ochre); color: #fffaf2; font-weight: 700; text-decoration: none; box-shadow: 0 10px 24px -12px var(--ochre); }
+.btn:hover { filter: brightness(1.06); }
+.btn.small { height: 38px; padding: 0 16px; font-size: 14px; }
+
+/* Hero */
+.hero { padding: 84px 0 64px; }
+.hero .wrap { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 56px; align-items: center; }
+.badge-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-bottom: 22px; }
+.badge { display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px; border: 1px solid color-mix(in srgb, var(--ochre) 45%, transparent); border-radius: 999px; color: var(--ochre-ink); font-size: 12.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; background: var(--ochre-soft); white-space: nowrap; }
+.badge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--ochre); }
+.hand { font-family: var(--hand); color: var(--sky); font-size: 26px; transform: rotate(-4deg); white-space: nowrap; }
+h1 { font-size: clamp(42px, 5.2vw, 66px); line-height: 1; letter-spacing: -.045em; margin: 0 0 24px; font-weight: 850; }
+h1 em { font-style: normal; color: var(--ochre); background: linear-gradient(transparent 78%, color-mix(in srgb, var(--ochre) 28%, transparent) 78%); }
+.lead { font-size: 20px; color: var(--ink-2); max-width: 34em; margin: 0 0 32px; }
+.cta { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; }
+.install { display: inline-flex; align-items: center; gap: 12px; height: 46px; max-width: 100%; padding: 0 8px 0 16px; border: 1px solid var(--line); border-radius: 11px; background: var(--card); font-family: var(--mono); font-size: 15px; white-space: nowrap; }
+.install .dollar { color: var(--ochre); }
+.install button { border: 0; border-left: 1px solid var(--line); background: none; color: var(--ink-3); font: 13px var(--mono); padding: 6px 10px; cursor: pointer; }
+.install button:hover { color: var(--ink); }
+.stats { display: flex; gap: 40px; margin-top: 40px; }
+.stats b { display: block; font-size: 19px; letter-spacing: -.01em; }
+.stats span { display: block; color: var(--ink-3); font-size: 14px; line-height: 1.4; }
+
+/* Terminal */
+.term { background: var(--code-bg); color: var(--code-fg); border-radius: 16px; box-shadow: var(--shadow); overflow: hidden; border: 1px solid var(--code-line); transform: rotate(.6deg); }
+.term .bar { display: flex; align-items: center; gap: 8px; padding: 12px 16px; background: var(--code-bar); border-bottom: 1px solid var(--code-line); }
+.dots i { display: inline-block; width: 11px; height: 11px; border-radius: 50%; margin-right: 6px; background: #ff5f57; }
+.dots i:nth-child(2) { background: #febc2e; } .dots i:nth-child(3) { background: #28c840; }
+.term .bar span { color: var(--code-muted); font: 13px var(--mono); }
+.term pre { margin: 0; padding: 20px 22px 24px; font-size: 13px; line-height: 1.75; overflow-x: auto; }
+.p { color: var(--ochre); } .m { color: var(--code-muted); } .ok { color: #8fd18a; } .u { color: var(--code-type); }
+
+/* Ribbon */
+.ribbon { border-block: 1px solid var(--line); background: var(--paper-2); }
+.ribbon .wrap { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px 34px; padding: 18px 28px; color: var(--ink-2); font-weight: 600; font-size: 15px; }
+
+/* Sections */
+section.block { padding: 96px 0 24px; }
+.eyebrow { font: 600 13px var(--mono); color: var(--ochre-ink); letter-spacing: .06em; text-transform: uppercase; }
+h2 { font-size: clamp(32px, 4vw, 48px); letter-spacing: -.035em; line-height: 1.05; margin: 10px 0 14px; font-weight: 820; }
+.sub { color: var(--ink-2); font-size: 19px; max-width: 40em; margin: 0 0 44px; }
+.grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 26px 26px 24px; }
+.card .ico { width: 38px; height: 38px; border-radius: 10px; display: grid; place-items: center; background: var(--ochre-soft); color: var(--ochre-ink); font-weight: 800; margin-bottom: 16px; }
+.card h3 { margin: 0 0 8px; font-size: 19px; letter-spacing: -.015em; }
+.card p { margin: 0; color: var(--ink-2); font-size: 15.5px; }
+.card code { font-size: 13.5px; background: var(--paper-2); padding: 1px 5px; border-radius: 5px; }
+
+/* Code tour */
+.tour { display: grid; grid-template-columns: .8fr 1.2fr; gap: 40px; align-items: start; }
+.steps { display: flex; flex-direction: column; gap: 8px; }
+.step { text-align: left; border: 1px solid transparent; background: none; border-radius: 12px; padding: 14px 16px; cursor: pointer; color: var(--ink-2); font: inherit; }
+.step b { display: block; color: var(--ink); font-size: 17px; }
+.step small { font-size: 14.5px; }
+.step[aria-selected="true"] { background: var(--card); border-color: var(--line); box-shadow: 0 10px 30px -24px #4a3216a0; }
+.step[aria-selected="true"] b::before { content: "→ "; color: var(--ochre); }
+.panel { display: none; } .panel.on { display: block; }
+.k { color: var(--code-kw); } .f { color: var(--code-fn); } .s { color: var(--code-str); } .t { color: var(--code-type); } .c { color: var(--code-muted); font-style: italic; }
+
+/* Free plan table */
+table.free { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; font-size: 15.5px; }
+table.free th, table.free td { text-align: left; padding: 14px 18px; border-bottom: 1px solid var(--line); vertical-align: top; }
+table.free th { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-3); background: var(--paper-2); }
+table.free tr:last-child td { border-bottom: 0; }
+table.free td:first-child { font-weight: 700; white-space: nowrap; }
+table.free td:last-child { color: var(--ink-2); }
+
+/* Closing */
+.closing { margin: 96px 0 0; padding: 64px 0; background: var(--paper-2); border-top: 1px solid var(--line); text-align: center; }
+.closing h2 { margin-bottom: 10px; }
+.closing .sub { margin: 0 auto 28px; }
+.closing .cta { justify-content: center; }
+footer { border-top: 1px solid var(--line); color: var(--ink-3); font-size: 14px; }
+footer .wrap { display: flex; flex-wrap: wrap; gap: 12px 28px; padding: 26px 28px; }
+footer a { color: var(--ink-2); text-decoration: none; }
+footer .grow { margin-right: auto; }
+
+@media (max-width: 920px) {
+  .hero .wrap, .tour { grid-template-columns: minmax(0, 1fr); }
+  .term { transform: none; }
+  .grid { grid-template-columns: 1fr 1fr; }
+  nav.links { display: none; }
+  .actions { margin-left: auto; }
+}
+@media (max-width: 600px) {
+  .grid { grid-template-columns: 1fr; }
+  .stats { gap: 22px; flex-wrap: wrap; }
+  .hero { padding-top: 48px; }
+  .actions .pill.gh, .hand { display: none; }
+  .install { font-size: 13.5px; }
+  table.free td:first-child { white-space: normal; }
+  table.free th, table.free td { padding: 10px 12px; }
+}
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="/"><img src="/mark.svg" alt="">ocre</a>
+    <nav class="links">
+      <a href="/introduction.html">Docs</a>
+      <a href="/getting-started/tutorial.html">Tutorial</a>
+      <a href="/reference/cli.html">CLI</a>
+      <a href="/api/ocre/">API</a>
+    </nav>
+    <div class="actions">
+      <a class="pill gh" href="https://github.com/tgeselle/ocre.rs">GitHub</a>
+      <button class="pill" id="theme" type="button" aria-label="Switch light or dark theme">◐</button>
+      <a class="btn small" href="/getting-started/installation.html">Get started</a>
+    </div>
+  </div>
+</header>
+
+<main>
+<section class="hero">
+  <div class="wrap">
+    <div>
+      <div class="badge-row"><span class="badge">Rust · Workers · v0.1</span><span class="hand">written with AI agents ↘</span></div>
+      <h1>The Rails way, on Cloudflare's <em>free plan</em>.</h1>
+      <p class="lead">Models, controllers, jobs, mailers, auth, file uploads and realtime pages, generated as plain Rust you can read, compiled to WebAssembly, and deployed to Cloudflare Workers with one command.</p>
+      <div class="cta">
+        <a class="btn" href="/getting-started/tutorial.html">Build a blog →</a>
+        <div class="install"><span><span class="dollar">$</span> cargo install ocre-cli</span><button type="button" data-copy="cargo install ocre-cli">copy</button></div>
+      </div>
+      <div class="stats">
+        <div><b>$0 / month</b><span>Workers, D1, R2, Queues</span></div>
+        <div><b>1 command</b><span>to provision and deploy</span></div>
+        <div><b>420 KB</b><span>a whole blog, in WebAssembly</span></div>
+      </div>
+    </div>
+    <div class="term" aria-label="An Ocre session in a terminal">
+      <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span>~/code</span></div>
+<pre><span class="p">$</span> ocre new blog --starter blog --yes
+<span class="m">  create  blog/src/models/post.rs</span>
+<span class="m">  create  blog/src/posts.rs  …</span>
+<span class="p">$</span> cd blog
+<span class="p">$</span> ocre g scaffold Comment body:text post:references
+<span class="m">  create  migrations/0002_create_comments.sql  …</span>
+<span class="p">$</span> ocre migrate &amp;&amp; ocre dev
+<span class="ok">  Ready on</span> <span class="u">http://localhost:8787</span>
+<span class="p">$</span> ocre deploy
+<span class="m">  Created the SECRET_KEY_BASE secret on Cloudflare</span>
+<span class="m">  Created D1 database blog on Cloudflare</span>
+
+<span class="u">  https://blog.you.workers.dev</span></pre>
+    </div>
+  </div>
+</section>
+
+<div class="ribbon"><div class="wrap"><span>Axum</span><span>askama</span><span>htmx</span><span>D1 · SQLite</span><span>R2</span><span>Queues</span><span>Durable Objects</span><span>WebAssembly</span></div></div>
+
+<section class="block">
+  <div class="wrap">
+    <div class="eyebrow">// why ocre</div>
+    <h2>Everything a product needs.<br>Nothing to pay for.</h2>
+    <p class="sub">Ocre follows Rails' conventions, rebuilt around what Cloudflare gives every account for free: one Worker, a SQLite database, a queue, object storage.</p>
+    <div class="grid">
+      <div class="card"><div class="ico">◆</div><h3>Code you can read</h3><p>Generators write ordinary Rust into your app: models with plain SQL, axum handlers, askama templates. No hidden runtime magic: open the file, change it.</p></div>
+      <div class="card"><div class="ico">$0</div><h3>Built for the free plan</h3><p>10 ms of CPU per request, 50 subrequests per invocation, 100,000 requests a day: every feature is designed and measured against those limits.</p></div>
+      <div class="card"><div class="ico">⌁</div><h3>Made for AI agents</h3><p>Every app has an <code>AGENTS.md</code>, every command speaks <code>--json</code>, and these docs come as <code>/llms.txt</code>. Agents write the code; you read it.</p></div>
+      <div class="card"><div class="ico">▦</div><h3>Batteries included</h3><p>Auth and OAuth, mail in and out, background jobs and crons, R2 uploads, WebSockets, i18n, webhooks, web push, a cache.</p></div>
+      <div class="card"><div class="ico">✓</div><h3>Test what you ship</h3><p>Unit tests natively, request tests against the real runtime (workerd), browser tests with Playwright: <code>ocre test --e2e</code> runs them all.</p></div>
+      <div class="card"><div class="ico">▲</div><h3>One command to production</h3><p><code>ocre deploy</code> creates the database, queues, buckets and secrets it needs, migrates, then ships. No dashboard visit.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="block">
+  <div class="wrap">
+    <div class="eyebrow">// a feature, end to end</div>
+    <h2>One feature, a few small files.</h2>
+    <p class="sub">What <code>ocre g scaffold Post title:string body:text</code> and <code>ocre g job</code> write, trimmed: you own every line.</p>
+    <div class="tour">
+      <div class="steps" role="tablist">
+        <button class="step" role="tab" aria-selected="true" data-panel="0"><b>The model</b><small>Queries and rules in one module, plain SQL.</small></button>
+        <button class="step" role="tab" aria-selected="false" data-panel="1"><b>The handler</b><small>An axum function: extractors in, HTML out.</small></button>
+        <button class="step" role="tab" aria-selected="false" data-panel="2"><b>A background job</b><small>Cloudflare Queues, retried for you.</small></button>
+        <button class="step" role="tab" aria-selected="false" data-panel="3"><b>The test</b><small>Real HTTP against the Workers runtime.</small></button>
+      </div>
+      <div class="term" style="transform:none">
+        <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span id="tour-file">src/models/post.rs</span></div>
+<pre class="panel on" data-file="src/models/post.rs"><span class="c">/// A row of the `posts` table.</span>
+<span class="k">pub struct</span> <span class="t">Post</span> { <span class="k">pub</span> id: <span class="t">i64</span>, <span class="k">pub</span> title: <span class="t">String</span>, <span class="k">pub</span> body: <span class="t">String</span>, <span class="c">/* … */</span> }
+
+<span class="k">pub async fn</span> <span class="f">create</span>(ctx: &amp;<span class="t">Ctx</span>, <span class="k">mut</span> new: <span class="t">NewPost</span>) -&gt; <span class="t">Result</span>&lt;<span class="t">Post</span>&gt; {
+    <span class="f">before_create</span>(ctx, &amp;<span class="k">mut</span> new).<span class="k">await</span>?;
+    new.<span class="f">validate</span>().<span class="f">finish</span>()?;
+    <span class="k">let</span> post = ctx.<span class="f">db</span>()?
+        .<span class="f">first</span>(<span class="s">"INSERT INTO posts (title, body) VALUES (?1, ?2) RETURNING *"</span>, params![new.title, new.body])
+        .<span class="k">await</span>?
+        .<span class="f">ok_or_else</span>(|| <span class="t">Error</span>::<span class="f">internal</span>(<span class="s">"no row returned"</span>))?;
+    <span class="f">after_create</span>(ctx, &amp;post).<span class="k">await</span>?;
+    <span class="t">Ok</span>(post)
+}</pre>
+<pre class="panel" data-file="src/posts.rs"><span class="k">pub fn</span> <span class="f">routes</span>() -&gt; <span class="t">Router</span>&lt;<span class="t">Ctx</span>&gt; {
+    <span class="t">Router</span>::<span class="f">new</span>()
+        .<span class="f">route</span>(<span class="s">"/posts"</span>, <span class="f">get</span>(index).<span class="f">post</span>(create))
+        .<span class="f">route</span>(<span class="s">"/posts/{id}"</span>, <span class="f">get</span>(show).<span class="f">post</span>(update))
+}
+
+<span class="k">async fn</span> <span class="f">show</span>(<span class="t">State</span>(ctx): <span class="t">State</span>&lt;<span class="t">Ctx</span>&gt;, flash: <span class="t">Flash</span>, <span class="t">Path</span>(id): <span class="t">Path</span>&lt;<span class="t">i64</span>&gt;) -&gt; <span class="t">Result</span>&lt;<span class="t">Html</span>&lt;<span class="t">String</span>&gt;&gt; {
+    <span class="k">let</span> post = post::<span class="f">find</span>(&amp;ctx, id).<span class="k">await</span>?.<span class="f">or_404</span>()?;
+    <span class="f">render</span>(&amp;<span class="t">ShowView</span> { flash, post })
+}</pre>
+<pre class="panel" data-file="src/jobs/send_welcome.rs"><span class="c">// ocre g job SendWelcome user_id:integer</span>
+<span class="k">pub struct</span> <span class="t">SendWelcome</span> { <span class="k">pub</span> user_id: <span class="t">i64</span> }
+
+<span class="k">impl</span> <span class="t">SendWelcome</span> {
+    <span class="k">pub async fn</span> <span class="f">perform</span>(<span class="k">self</span>, ctx: &amp;<span class="t">Ctx</span>) -&gt; <span class="t">Result</span>&lt;()&gt; {
+        <span class="k">let</span> user = user::<span class="f">find</span>(ctx, <span class="k">self</span>.user_id).<span class="k">await</span>?.<span class="f">or_404</span>()?;
+        ocre::mail::<span class="f">send</span>(ctx, mailers::user::<span class="f">welcome</span>(&amp;user.email)?).<span class="k">await</span>
+    }
+}
+
+<span class="c">// In a handler: answered now, sent moments later.</span>
+<span class="t">SendWelcome</span> { user_id: user.id }.<span class="f">perform_later</span>(&amp;ctx).<span class="k">await</span>?;</pre>
+<pre class="panel" data-file="tests/posts.rs"><span class="k">#[test]</span>
+<span class="k">#[ignore = </span><span class="s">"request test: run with `ocre test --e2e`"</span><span class="k">]</span>
+<span class="k">fn</span> <span class="f">shows_a_post</span>() {
+    <span class="k">let</span> record = <span class="f">post</span>();                      <span class="c">// a factory</span>
+    <span class="k">let</span> title = record.title.<span class="f">clone</span>();
+    <span class="k">let</span> id = record.<span class="f">insert</span>();
+    <span class="t">Client</span>::<span class="f">new</span>()
+        .<span class="f">get</span>(&amp;<span class="f">format!</span>(<span class="s">"/posts/{id}"</span>))
+        .<span class="f">assert_status</span>(<span class="s">200</span>)
+        .<span class="f">assert_contains</span>(&amp;title);
+}</pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="block">
+  <div class="wrap">
+    <div class="eyebrow">// the free plan, measured</div>
+    <h2>What $0 gets you.</h2>
+    <p class="sub">The limits Ocre is built around (Cloudflare free plan, autumn 2026). The <a href="/reference/limits.html">limits reference</a> says what each feature costs against them.</p>
+    <table class="free">
+      <thead><tr><th>Service</th><th>Free every day or month</th><th>What Ocre uses it for</th></tr></thead>
+      <tbody>
+        <tr><td>Workers</td><td>100,000 requests a day, 10 ms CPU each</td><td>Your whole app, one Worker</td></tr>
+        <tr><td>D1</td><td>5 million rows read, 100,000 written a day; 5 GB</td><td>Models, migrations, users</td></tr>
+        <tr><td>Queues</td><td>10,000 operations a day</td><td>Background jobs, mail sent later</td></tr>
+        <tr><td>R2</td><td>10 GB stored; 1 million Class A, 10 million Class B operations a month</td><td>Attachments, direct and multipart uploads</td></tr>
+        <tr><td>Durable Objects</td><td>100,000 requests a day</td><td>Realtime pages over WebSockets</td></tr>
+        <tr><td>Workers KV</td><td>100,000 reads, 1,000 writes a day</td><td>The cache</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="closing">
+  <div class="wrap">
+    <h2>From idea to production, tonight.</h2>
+    <p class="sub">The tutorial builds a blog with comments, validations and sign-in, then deploys it.</p>
+    <div class="cta">
+      <a class="btn" href="/getting-started/tutorial.html">Start the tutorial →</a>
+      <a class="pill" href="/llms.txt">llms.txt for your agent</a>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span class="grow">Ocre · MIT or Apache-2.0</span>
+    <a href="/introduction.html">Docs</a>
+    <a href="/api-index.html">API index</a>
+    <a href="https://crates.io/crates/ocre">crates.io</a>
+    <a href="https://github.com/tgeselle/ocre.rs">GitHub</a>
+  </div>
+</footer>
+
+<script>
+  document.getElementById("theme").addEventListener("click", function () {
+    var dark = document.documentElement.dataset.theme !== "dark";
+    document.documentElement.dataset.theme = dark ? "dark" : "light";
+    localStorage.setItem("mdbook-theme", dark ? "coal" : "light");
+  });
+  document.querySelectorAll("[data-copy]").forEach(function (button) {
+    button.addEventListener("click", function () {
+      navigator.clipboard.writeText(button.dataset.copy).then(function () {
+        button.textContent = "copied";
+        setTimeout(function () { button.textContent = "copy"; }, 1500);
+      });
+    });
+  });
+  var steps = document.querySelectorAll(".step"), panels = document.querySelectorAll(".panel");
+  steps.forEach(function (step) {
+    step.addEventListener("click", function () {
+      steps.forEach(function (other) { other.setAttribute("aria-selected", other === step ? "true" : "false"); });
+      panels.forEach(function (panel, i) { panel.classList.toggle("on", String(i) === step.dataset.panel); });
+      document.getElementById("tour-file").textContent = panels[step.dataset.panel].dataset.file;
+    });
+  });
+</script>
+</body>
+</html>

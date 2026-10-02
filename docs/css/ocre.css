@@ -1,0 +1,162 @@
+/* Ocre look for the mdBook pages, matching the home page (docs/site/index.html):
+   warm paper, ochre accent, system fonts. Only the Light and Coal themes are
+   restyled; the theme menu offers those two (plus Auto). */
+
+:root {
+    --sidebar-target-width: 280px;
+    --content-max-width: 780px;
+    --menu-bar-height: 60px;
+    --mono-font: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --ocre-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, system-ui, sans-serif;
+}
+
+.light, html:not(.js) {
+    --bg: #fbf6ec;
+    --fg: #1b1812;
+    --sidebar-bg: #f4ecdd;
+    --sidebar-fg: #585247;
+    --sidebar-non-existant: #a99f8f;
+    --sidebar-active: #a8520f;
+    --sidebar-spacer: #e7ddcb;
+    --sidebar-header-border-color: #c4661c;
+    --scrollbar: #c9bba4;
+    --icons: #8a8173;
+    --icons-hover: #1b1812;
+    --links: #a8520f;
+    --inline-code-color: #7a3c0c;
+    --theme-popup-bg: #fffdf8;
+    --theme-popup-border: #e7ddcb;
+    --theme-hover: #f4ecdd;
+    --quote-bg: #f7e3c8;
+    --quote-border: #ecc89a;
+    --table-border-color: #e7ddcb;
+    --table-header-bg: #f4ecdd;
+    --table-alternate-bg: #f8f1e5;
+    --searchbar-border-color: #e7ddcb;
+    --searchbar-bg: #fffdf8;
+    --searchbar-fg: #1b1812;
+    --searchbar-shadow-color: #e7ddcb;
+    --searchresults-header-fg: #8a8173;
+    --searchresults-border-color: #e7ddcb;
+    --searchresults-li-bg: #f7e3c8;
+    --search-mark-bg: #f5c58a;
+    --footnote-highlight: #c4661c;
+    --overlay-bg: rgba(60, 40, 20, 0.25);
+    --ocre-card: #fffdf8;
+    --ocre-line: #e7ddcb;
+    --ocre-accent: #c4661c;
+    --ocre-code-bg: #f6eee0;
+    --ocre-inline-bg: #f1e6d4;
+}
+
+.coal {
+    --bg: #15120d;
+    --fg: #ece3d4;
+    --sidebar-bg: #1c1812;
+    --sidebar-fg: #b9ae9b;
+    --sidebar-non-existant: #6b6355;
+    --sidebar-active: #f5ad5c;
+    --sidebar-spacer: #2f281d;
+    --sidebar-header-border-color: #f09a3e;
+    --scrollbar: #4a4134;
+    --icons: #8b8170;
+    --icons-hover: #f1e9dc;
+    --links: #f5ad5c;
+    --inline-code-color: #ffc98a;
+    --theme-popup-bg: #1f1a13;
+    --theme-popup-border: #2f281d;
+    --theme-hover: #2a231a;
+    --quote-bg: #241c12;
+    --quote-border: #4a3518;
+    --table-border-color: #2f281d;
+    --table-header-bg: #221d16;
+    --table-alternate-bg: #1a1610;
+    --searchbar-border-color: #2f281d;
+    --searchbar-bg: #1f1a13;
+    --searchbar-fg: #f1e9dc;
+    --searchbar-shadow-color: #000;
+    --searchresults-header-fg: #8b8170;
+    --searchresults-border-color: #2f281d;
+    --searchresults-li-bg: #2a2015;
+    --search-mark-bg: #8a5a20;
+    --footnote-highlight: #f09a3e;
+    --overlay-bg: rgba(0, 0, 0, 0.5);
+    --ocre-card: #1f1a13;
+    --ocre-line: #2f281d;
+    --ocre-accent: #f09a3e;
+    --ocre-code-bg: #100d09;
+    --ocre-inline-bg: #2a2219;
+}
+
+/* Only the two restyled themes in the menu. */
+#mdbook-theme-rust, #mdbook-theme-navy, #mdbook-theme-ayu { display: none; }
+
+/* Type */
+html { font-family: var(--ocre-sans); -webkit-font-smoothing: antialiased; }
+body { font-size: 1.6rem; }
+.content { line-height: 1.7; }
+.content main { padding-bottom: 48px; }
+.content h1, .content h2, .content h3, .content h4 { letter-spacing: -0.02em; font-weight: 750; }
+.content h1 { font-size: 2.6em; line-height: 1.1; margin-top: 0.6em; letter-spacing: -0.035em; }
+.content h2 { font-size: 1.6em; margin-top: 2.2em; padding-top: 0.6em; border-top: 1px solid var(--ocre-line); }
+.content h3 { font-size: 1.25em; margin-top: 1.8em; }
+.content a:link, .content a:visited { color: var(--links); text-decoration: none; }
+.content a:hover { text-decoration: underline; text-underline-offset: 3px; }
+.content .header:link, .content .header:visited { color: var(--fg); }
+
+/* Code */
+code { font-family: var(--mono-font); }
+:not(pre) > code.hljs, :not(pre) > code {
+    background: var(--ocre-inline-bg);
+    color: var(--inline-code-color);
+    padding: 0.1em 0.35em;
+    border-radius: 5px;
+    font-size: 0.86em;
+}
+pre { border-radius: 12px; border: 1px solid var(--ocre-line); }
+pre > code.hljs, pre > code { background: var(--ocre-code-bg); border-radius: 12px; padding: 1.1em 1.3em; font-size: 0.84em; line-height: 1.65; }
+.coal .hljs { background: var(--ocre-code-bg); }
+
+/* Tables */
+.content table { border-collapse: separate; border-spacing: 0; border: 1px solid var(--ocre-line); border-radius: 12px; overflow: hidden; font-size: 0.92em; margin: 1.6em 0; }
+.content table thead { background: var(--table-header-bg); }
+.content table thead td, .content table thead th { font-weight: 700; text-align: left; }
+.content table td, .content table th { border: 0; border-bottom: 1px solid var(--ocre-line); padding: 10px 14px; }
+.content table tbody tr:last-child td { border-bottom: 0; }
+
+/* Quotes and admonitions */
+blockquote { border-radius: 10px; border-left: 4px solid var(--ocre-accent); border-block: 0; border-right: 0; padding: 0.4em 1.2em; }
+
+/* Menu bar */
+#mdbook-menu-bar { border-bottom: 1px solid var(--ocre-line); background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(8px); }
+#mdbook-menu-bar.bordered { border-bottom-color: var(--ocre-line); }
+.menu-title { font-weight: 800; font-size: 2rem; letter-spacing: -0.02em; display: flex; align-items: center; justify-content: center; gap: 10px; }
+.menu-title a { color: var(--fg); text-decoration: none; display: inline-flex; align-items: center; gap: 10px; }
+.menu-title img { width: 26px; height: 26px; }
+/* The sidebar shows the logo when it is open. */
+html.sidebar-visible .menu-title a { visibility: hidden; }
+#mdbook-menu-bar .right-buttons { display: flex; align-items: center; }
+.ocre-home-links { display: flex; gap: 6px; align-items: center; margin-right: 8px; }
+.ocre-home-links a { font-size: 1.4rem; font-weight: 600; color: var(--sidebar-fg); text-decoration: none; padding: 6px 10px; border-radius: 8px; }
+.ocre-home-links a:hover { color: var(--fg); background: var(--theme-hover); }
+@media (max-width: 760px) { .ocre-home-links { display: none; } }
+
+/* Sidebar */
+.sidebar { font-size: 1.45rem; border-right: 1px solid var(--ocre-line); }
+.sidebar .sidebar-scrollbox { padding: 18px 14px; }
+.chapter li.part-title { color: var(--fg); font-size: 1.15rem; font-weight: 750; letter-spacing: 0.08em; text-transform: uppercase; margin: 22px 0 6px 8px; opacity: 0.75; }
+.chapter li.chapter-item { margin-top: 2px; }
+.chapter li a { display: block; padding: 5px 10px; border-radius: 8px; color: var(--sidebar-fg); }
+.chapter li a:hover { color: var(--fg); background: var(--theme-hover); text-decoration: none; }
+.chapter li a.active { color: var(--sidebar-active); background: var(--ocre-card); box-shadow: inset 0 0 0 1px var(--ocre-line); font-weight: 650; }
+.ocre-brand { display: flex; align-items: center; gap: 10px; padding: 4px 10px 14px; font-weight: 800; font-size: 2rem; letter-spacing: -0.02em; color: var(--fg); text-decoration: none; border-bottom: 1px solid var(--ocre-line); margin-bottom: 6px; }
+.ocre-brand img { width: 28px; height: 28px; }
+.ocre-brand:hover { text-decoration: none; }
+
+/* Search */
+#mdbook-searchbar { border-radius: 10px; padding: 10px 14px; }
+
+/* Previous / next */
+.nav-chapters { color: var(--icons); }
+.nav-chapters:hover { color: var(--ocre-accent); background: transparent; }
+.mobile-nav-chapters { border-radius: 10px; background: var(--ocre-card); border: 1px solid var(--ocre-line); }

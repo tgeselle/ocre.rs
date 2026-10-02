@@ -1,6 +1,6 @@
 # Summary
 
-[Ocre](index.md)
+[Introduction](introduction.md)
 
 # Getting started
 
