@@ -128,6 +128,12 @@ if [ "$tool" = "wrangler" ]; then
     echo "  (info) {\"level\":\"info\",\"message\":\"GET /posts 200\",\"request_id\":\"8c2f1a0b9d3e4f5a-CDG\"}"
     exit 0
   fi
+  # The local Secrets Store: `wrangler secrets-store secret create <store> --name N --value V --scopes workers --persist-to <state>`.
+  if [ "$1" = "secrets-store" ]; then
+    fail_if local_store_fails
+    echo "✅ Created secret! (local)"
+    exit 0
+  fi
   # The local D1 fallback: `wrangler d1 ... DB --local <args> -c .wrangler/ocre-d1.json --persist-to .wrangler/state`.
   if [ ! -e .wrangler/ocre-d1.json ]; then echo "✘ [ERROR] no derived config" >&2; exit 1; fi
   case "$2 $3" in
@@ -291,6 +297,40 @@ case "$1 $2" in
         set -- -e "s/ocre-cfcheck-demo-cache/$5/g" -e "s/30fc3a1ff6374cdea057902f16092ce8/id-$5/g"
         if [ -e "$state/kv_create_no_id" ]; then replay kv_create "$@" -e '/"id"/d'; fi
         replay kv_create "$@"
+        ;;
+    esac
+    ;;
+  "secrets-store stores")
+    # Not recorded (the API's documented result shape): stores.json, else one store.
+    fail_if stores_fail
+    if [ -e "$state/stores.json" ]; then cat "$state/stores.json"; else echo '[{"id":"store1","name":"default_secrets_store"}]'; fi
+    ;;
+  "secrets-store secrets")
+    # Not recorded: `list --store-id S`, `create S --body @f`, `edit ID --store-id S --body @f`.
+    # Secrets live in store_<store>_<name> files holding their id.
+    case "$3" in
+      list)
+        printf '['
+        sep=''
+        for file in "$state/store_$5_"*; do
+          [ -e "$file" ] || continue
+          printf '%s{"id":"%s","name":"%s","status":"active"}' "$sep" "$(cat "$file")" "${file##*/store_$5_}"
+          sep=','
+        done
+        echo ']'
+        ;;
+      create)
+        fail_if store_create_fails
+        body="$(cat "${6#@}")"
+        printf 'store body %s\n' "$body" >> "$state/calls.log"
+        name="$(printf '%s' "$body" | grep -o '"name":"[^"]*"' | cut -d'"' -f4)"
+        echo "id-$name" > "$state/store_$4_$name"
+        echo "[{\"id\":\"id-$name\",\"name\":\"$name\"}]"
+        ;;
+      edit)
+        body="$(cat "${8#@}")"
+        printf 'store body %s\n' "$body" >> "$state/calls.log"
+        echo "{\"id\":\"$4\"}"
         ;;
     esac
     ;;

@@ -197,7 +197,7 @@ pub fn filter_json(value: &Value) -> Value {
 /// use ocre::{Ctx, Result, security::BasicAuth};
 ///
 /// async fn admin(State(ctx): State<Ctx>, auth: BasicAuth) -> Result<Response> {
-///     let password = ctx.env().secret("ADMIN_PASSWORD")?.to_string();
+///     let password = ctx.secret("ADMIN_PASSWORD").await?;
 ///     if !auth.matches("admin", &password) {
 ///         return Ok(BasicAuth::challenge());
 ///     }

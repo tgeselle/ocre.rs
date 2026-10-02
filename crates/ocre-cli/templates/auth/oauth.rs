@@ -69,12 +69,10 @@ fn callback_url(uri: &Uri, provider: &Provider) -> String {
 
 async fn start(State(ctx): State<Ctx>, session: Session, uri: Uri, Path(name): Path<String>) -> Result<Redirect> {
     let provider = provider(&name)?;
-    let client_id = ctx.env().secret(provider.client_id_secret).map_err(|_| {
-        Error::internal(format!("the {} secret is not set. Fix: add it to .dev.vars, and `ocre secrets push {0} --file .prod.vars`", provider.client_id_secret))
-    })?;
+    let client_id = ctx.secret(provider.client_id_secret).await?;
     let pkce = Pkce::new();
     let state = ocre::token::generate();
-    let url = oauth::authorize_url(provider, &client_id.to_string(), &callback_url(&uri, provider), &state, &pkce.challenge);
+    let url = oauth::authorize_url(provider, &client_id, &callback_url(&uri, provider), &state, &pkce.challenge);
     session.insert(PENDING, Pending { provider: provider.name.to_owned(), state, verifier: pkce.verifier })?;
     Ok(Redirect::to(&url))
 }

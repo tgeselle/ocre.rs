@@ -222,7 +222,12 @@ fn print_human(report: &Report) {
     }
     for secret in report.secrets.iter().flatten() {
         let local = if secret.local { ".dev.vars" } else { "" };
-        let deployed = if secret.deployed { "deployed" } else { "" };
+        let deployed = match (secret.deployed, &secret.store) {
+            (true, Some(_)) => "in the Secrets Store",
+            (false, Some(_)) => "bound, not in the Secrets Store",
+            (true, None) => "deployed",
+            (false, None) => "",
+        };
         println!("  {:<32}{local:<12}{deployed}", secret.name);
     }
     if let Some(version) = &report.version {

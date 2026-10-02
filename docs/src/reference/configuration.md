@@ -390,6 +390,28 @@ ocre secret                                                 # a new SECRET_KEY_B
 
 The free plan allows 64 variables and secrets per Worker, 5 KB each ([limits](https://developers.cloudflare.com/workers/platform/limits/#environment-variables), September 2026).
 
+Code reads a secret with `ctx.secret("NAME").await?`, wherever it is kept: a Worker secret, a `.dev.vars` value, or a Secrets Store secret (below). Ocre's own secrets that it reads asynchronously (`RESEND_API_KEY`, `VAPID_PRIVATE_KEY`, OAuth client secrets) go through it too.
+
+### Secrets Store: shared secrets
+
+[Secrets Store](https://developers.cloudflare.com/secrets-store/) (open beta, 100 secrets per account on every plan) keeps secrets at the account level: one Resend or RunPod key for every app of the account, rotated once. A Worker reads one through a binding:
+
+```ts
+// worker.env in cloudflare.config.ts
+RESEND_API_KEY: bindings.secretsStoreSecret({ storeId: "<store id>", secretName: "RESEND_API_KEY" }),
+```
+
+```sh
+ocre secrets push RESEND_API_KEY --store --file .prod.vars   # stores it, adds the binding
+ocre deploy
+```
+
+- In code nothing changes: `ctx.secret("RESEND_API_KEY").await?` reads the binding (one call to the store per read).
+- `ocre dev` and `ocre test --e2e` copy the `.dev.vars` value of each such binding into the local store before starting (`cf dev` gives the binding the local store's value and ignores `.dev.vars`), and print `RESEND_API_KEY: .dev.vars value copied into the local Secrets Store`. Without a `.dev.vars` value, `ctx.secret` fails with the fix.
+- `SECRET_KEY_BASE` and the `R2_*` settings stay Worker secrets: Ocre reads them without waiting (sessions, cookies, presigned URLs), and `ocre secrets push --store` refuses them.
+- A binding and a Worker secret cannot share a name: delete the Worker secret (dashboard: Workers > the Worker > Settings > Variables and Secrets) after moving it to the store.
+- Like a Worker secret, a store secret cannot be read back: keep its value in `.prod.vars` or a password manager.
+
 The `ocre` crate reads the following names.
 
 ### SECRET_KEY_BASE

@@ -152,8 +152,10 @@ package.json        pinned cf, wrangler, typescript (commit package-lock.json); 
   directly (Ocre runs the app's wrangler itself where cf cannot yet). Find a
   command with `npx cf cli search "<what you want to do>"` and read its
   `--help` (or `npx cf schema <command>`). Production secrets: put
-  `NAME=value` lines in `.prod.vars`, then `ocre secrets push NAME --file .prod.vars`;
-  never pass secret values on the command line.
+  `NAME=value` lines in `.prod.vars`, then `ocre secrets push NAME --file .prod.vars`
+  (`--store`: the account's Secrets Store, shared by the account's Workers);
+  never pass secret values on the command line. Read one in code with
+  `ctx.secret("NAME").await?` (Worker secret, .dev.vars or Secrets Store alike).
 - cloudflare.config.ts: edit only its literal entries, in the canonical forms
   the generators write (`JOBS: bindings.queue({ name: "__APP_NAME__-jobs" }),`,
   `triggers.scheduled({ schedule: "0 3 * * *" }),`); Ocre reads the file

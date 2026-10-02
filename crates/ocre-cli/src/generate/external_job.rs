@@ -342,8 +342,8 @@ fn request_body(job: &{model}, webhook: &str) -> Value {{
 pub async fn submit(ctx: &Ctx, job: {model}) -> Result<{model}> {{
     let env = ctx.env();
     let url = env.var("{upper}_URL").map_err(|_| Error::internal("{upper}_URL is not set"))?.to_string();
-    let secret = secret(ctx)?;
-    let bearer = env.secret("{upper}_TOKEN").ok().map(|token| token.to_string());
+    let secret = ctx.secret("{upper}_SECRET").await?;
+    let bearer = ctx.secret("{upper}_TOKEN").await.ok();
     let webhook = format!("{{}}?token={{}}", ocre::mail::url(ctx, &format!("/webhooks/{name}/{{}}", job.id))?, job.token);
     let answer = webhooks::post_signed(&url, secret.as_bytes(), bearer.as_deref(), &request_body(&job, &webhook)).await;
     let db = ctx.db()?;
@@ -390,7 +390,7 @@ async fn receive(
     body: Bytes,
 ) -> Result<Json<Value>> {{
     let job = find(&ctx, id).await?;
-    let secret = secret(&ctx)?;
+    let secret = ctx.secret("{upper}_SECRET").await?;
     let signature = headers.get("x-signature").and_then(|value| value.to_str().ok());
     let signed = signature.is_some_and(|signature| webhooks::verify(secret.as_bytes(), &body, signature).is_ok());
     let tokened =
@@ -451,9 +451,6 @@ pub async fn sweep(ctx: &Ctx) -> Result<()> {{
 }}
 
 {changed}
-fn secret(ctx: &Ctx) -> Result<String> {{
-    Ok(ctx.env().secret("{upper}_SECRET").map_err(|_| Error::internal("{upper}_SECRET is not set"))?.to_string())
-}}
 "##,
         input = input.join(", "),
         routing = if realtime { "{get, post}" } else { "post" },

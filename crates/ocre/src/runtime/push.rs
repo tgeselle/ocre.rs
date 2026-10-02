@@ -64,9 +64,10 @@ pub fn send(
                  `ocre secrets push VAPID_PRIVATE_KEY --file .prod.vars`"
             ))
         };
+        let private_key = super::secrets::lookup(&env, VAPID_PRIVATE_KEY).await?.filter(|v| !v.trim().is_empty());
         let keys = VapidKeys {
             public_key: var(VAPID_PUBLIC_KEY).ok_or_else(|| missing(VAPID_PUBLIC_KEY))?,
-            private_key: var(VAPID_PRIVATE_KEY).ok_or_else(|| missing(VAPID_PRIVATE_KEY))?,
+            private_key: private_key.ok_or_else(|| missing(VAPID_PRIVATE_KEY))?,
         };
         let subject = var(VAPID_SUBJECT).ok_or_else(|| missing(VAPID_SUBJECT))?;
         let body = encrypt(&subscription.keys, payload.as_bytes())?;

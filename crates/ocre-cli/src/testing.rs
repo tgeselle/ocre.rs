@@ -149,6 +149,9 @@ fn end_to_end(
     ran.push(format!("test database {}: migrated, {TEST_FIXTURES} loaded", LocalD1::TEST_STATE));
     let log_path = project.root.join(LocalD1::TEST_STATE).join("dev.log");
     let log = Arc::new(Mutex::new(File::create(&log_path)?));
+    for name in LocalD1::new(project, echo).for_tests().sync_store_secrets()? {
+        ran.push(format!("{name}: .dev.vars value copied into the test Secrets Store"));
+    }
     let mut server = LocalD1::new(project, echo).for_tests().spawn_server(port)?;
     let (ready, ready_rx) = mpsc::channel();
     let stdout = server.stdout.take().expect("stdout is piped");

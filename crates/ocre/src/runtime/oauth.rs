@@ -1,5 +1,5 @@
 use wasm_bindgen::JsValue;
-use worker::{Env, Fetch, Headers, Method, Request, RequestInit, send::SendFuture};
+use worker::{Fetch, Headers, Method, Request, RequestInit, send::SendFuture};
 
 use crate::{
     Ctx, Error, Result,
@@ -44,8 +44,8 @@ pub fn exchange_code(
     let env = ctx.env().clone();
     let (redirect_uri, code, verifier) = (redirect_uri.to_owned(), code.to_owned(), verifier.to_owned());
     SendFuture::new(async move {
-        let client_id = secret(&env, provider.client_id_secret)?;
-        let client_secret = secret(&env, provider.client_secret_secret)?;
+        let client_id = super::secrets::require(&env, provider.client_id_secret).await?;
+        let client_secret = super::secrets::require(&env, provider.client_secret_secret).await?;
         let body = token_request_body(&client_id, &client_secret, &redirect_uri, &code, &verifier);
         let headers = Headers::new();
         headers.set("Accept", "application/json")?;
@@ -108,13 +108,4 @@ async fn get_json(provider: &Provider, url: &str, access_token: &str) -> Result<
     } else {
         Err(Error::internal(format!("{} answered {status} for {url}: {body}", provider.name)))
     }
-}
-
-fn secret(env: &Env, name: &str) -> Result<String> {
-    env.secret(name).map(|secret| secret.to_string()).map_err(|_| {
-        Error::internal(format!(
-            "the {name} secret is not set. Fix: put it in .dev.vars for `ocre dev` and run \
-             `ocre secrets push {name} --file .prod.vars` for production"
-        ))
-    })
 }

@@ -1062,10 +1062,10 @@ See [SECRET_KEY_BASE](configuration.md#secret_key_base).
 
 ```text
 ocre secrets list [--json]
-ocre secrets push <NAMES>... [--file <FILE>] [--json]
+ocre secrets push <NAMES>... [--file <FILE>] [--store [--store-id <ID>]] [--json]
 ```
 
-Worker secrets are Ocre's credentials (Rails' `credentials.yml.enc`): Cloudflare stores them encrypted, the Worker reads them with `ctx.env().secret(NAME)`, and nothing secret is committed. Values can be written but never read back.
+Worker secrets are Ocre's credentials (Rails' `credentials.yml.enc`): Cloudflare stores them encrypted, the Worker reads them with `ctx.secret(NAME).await`, and nothing secret is committed. Values can be written but never read back.
 
 `ocre secrets list` shows each secret name of `.dev.vars` (used by `ocre dev`) and of the deployed Worker (`cf workers secrets list --worker <name>`), side by side. Names set locally but not deployed get a next step; `SECRET_KEY_BASE` and `MAIL_ADAPTER` are left out of it, their `.dev.vars` values being for development only.
 
@@ -1096,6 +1096,14 @@ Errors:
 | `SECRET_KEY_BASE in .dev.vars is a development value` (also `MAIL_ADAPTER`) | ``production needs its own: `ocre deploy` creates SECRET_KEY_BASE; for others put the production value in another git-ignored file (e.g. .prod.vars) and pass `--file <it>` `` |
 | `NOPE is not set in .prod.vars` | ``add `NOPE=<value>` to .prod.vars (a git-ignored file), then run this again`` |
 | `cannot read <file>: ...` | none |
+
+With `--store`, the secrets go to the account's [Secrets Store](configuration.md#secrets-store-shared-secrets) instead, where every Worker that binds them reads them: a name already bound in `cloudflare.config.ts` keeps its store and secret name; a new one goes to `--store-id`, else to the account's first store (`cf secrets-store stores list`), and gets its binding, `NAME: bindings.secretsStoreSecret({ storeId: "<id>", secretName: "NAME" }),`, after `// ocre:env`. Each value is written to a temporary JSON file under `.wrangler/` (readable only by you) for one `cf secrets-store secrets create <store> --body @<file>` (or `secrets edit <id> --store-id <store>` when the secret exists), then the file is deleted. The report's `ran` is `["stored NAME in the Secrets Store <id>", ...]`; `next` asks for `ocre deploy` when a binding was added, and flags a Worker secret of the same name, which must be deleted for the binding to take it. `ocre secrets list` reads the stores the Worker binds, and marks those names `in the Secrets Store` (JSON: `"store": "<id>"`).
+
+```sh
+ocre secrets push RESEND_API_KEY --store --file .prod.vars
+```
+
+More errors with `--store`: ``<NAME> cannot live in the Secrets Store`` for `SECRET_KEY_BASE` and `R2_*` (Ocre reads them without waiting; keep them Worker secrets); ``<NAME> is already a `<kind>` binding in cloudflare.config.ts``; `the account has no Secrets Store` (hint: open Secrets Store in the dashboard once, or `npx wrangler secrets-store store create default --remote`). The store commands' answers follow the API's documented shapes; Ocre's tests have not run them against a live account (October 2026).
 
 Both commands need a Cloudflare login for the deployed side, and the shared errors apply.
 

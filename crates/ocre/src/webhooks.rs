@@ -15,7 +15,7 @@
 //! # #[allow(dead_code)]
 //!
 //! async fn receive(State(ctx): State<Ctx>, headers: HeaderMap, body: Bytes) -> Result<&'static str> {
-//!     let secret = ctx.env().secret("PAYMENTS_WEBHOOK_SECRET")?.to_string();
+//!     let secret = ctx.secret("PAYMENTS_WEBHOOK_SECRET").await?;
 //!     let signature = headers.get("x-signature").and_then(|v| v.to_str().ok()).unwrap_or_default();
 //!     webhooks::verify(secret.as_bytes(), &body, signature)?;
 //!     let event: serde_json::Value =

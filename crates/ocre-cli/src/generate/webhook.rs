@@ -106,7 +106,7 @@ pub fn routes() -> Router<Ctx> {{
 }}
 
 async fn receive(State(ctx): State<Ctx>, headers: HeaderMap, body: Bytes) -> Result<Json<Value>> {{
-    let secret = ctx.env().secret("{secret_name}").map_err(|_| Error::internal("{secret_name} is not set"))?.to_string();
+    let secret = ctx.secret("{secret_name}").await?;
 {verify}
     let db = ctx.db()?;
     let delivery = webhooks::once(&db, SOURCE, &id, &body, || handle(&ctx, &event)).await?;

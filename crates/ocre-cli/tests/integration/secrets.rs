@@ -139,3 +139,143 @@ fn a_redeploy_keeps_the_pushed_secrets() {
     assert_eq!(deployed(&sandbox), ["A", "B", "OTHER", "SECRET_KEY_BASE"]);
     assert_eq!(fs::read_to_string(sandbox.work.join("../state/uploaded_secrets")).unwrap(), "{}");
 }
+
+#[test]
+fn store_secrets_are_bound_once_and_updated_in_place() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    fs::write(root.join(".prod.vars"), "RESEND_API_KEY=re_1\nRUNPOD_TOKEN=rp_1\n").unwrap();
+    let (report, ok) =
+        sandbox.json(&["secrets", "push", "RESEND_API_KEY", "RUNPOD_TOKEN", "--store", "--file", ".prod.vars"], &root);
+    assert!(ok, "{report}");
+    assert_eq!(
+        report["ran"],
+        serde_json::json!([
+            "stored RESEND_API_KEY in the Secrets Store store1",
+            "stored RUNPOD_TOKEN in the Secrets Store store1"
+        ])
+    );
+    assert_eq!(report["updated"], serde_json::json!(["cloudflare.config.ts"]));
+    assert_eq!(report["next"], serde_json::json!(["ocre deploy (the Worker reads a new binding once deployed)"]));
+    let config = fs::read_to_string(root.join("cloudflare.config.ts")).unwrap();
+    assert!(
+        config.contains(
+            "RESEND_API_KEY: bindings.secretsStoreSecret({ storeId: \"store1\", secretName: \"RESEND_API_KEY\" }),"
+        ),
+        "{config}"
+    );
+    let calls = sandbox.calls();
+    assert!(
+        calls.contains(&"cf secrets-store secrets create store1 --body @.wrangler/ocre-store-secret.json".to_owned()),
+        "{calls:?}"
+    );
+    assert!(
+        calls.contains(&r#"store body [{"name":"RESEND_API_KEY","scopes":["workers"],"value":"re_1"}]"#.to_owned()),
+        "{calls:?}"
+    );
+    assert!(!root.join(".wrangler/ocre-store-secret.json").exists(), "the value does not stay on disk");
+
+    // Again: the bound secret is edited in its store, the config unchanged.
+    sandbox.clear_calls();
+    fs::write(root.join(".prod.vars"), "RESEND_API_KEY=re_2\n").unwrap();
+    let (report, ok) = sandbox.json(&["secrets", "push", "RESEND_API_KEY", "--store", "--file", ".prod.vars"], &root);
+    assert!(ok, "{report}");
+    assert!(report.get("updated").is_none() && report.get("next").is_none(), "{report}");
+    let calls = sandbox.calls();
+    assert!(calls.contains(&"cf secrets-store secrets edit id-RESEND_API_KEY --store-id store1 --body @.wrangler/ocre-store-secret.json".to_owned()), "{calls:?}");
+    assert!(calls.contains(&r#"store body {"scopes":["workers"],"value":"re_2"}"#.to_owned()), "{calls:?}");
+
+    // `list` reads the stores the Worker binds.
+    let (report, ok) = sandbox.json(&["secrets", "list"], &root);
+    assert!(ok, "{report}");
+    let resend = report["secrets"].as_array().unwrap().iter().find(|s| s["name"] == "RESEND_API_KEY").unwrap().clone();
+    assert_eq!(
+        resend,
+        serde_json::json!({"name": "RESEND_API_KEY", "local": false, "deployed": true, "store": "store1"})
+    );
+    let (stdout, _) = text(&sandbox.ocre(&["secrets", "list"], &root));
+    assert!(
+        stdout.lines().any(|line| line.starts_with("  RESEND_API_KEY ") && line.ends_with("in the Secrets Store")),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn store_pushes_explain_what_they_cannot_do() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    fs::write(root.join(".prod.vars"), "SECRET_KEY_BASE=x\nMAIL_FROM=a@b.c\nAPI=1\n").unwrap();
+    let push = |names: &[&str]| {
+        let mut args = vec!["secrets", "push"];
+        args.extend(names);
+        args.extend(["--store", "--file", ".prod.vars"]);
+        sandbox.json(&args, &root).0
+    };
+    assert_eq!(push(&["SECRET_KEY_BASE"])["error"], "SECRET_KEY_BASE cannot live in the Secrets Store");
+    assert_eq!(push(&["MAIL_FROM"])["error"], "MAIL_FROM is already a `text` binding in cloudflare.config.ts");
+    assert_eq!(push(&["MISSING"])["error"], "MISSING is not set in .prod.vars");
+    assert_eq!(push(&[])["error"], "name the secrets to upload");
+    sandbox.write_state("stores.json", "[]");
+    let error = push(&["API"]);
+    assert_eq!(error["error"], "the account has no Secrets Store");
+    // A store named by --store-id needs no lookup; a Worker secret of the same name is flagged.
+    sandbox.clear_calls();
+    fs::write(root.join(".prod.vars"), "SECRET_KEY_BASE=x\nAPI=1\n").unwrap();
+    let (report, ok) =
+        sandbox.json(&["secrets", "push", "OTHER", "--store", "--store-id", "s9", "--file", ".prod.vars"], &root);
+    assert!(!ok, "OTHER is not in the file: {report}");
+    fs::write(root.join(".prod.vars"), "OTHER=1\n").unwrap();
+    let (report, ok) =
+        sandbox.json(&["secrets", "push", "OTHER", "--store", "--store-id", "s9", "--file", ".prod.vars"], &root);
+    assert!(ok, "{report}");
+    // The fake Worker has a secret named OTHER.
+    assert!(report["next"][0].as_str().unwrap().starts_with("the Worker also has its own OTHER secret"), "{report}");
+    assert!(!sandbox.calls().iter().any(|call| call.starts_with("cf secrets-store stores")), "{:?}", sandbox.calls());
+}
+
+#[test]
+fn dev_copies_dev_vars_values_into_the_local_store() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    let config = fs::read_to_string(root.join("cloudflare.config.ts")).unwrap().replace(
+        "// ocre:env",
+        "// ocre:env\n\t\t\tAPI_KEY: bindings.secretsStoreSecret({ storeId: \"s1\", secretName: \"SHARED_KEY\" }),\n\t\t\t\
+         UNSET: bindings.secretsStoreSecret({ storeId: \"s1\", secretName: \"UNSET\" }),\n\t\t\t\
+         COMPUTED: bindings.secretsStoreSecret({ storeId: STORE, secretName: \"COMPUTED\" }),",
+    );
+    fs::write(root.join("cloudflare.config.ts"), config).unwrap();
+    let vars = fs::read_to_string(root.join(".dev.vars")).unwrap();
+    fs::write(root.join(".dev.vars"), format!("{vars}API_KEY=dev-value\n")).unwrap();
+    let (report, ok) = sandbox.json(&["dev", "--port", "9124"], &root);
+    assert!(ok, "{report}");
+    assert_eq!(report["ran"], serde_json::json!(["API_KEY: .dev.vars value copied into the local Secrets Store"]));
+    assert!(
+        sandbox.calls().contains(
+            &"wrangler secrets-store secret create s1 --name SHARED_KEY --value dev-value --scopes workers --persist-to .wrangler/state"
+                .to_owned()
+        ),
+        "{:?}",
+        sandbox.calls()
+    );
+    // `list`: bound, set locally, not in its store yet.
+    let (report, _) = sandbox.json(&["secrets", "list"], &root);
+    let api = report["secrets"].as_array().unwrap().iter().find(|s| s["name"] == "API_KEY").unwrap().clone();
+    assert_eq!(api, serde_json::json!({"name": "API_KEY", "local": true, "deployed": false, "store": "s1"}));
+    assert_eq!(report["next"], serde_json::json!(["ocre secrets push API_KEY --store --file <production values>"]));
+    let (stdout, _) = text(&sandbox.ocre(&["secrets", "list"], &root));
+    assert!(
+        stdout.lines().any(|line| line.starts_with("  API_KEY ") && line.ends_with("bound, not in the Secrets Store")),
+        "{stdout}"
+    );
+
+    // A failure names the binding, never the value.
+    sandbox.set("local_store_fails");
+    let (report, ok) = sandbox.json(&["dev", "--port", "9124"], &root);
+    assert!(!ok);
+    let error = report["error"].as_str().unwrap();
+    assert!(
+        error.starts_with("cannot copy API_KEY from .dev.vars into the local Secrets Store")
+            && !error.contains("dev-value"),
+        "{error}"
+    );
+}

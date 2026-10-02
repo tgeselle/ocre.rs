@@ -5,7 +5,11 @@ use std::{
 
 use axum::http::{HeaderMap, Method, header};
 use serde::de::DeserializeOwned;
-use worker::{D1Database, D1DatabaseSession, Env, js_sys::Array, send::SendWrapper};
+use worker::{
+    D1Database, D1DatabaseSession, Env,
+    js_sys::Array,
+    send::{SendFuture, SendWrapper},
+};
 
 use super::{Db, d1::Handle};
 use crate::{
@@ -310,6 +314,40 @@ impl Ctx {
     /// ```
     pub fn env(&self) -> &Env {
         &self.env
+    }
+
+    /// The secret `name`, wherever it is kept: a Worker secret (`ocre secrets
+    /// push`), a `.dev.vars` value in `ocre dev`, or a secret of the
+    /// account's Secrets Store bound to the Worker in cloudflare.config.ts
+    /// (`NAME: bindings.secretsStoreSecret({ storeId, secretName })`, which
+    /// `ocre secrets push NAME --store` writes). Code reads it the same way
+    /// wherever it lives, so moving a secret to the store changes no code.
+    ///
+    /// A Worker secret is read without I/O; a Secrets Store secret costs one
+    /// call to the store. Secrets Ocre reads without awaiting
+    /// (`SECRET_KEY_BASE`, `R2_*`) must stay Worker secrets.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Internal`] (500, logged) when the secret is missing or
+    /// empty, naming where to set it.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use axum::extract::State;
+    /// use ocre::{Ctx, Result};
+    ///
+    /// async fn rates(State(ctx): State<Ctx>) -> Result<String> {
+    ///     let key = ctx.secret("RATES_API_KEY").await?;
+    ///     Ok(format!("{} characters", key.len()))
+    /// }
+    /// # let _ = rates;
+    /// ```
+    pub fn secret(&self, name: &str) -> impl Future<Output = Result<String>> + Send + use<> {
+        let env = self.env.clone();
+        let name = name.to_owned();
+        SendFuture::new(async move { super::secrets::require(&env, &name).await })
     }
 
     /// The application database: the D1 binding `DB`.

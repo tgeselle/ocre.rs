@@ -639,12 +639,24 @@ enum SecretsCommand {
     List,
     /// Upload secrets to the deployed Worker, values read from --file (one
     /// `cf workers secrets bulk` call, then the temporary file is deleted).
+    /// With --store, to the account's Secrets Store instead, shared by every
+    /// Worker that binds them: each is created or updated there, and bound
+    /// in cloudflare.config.ts (`NAME: bindings.secretsStoreSecret(...)`).
+    ///
+    /// Example: `ocre secrets push RESEND_API_KEY --store --file .prod.vars`.
     Push {
         /// Names of the secrets to upload.
         names: Vec<String>,
         /// `NAME=value` file to read the values from (git-ignored).
         #[arg(long, default_value = ".dev.vars")]
         file: String,
+        /// Put them in the account's Secrets Store (the store of their
+        /// binding, else the first store of the account).
+        #[arg(long)]
+        store: bool,
+        /// The store to use for secrets not bound yet (an id from the dashboard's Secrets Store page).
+        #[arg(long, requires = "store")]
+        store_id: Option<String>,
     },
     /// Print one value of a local `NAME=value` file (like `rails credentials:fetch`),
     /// for scripts. Deployed values cannot be read back.
@@ -859,9 +871,11 @@ fn main() -> ExitCode {
             ..output::Report::new("time-zones")
         }),
         Command::Secrets(SecretsCommand::List) => Project::find().and_then(|project| secrets::list(&project, json)),
-        Command::Secrets(SecretsCommand::Push { names, file }) => {
+        Command::Secrets(SecretsCommand::Push { names, file, store: false, .. }) => {
             Project::find().and_then(|project| secrets::push(&project, &names, &file, json))
         }
+        Command::Secrets(SecretsCommand::Push { names, file, store: true, store_id }) => Project::find()
+            .and_then(|project| secrets::push_to_store(&project, &names, &file, store_id.as_deref(), json)),
         Command::Secrets(SecretsCommand::Fetch { name, file }) => {
             Project::find().and_then(|project| secrets::fetch(&project, &name, &file))
         }

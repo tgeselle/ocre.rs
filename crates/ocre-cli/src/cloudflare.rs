@@ -294,6 +294,40 @@ impl<'a> Cloudflare<'a> {
         result.map(drop)
     }
 
+    /// The account's Secrets Stores, `(id, name)` in the order cf lists them.
+    pub fn secret_stores(&self) -> Result<Vec<(String, String)>, CliError> {
+        let stores: Value = self.api_json(&["secrets-store", "stores", "list"])?;
+        Ok(id_names(&stores))
+    }
+
+    /// The secrets of the store `store_id`, `(id, name)`.
+    pub fn store_secrets(&self, store_id: &str) -> Result<Vec<(String, String)>, CliError> {
+        let secrets: Value = self.api_json(&["secrets-store", "secrets", "list", "--store-id", store_id])?;
+        Ok(id_names(&secrets))
+    }
+
+    /// Sets the secret `name` of the store `store_id` to `value`, readable
+    /// by Workers: edits it when it exists, else creates it. The value is
+    /// on disk (readable by its owner only) only during the call.
+    pub fn put_store_secret(&self, store_id: &str, name: &str, value: &str) -> Result<(), CliError> {
+        const BODY_FILE: &str = ".wrangler/ocre-store-secret.json";
+        let existing = self.store_secrets(store_id)?.into_iter().find(|(_, secret)| secret == name);
+        let body = match &existing {
+            Some(_) => serde_json::json!({ "value": value, "scopes": ["workers"] }),
+            None => serde_json::json!([{ "name": name, "value": value, "scopes": ["workers"] }]),
+        };
+        let file = PrivateFile::create(self.root, BODY_FILE, &body.to_string())?;
+        let body = format!("@{BODY_FILE}");
+        let result = match &existing {
+            Some((id, _)) => {
+                self.run(&["secrets-store", "secrets", "edit", id, "--store-id", store_id, "--body", &body])
+            }
+            None => self.run(&["secrets-store", "secrets", "create", store_id, "--body", &body]),
+        };
+        drop(file);
+        result.map(drop)
+    }
+
     /// Deploys and returns the workers.dev URL. Ocre provisions everything
     /// first: the D1 database, queues, KV namespaces (ids written back) and
     /// R2 buckets. A Worker without SECRET_KEY_BASE gets the one of
@@ -531,6 +565,51 @@ impl<'a> LocalD1<'a> {
         self.run(&["d1", "execute", "DB", "--local", "--command", sql, "--json"], Echo::Capture)
     }
 
+    /// Copies the `.dev.vars` values of Secrets Store bindings into this
+    /// state's local store: `cf dev` gives a `secretsStoreSecret` binding the
+    /// local store's value and ignores `.dev.vars`. Returns the names copied.
+    pub fn sync_store_secrets(&self) -> Result<Vec<String>, CliError> {
+        let config = self.project.config()?;
+        let vars = crate::secrets::read_vars(&self.project.root, ".dev.vars")?;
+        let mut copied = Vec::new();
+        for call in config.bindings("secretsStoreSecret") {
+            let (Some(name), Some(store), Some(secret)) =
+                (call.key.as_deref(), call.field("storeId"), call.field("secretName"))
+            else {
+                continue;
+            };
+            let Some(value) = vars.get(name) else { continue };
+            let mut command = Command::new(self.wrangler()?);
+            command
+                .args([
+                    "secrets-store",
+                    "secret",
+                    "create",
+                    store,
+                    "--name",
+                    secret,
+                    "--value",
+                    value,
+                    "--scopes",
+                    "workers",
+                ])
+                .args(["--persist-to", self.state])
+                .current_dir(&self.project.root)
+                .stdin(Stdio::null());
+            // The label leaves the value out of error messages.
+            run(command, &format!("wrangler secrets-store secret create {store} --name {secret}"), Echo::Capture)
+                .map_err(|err| {
+                    CliError::new(format!(
+                        "cannot copy {name} from .dev.vars into the local Secrets Store: {}",
+                        err.message
+                    ))
+                    .hint("check the storeId and secretName of its binding in cloudflare.config.ts")
+                })?;
+            copied.push(name.to_owned());
+        }
+        Ok(copied)
+    }
+
     /// Starts the app on `port` like `cf dev` does (wrangler's
     /// `--x-new-config` reads cloudflare.config.ts and wrangler.config.ts,
     /// an unoptimized build), but on this state directory. Stdout and stderr
@@ -714,7 +793,15 @@ pub fn dev(port: u16, cache: Option<bool>, json: bool) -> CliResult {
         Some(on) => vec![crate::secrets::set_dev_cache(&project.root, on)?],
         None => Vec::new(),
     };
-    LocalD1::new(&project, Echo::for_json(json)).migrate()?;
+    let local = LocalD1::new(&project, Echo::for_json(json));
+    local.migrate()?;
+    let mut ran = ran;
+    ran.extend(
+        local
+            .sync_store_secrets()?
+            .into_iter()
+            .map(|name| format!("{name}: .dev.vars value copied into the local Secrets Store")),
+    );
     Cloudflare::new(&project.root, Echo::for_json(json)).dev_build().run(&["dev", "--port", &port.to_string()])?;
     Ok(Report { url: Some(format!("http://localhost:{port}")), ran, ..Report::new("dev") })
 }
@@ -771,6 +858,17 @@ pub struct Deployed {
     pub secret_saved: bool,
     /// Resources created because they were missing, e.g. `queue shop-jobs`.
     pub provisioned: Vec<String>,
+}
+
+/// `(id, name)` of each object of a cf list: a JSON array, or `{"result": [...]}`.
+fn id_names(list: &Value) -> Vec<(String, String)> {
+    let items = list.get("result").unwrap_or(list);
+    items
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| Some((item["id"].as_str()?.to_owned(), item["name"].as_str()?.to_owned())))
+        .collect()
 }
 
 /// Git-ignored file of production values (`ocre secrets push --file .prod.vars`).

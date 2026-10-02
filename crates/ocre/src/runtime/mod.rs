@@ -20,6 +20,7 @@ mod query;
 #[cfg(feature = "realtime")]
 pub(crate) mod realtime;
 pub(crate) mod resumable;
+pub(crate) mod secrets;
 pub(crate) mod security;
 pub(crate) mod storage;
 pub(crate) mod webhooks;

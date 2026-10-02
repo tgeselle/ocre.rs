@@ -980,3 +980,24 @@ fn test_e2e_loads_fixtures_with_references_from_the_migrations() {
     assert!(sql.contains("INSERT INTO \"posts\" (\"id\", \"author_id\") VALUES ("), "{sql}");
     assert!(sql.contains(", 1);"), "`author: ada` becomes author_id 1: {sql}");
 }
+
+#[test]
+fn test_e2e_copies_store_secrets_into_the_test_state() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    sandbox.script("cargo", "#!/bin/sh\nexit 0\n");
+    fake_rustc(&sandbox, true);
+    let config = fs::read_to_string(root.join("cloudflare.config.ts")).unwrap().replace(
+        "// ocre:env",
+        "// ocre:env\n\t\t\tAPI_KEY: bindings.secretsStoreSecret({ storeId: \"s1\", secretName: \"API_KEY\" }),",
+    );
+    fs::write(root.join("cloudflare.config.ts"), config).unwrap();
+    let vars = fs::read_to_string(root.join(".dev.vars")).unwrap();
+    fs::write(root.join(".dev.vars"), format!("{vars}API_KEY=k\n")).unwrap();
+    let report = ok(&sandbox, &["test", "--e2e", "--port", "9125"], &root);
+    assert_eq!(report["ran"][3], "API_KEY: .dev.vars value copied into the test Secrets Store");
+    assert!(sandbox.calls().contains(
+        &"wrangler secrets-store secret create s1 --name API_KEY --value k --scopes workers --persist-to .wrangler/test-state"
+            .to_owned()
+    ));
+}

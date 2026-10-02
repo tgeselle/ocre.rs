@@ -183,7 +183,7 @@ pub(crate) async fn deliver(env: &Env, email: Email) -> Result<()> {
 }
 
 async fn resend(env: &Env, outgoing: &Outgoing) -> Result<()> {
-    let key = resend_key(env.secret(RESEND_API_KEY).ok().map(|secret| secret.to_string()))?;
+    let key = resend_key(super::secrets::lookup(env, RESEND_API_KEY).await?)?;
     let headers = Headers::new();
     headers.set("Authorization", &format!("Bearer {key}"))?;
     headers.set("Content-Type", "application/json")?;
