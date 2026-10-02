@@ -57,10 +57,7 @@ fn new_creates_an_app_and_installs_its_npm_packages() {
     assert!(gitignore.contains("\nnode_modules/\n") && gitignore.contains("\n.cloudflare/\n"), "{gitignore}");
     assert!(gitignore.contains("\n.env\n.env.*\n"), "cf's credentials: {gitignore}");
     let agents = fs::read_to_string(root.join("AGENTS.md")).unwrap();
-    assert!(
-        agents.starts_with("# shop\n") && agents.contains("`https://ocre-docs.raitomm.workers.dev/llms.txt`"),
-        "{agents}"
-    );
+    assert!(agents.starts_with("# shop\n") && agents.contains("`https://ocre.rs/llms.txt`"), "{agents}");
     for file in ["AGENTS.md", "cloudflare.config.ts", "package.json"] {
         let text = fs::read_to_string(root.join(file)).unwrap();
         assert!(!text.contains("__"), "no template placeholder left in {file}: {text}");

@@ -27,10 +27,10 @@ ocre deploy    # creates the D1 database if needed, applies remote migrations, d
 
 Each generated app has an `AGENTS.md` with the conventions, commands and
 free-plan limits an agent needs, and a link to the documentation site
-(<https://ocre-docs.raitomm.workers.dev>, moving to ocre.rs once the domain is bought; sources in [`docs/`](docs/), see
+(<https://ocre.rs>; sources in [`docs/`](docs/), see
 [Documentation](#documentation)): tutorial, guides, reference and
 explanations, each page also as Markdown (`<page>.md`), with
-[`llms.txt`](https://ocre-docs.raitomm.workers.dev/llms.txt) and `llms-full.txt` for agents.
+[`llms.txt`](https://ocre.rs/llms.txt) and `llms-full.txt` for agents.
 
 ## CLI
 
@@ -873,7 +873,7 @@ can reach private items while living apart from the code. Both crates set
   `wrangler`, which cf delegates the build to, and `typescript`) in its
   `package.json`, installed by `ocre new`. Apps made by an older Ocre (with a
   `wrangler.toml`) convert with the
-  [upgrading guide](https://ocre-docs.raitomm.workers.dev/guides/upgrading.html).
+  [upgrading guide](https://ocre.rs/guides/upgrading.html).
 
 ## Try it
 
@@ -930,7 +930,7 @@ one-line descriptions from `docs/src/SUMMARY.md` and each page's first
 paragraph) and `llms-full.txt` (every page in reading order, links made
 absolute), serves `docs/api-index.md` as `/api-index.md`, and puts
 `cargo doc -p ocre --all-features --no-deps` under `/api/`. The base URL in
-those files is `https://ocre-docs.raitomm.workers.dev` (`OCRE_DOCS_URL` overrides it; the generated
+those files is `https://ocre.rs` (`OCRE_DOCS_URL` overrides it; the generated
 AGENTS.md uses `DOCS_URL` in `crates/ocre-cli/src/new.rs`).
 
 Writing pages: start with `# Title` and a one-paragraph summary, keep each

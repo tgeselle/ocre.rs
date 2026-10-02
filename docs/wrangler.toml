@@ -4,12 +4,13 @@
 # `cargo docs-site serve`.
 name = "ocre-docs"
 compatibility_date = "2026-09-01"
+# https://ocre.rs (the zone is on the same Cloudflare account).
+routes = [{ pattern = "ocre.rs", custom_domain = true }]
+# Links to the old address keep working.
+workers_dev = true
 
 [assets]
 directory = "book"
 # /guides/models serves guides/models.html; /guides/models.md the Markdown twin.
 html_handling = "auto-trailing-slash"
 not_found_handling = "404-page"
-
-# Custom domain, once bought:
-# routes = [{ pattern = "ocre.rs", custom_domain = true }]
