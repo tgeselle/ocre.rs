@@ -1535,7 +1535,7 @@ dependencies = [
 
 [[package]]
 name = "ocre"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes-gcm",
  "askama",
@@ -1568,7 +1568,7 @@ dependencies = [
 
 [[package]]
 name = "ocre-cli"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "clap",
  "cliclack",

@@ -1,6 +1,6 @@
 [package]
 name = "ocre"
-version = "0.1.0"
+version = "0.2.0"
 description = "Rails-like Rust web framework for Cloudflare Workers, deployable on the free plan."
 edition.workspace = true
 license.workspace = true
