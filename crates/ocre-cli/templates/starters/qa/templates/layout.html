@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Live Q&amp;A{% endblock %}</title>
+  <script src="https://unpkg.com/htmx.org@2.0.4" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/htmx-ext-ws@2.0.4/dist/ws.js" crossorigin="anonymous"></script>
+  {# Error pages and 422 forms are swapped in like any page (htmx ignores 4xx/5xx bodies by default). #}
+  <meta name="htmx-config" content='{"responseHandling": [{"code": "204", "swap": false}, {"code": "...", "swap": true}]}'>
+  <style>
+    :root { --ink: #1b1812; --muted: #7a7062; --line: #e7ddcb; --paper: #fbf6ec; --card: #fffdf8; --accent: #c4661c; }
+    * { box-sizing: border-box; }
+    body { font: 17px/1.55 system-ui, sans-serif; max-width: 44rem; margin: 0 auto; padding: 0 1.25rem 4rem; color: var(--ink); background: var(--paper); }
+    header { display: flex; align-items: center; gap: 1.25rem; padding: 1.25rem 0; margin-bottom: 1.5rem; border-bottom: 1px solid var(--line); }
+    header .brand { font-weight: 800; text-decoration: none; color: var(--ink); margin-right: auto; }
+    a { color: var(--accent); }
+    h1 { letter-spacing: -.02em; line-height: 1.15; }
+    form { display: grid; gap: .75rem; }
+    label { display: grid; gap: .3rem; font-weight: 600; }
+    input, textarea { font: inherit; padding: .65rem .8rem; border: 1px solid var(--line); border-radius: .6rem; background: var(--card); }
+    button, .button { font: inherit; font-weight: 700; padding: .55rem 1.1rem; border: 0; border-radius: .6rem; background: var(--accent); color: white; cursor: pointer; justify-self: start; text-decoration: none; display: inline-block; }
+    button.link { background: none; color: var(--muted); padding: 0; font-weight: 500; }
+    button.link.danger { color: #a3261b; }
+    .eyebrow { text-transform: uppercase; letter-spacing: .08em; font-size: .8rem; font-weight: 700; color: var(--accent); margin: 0; }
+    .lead, .muted, .empty, .share { color: var(--muted); }
+    .share code { color: var(--ink); background: var(--card); border: 1px solid var(--line); padding: .1rem .4rem; border-radius: .4rem; word-break: break-all; }
+    .ask { background: var(--card); border: 1px solid var(--line); border-radius: .9rem; padding: 1rem; margin: 1.5rem 0; }
+    .questions { list-style: none; padding: 0; display: grid; gap: .6rem; }
+    .question { display: grid; grid-template-columns: auto 1fr auto; gap: .9rem; align-items: center; background: var(--card); border: 1px solid var(--line); border-radius: .9rem; padding: .75rem 1rem; }
+    .question .body { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .question.answered { opacity: .6; }
+    .vote { display: grid; justify-items: center; min-width: 3.2rem; padding: .35rem .6rem; background: #f7e3c8; color: var(--accent); line-height: 1.1; }
+    .vote span { font-size: 1.1rem; }
+    .vote:disabled { cursor: default; }
+    .badge { font-size: .8rem; font-weight: 700; color: #2e6b2e; }
+    .moderate { grid-column: 2 / -1; display: flex; gap: 1rem; }
+    .steps { color: var(--muted); }
+    .events { padding-left: 1.2rem; }
+    .notice { color: #2e6b2e; }
+    .alert, .errors { color: #a3261b; }
+  </style>
+</head>
+{# hx-boost: links and forms load the next page with htmx and swap the body, without a full reload (Rails' Turbo Drive). Without JavaScript they work as usual. #}
+<body hx-boost="true">
+  <header><a class="brand" href="/">Live Q&amp;A</a> <a href="/events">Your events</a> <a href="/account">Account</a></header>
+  <main>{% block content %}{% endblock %}</main>
+</body>
+</html>

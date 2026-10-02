@@ -152,7 +152,7 @@ Creates a new app in `./NAME`. When stdin and stdout are both terminals and neit
 | `NAME` | required in flag mode | App name, also the Worker and D1 database name: lowercase letters, digits and dashes, starting with a letter, not ending with a dash, at most 63 characters |
 | `--api` | off | API-only app: JSON endpoints, no HTML templates, no askama; Ocre's default features (`html`) are off |
 | `--full-stack` | on | HTML pages with askama and htmx, plus JSON APIs when generated. `--api` and `--full-stack` override each other; the last one wins |
-| `--starter <STARTER>` | `empty` | `empty`: home page (status endpoint in API mode) only. `blog`: adds a `Post` resource (`title:string body:text published:boolean`) with CRUD pages, or a JSON API in an API-only app |
+| `--starter <STARTER>` | `empty` | `empty`: home page (status endpoint in API mode) only. `qa`: the live Q&A app of the [tutorial](../getting-started/tutorial.md) (accounts, events, live questions and votes); full-stack only. `blog`: adds a `Post` resource (`title:string body:text published:boolean`) with CRUD pages, or a JSON API in an API-only app |
 | `--login` / `--no-login` | no login | Log in to Cloudflare (`cf auth login`, opens a browser) if not logged in yet |
 | `--account-id <ACCOUNT_ID>` | none | Cloudflare account to deploy to, written as `accountId: "<id>",` at the top of `cloudflare.config.ts`. Required with `--login`/`--deploy` when the login has several accounts |
 | `--git` / `--no-git` | no git | Run `git init` in the new app |
@@ -164,11 +164,11 @@ Creates a new app in `./NAME`. When stdin and stdout are both terminals and neit
 
 What it does, in flag mode:
 
-1. Checks the name and that `./NAME` does not exist, resolves `--ocre-path`, and checks that `git` runs when `--git` is given. Nothing is written if any check fails.
+1. Checks the name and that `./NAME` does not exist, resolves `--ocre-path`, and checks that `git` runs when `--git` is given; `--api` with `--starter qa` stops with `the qa starter has HTML pages; it cannot be API-only` (hint: ``drop --api, or pick `--starter blog` or `--starter empty` for an API-only app``). Nothing is written if any check fails.
 2. With `--login` or `--deploy`: runs `cf auth whoami`, runs `cf auth login` if not logged in, and picks the account (`--account-id` must be one of the login's accounts; with one account none is needed).
 3. Writes the app: `Cargo.toml`, `cloudflare.config.ts` (with `accountId` when an account was picked), `wrangler.config.ts`, `package.json`, `tsconfig.json`, `rust-toolchain.toml`, `.gitignore`, `AGENTS.md`, `migrations/.gitkeep`, `public/robots.txt`, `src/lib.rs`, and in full-stack apps `templates/layout.html`, `templates/home.html` and `templates/error.html`. An API-only app's `Cargo.toml` has `ocre = { ..., default-features = false }`, no askama, and `[package.metadata.ocre] mode = "api"`, which generators read.
 4. Writes `.dev.vars` (git-ignored) with a new random `SECRET_KEY_BASE` and `MAIL_ADAPTER=log`, used by `ocre dev` only.
-5. With `--starter blog`: runs the equivalent of `ocre g scaffold Post title:string body:text published:boolean` (`ocre g api` in an API-only app).
+5. With `--starter blog`: runs the equivalent of `ocre g scaffold Post title:string body:text published:boolean` (`ocre g api` in an API-only app). With `--starter qa`: runs the equivalents of `ocre g auth`, `ocre g scaffold Event name:string public_id:token user:references` and `ocre g scaffold Question event:references body:text votes:integer answered:boolean --realtime` (recorded for `ocre destroy`), writes the room's controllers, templates and request tests over the generated files, and removes the generated question pages; `created` lists the files that remain.
 6. With `--template`: runs the template's lines in the new app, like [`ocre template`](#ocre-template); the files they create are added to `created` and the lines to `ran`.
 7. Unless `--no-install`: runs `npm install` in the app, which installs the pinned `cf`, `wrangler` and `typescript` into `node_modules/` and writes `package-lock.json` (commit it). `ran` gets `npm install (cf 1.0.0-beta.5, wrangler 4.144.0)`.
 8. With `--git`: runs `git init --quiet`.
@@ -1368,7 +1368,7 @@ Ocre crate          git https://github.com/tgeselle/ocre.rs
 {"about":{"app":"ci-app","app_version":"0.1.0","cli":"0.1.0","ocre":"git https://github.com/tgeselle/ocre.rs"},"command":"version","ok":true}
 ```
 
-`ocre --version` (or `-V`) prints only `ocre 0.1.0`.
+`ocre --version` (or `-V`) prints only the CLI's version, e.g. `ocre 0.2.0`.
 
 ## ocre stats
 

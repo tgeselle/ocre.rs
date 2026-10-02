@@ -49,7 +49,8 @@ fn guided_setup_logs_in_and_deploys() {
     s.exp_string("What are you building?").unwrap();
     press(&mut s, ENTER);
     s.exp_string("Pick a starter").unwrap();
-    press(&mut s, &format!("{DOWN}{ENTER}"));
+    // Full-stack starters: Empty, Live Q&A, Blog.
+    press(&mut s, &format!("{DOWN}{DOWN}{ENTER}"));
     s.exp_string("Connect your Cloudflare account?").unwrap();
     press(&mut s, ENTER);
     s.exp_string("Logged in to Cloudflare").unwrap();

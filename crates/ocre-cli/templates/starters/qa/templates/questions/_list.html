@@ -1,0 +1,29 @@
+{# The room's question list: rendered in the page and broadcast to open rooms on every change (src/questions.rs). `host` adds the moderation buttons. #}
+{% if questions.is_empty() %}
+<p class="empty">No questions yet. Be the first to ask.</p>
+{% else %}
+<ol class="questions">
+  {% for question in questions %}
+  {% let vote = crate::questions::paths::vote(question.id) %}
+  <li id="question_{{ question.id }}" class="question{% if question.answered %} answered{% endif %}">
+    <form action="{{ vote }}" method="post" hx-post="{{ vote }}" hx-swap="none">
+      <button class="vote" type="submit" title="Vote for this question"{% if question.answered %} disabled{% endif %}>▲<span>{{ question.votes }}</span></button>
+    </form>
+    <p class="body">{{ question.body }}</p>
+    {% if question.answered %}<span class="badge">Answered</span>{% endif %}
+    {% if host %}
+    {% let answer = crate::questions::paths::answer(question.id) %}
+    {% let delete = crate::questions::paths::delete(question.id) %}
+    <div class="moderate">
+      <form action="{{ answer }}" method="post" hx-post="{{ answer }}" hx-swap="none">
+        <button class="link" type="submit">{% if question.answered %}Reopen{% else %}Mark answered{% endif %}</button>
+      </form>
+      <form action="{{ delete }}" method="post" hx-post="{{ delete }}" hx-swap="none" hx-confirm="Delete this question?">
+        <button class="link danger" type="submit">Delete</button>
+      </form>
+    </div>
+    {% endif %}
+  </li>
+  {% endfor %}
+</ol>
+{% endif %}

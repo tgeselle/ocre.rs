@@ -15,10 +15,11 @@ use crate::{
     cloudflare::{
         CF_VERSION, Cloudflare, Deployed, Echo, NODE_MIN, TYPESCRIPT_VERSION, WRANGLER_VERSION, pick_account,
     },
-    config, generate,
+    config,
     output::{CliError, Report},
     project::{Project, check_wasm_target},
     secret::{self, SECRET_KEY_BASE},
+    starter,
     template::Template,
 };
 
@@ -63,6 +64,9 @@ pub enum Starter {
     Empty,
     /// A `Post` resource (title, body, published) with CRUD pages or a JSON API.
     Blog,
+    /// A live Q&A app: hosts sign up and create events, the audience asks and
+    /// votes, and every room updates live over WebSockets. Full-stack only.
+    Qa,
 }
 
 /// `ocre new` flags. `None` means "not given": the wizard asks, flag mode
@@ -157,6 +161,10 @@ impl Plan {
         account_id: Option<String>,
     ) -> Result<Self, CliError> {
         check_new_app(cwd, name)?;
+        if api && starter == Starter::Qa {
+            return Err(CliError::new("the qa starter has HTML pages; it cannot be API-only")
+                .hint("drop --api, or pick `--starter blog` or `--starter empty` for an API-only app"));
+        }
         let source = match ocre_path {
             Some(path) => {
                 let path = path.canonicalize().map_err(|err| {
@@ -222,19 +230,9 @@ impl Plan {
         let dev_vars = format!("{SECRET_KEY_BASE}={}\nMAIL_ADAPTER=log\n", secret::generate());
         std::fs::write(self.root.join(".dev.vars"), dev_vars)?;
         report.created.push(format!("{name}/.dev.vars"));
-        if self.starter == Starter::Blog {
-            let fields = ["title:string", "body:text", "published:boolean"].map(String::from);
-            let mut project = Project::at(self.root.clone())?;
-            let generator = if self.api { "api" } else { "scaffold" };
-            project.generate.invocation =
-                ["g", generator, "Post"].into_iter().map(String::from).chain(fields.iter().cloned()).collect();
-            let generated = if self.api {
-                generate::api(&project, "Post", &fields, false)?
-            } else {
-                generate::scaffold(&project, "Post", &fields, false)?
-            };
-            report.created.extend(generated.created.into_iter().map(|path| format!("{name}/{path}")));
-        }
+        report.created.extend(
+            starter::apply(self.starter, &self.root, self.api)?.into_iter().map(|path| format!("{name}/{path}")),
+        );
         if let Some(template) = &self.template {
             let applied = template.apply(&self.root)?;
             report.created.extend(applied.created.into_iter().map(|path| format!("{name}/{path}")));

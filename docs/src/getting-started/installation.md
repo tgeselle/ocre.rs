@@ -62,7 +62,7 @@ ocre --version
 ```
 
 ```text
-ocre 0.1.0
+ocre 0.2.0
 ```
 
 ```sh
@@ -110,7 +110,7 @@ The questions, in order (each one is skipped when the matching flag was given):
 |---|---|---|
 | What is your app called? | A name, checked as you type: lowercase letters, digits and dashes, starting with a letter, at most 63 characters, and no existing directory of that name | `ocre new <name>` |
 | What are you building? | Full-stack app (HTML pages with askama and htmx) or API only (JSON endpoints, no HTML) | `--full-stack`, `--api` |
-| Pick a starter | Empty (a home page, or a status endpoint in API mode) or Blog (posts with title, body and published, full CRUD) | `--starter empty`, `--starter blog` |
+| Pick a starter | Empty (a home page, or a status endpoint in API mode), Live Q&A (hosts create events, the audience asks and votes, live on every screen; full-stack apps only) or Blog (posts with title, body and published, full CRUD) | `--starter empty`, `--starter qa`, `--starter blog` |
 | Connect your Cloudflare account? | Log in now (`cf auth login`, opens your browser) or Later (run `ocre login` when you are ready). Asked only when `cf auth whoami` finds no login; otherwise the setup prints `Logged in to Cloudflare as <email>` | `--login`, `--no-login` |
 | Which Cloudflare account should host it? | One of the accounts of your login, when it has several | `--account-id <id>` |
 | Initialize a git repository? | Yes (default) or no | `--git`, `--no-git` |
@@ -173,7 +173,7 @@ ocre new other --json --yes
 {"command":"new","created":["other/Cargo.toml","other/cloudflare.config.ts","other/wrangler.config.ts","other/package.json","other/tsconfig.json","other/rust-toolchain.toml","other/.gitignore","other/AGENTS.md","other/migrations/.gitkeep","other/public/robots.txt","other/src/lib.rs","other/templates/layout.html","other/templates/home.html","other/.dev.vars"],"next":["cd other","ocre dev","ocre deploy"],"ok":true,"ran":["npm install (cf 1.0.0-beta.5, wrangler 4.144.0)"]}
 ```
 
-`--starter blog` also runs the scaffold generator for `Post title:string body:text published:boolean` and lists its files (`src/models/post.rs`, `migrations/0001_create_posts.sql`, `src/posts.rs`, `templates/posts/*.html`...). `--api` writes an API-only `src/lib.rs`, no `templates/`, and adds `[package.metadata.ocre] mode = "api"` to `Cargo.toml`.
+`--starter blog` also runs the scaffold generator for `Post title:string body:text published:boolean` and lists its files (`src/models/post.rs`, `migrations/0001_create_posts.sql`, `src/posts.rs`, `templates/posts/*.html`...). `--starter qa` builds the app of the [tutorial](tutorial.md): it runs `ocre g auth`, `ocre g scaffold Event name:string public_id:token user:references` and `ocre g scaffold Question event:references body:text votes:integer answered:boolean --realtime`, then writes the room over the generated files; `--api --starter qa` stops with ``the qa starter has HTML pages; it cannot be API-only``. `--api` writes an API-only `src/lib.rs`, no `templates/`, and adds `[package.metadata.ocre] mode = "api"` to `Cargo.toml`.
 
 ## What ocre new creates
 
@@ -257,7 +257,7 @@ hint: choose another name or remove the directory
 
 ## See also
 
-- [Tutorial: a blog](tutorial.md): build, run and deploy a first app.
+- [Tutorial: a live Q&A app](tutorial.md): build, run and deploy a first app.
 - [CLI commands](../reference/cli.md#ocre-new): every command and flag, including `ocre new`.
 - [Deployment](../guides/deployment.md): what `ocre deploy` creates on Cloudflare.
 - [Configuration](../reference/configuration.md): `cloudflare.config.ts`, `.dev.vars`, variables and secrets.

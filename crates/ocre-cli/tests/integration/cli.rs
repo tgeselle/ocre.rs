@@ -6,6 +6,8 @@ mod support;
 
 use std::fs;
 
+use serde_json::json;
+
 use support::{Sandbox, local_d1, ocre_crate, text};
 
 // ---------- ocre new ----------
@@ -189,6 +191,48 @@ fn new_with_the_blog_starter_scaffolds_posts() {
     assert!(root.join("templates/posts/edit.html").is_file());
     let lib = fs::read_to_string(root.join("src/lib.rs")).unwrap();
     assert!(lib.contains("mod posts;") && lib.contains(".merge(posts::routes())"));
+}
+
+#[test]
+fn new_with_the_qa_starter_builds_the_live_room() {
+    let sandbox = Sandbox::new();
+    let (report, ok) = sandbox.json(&["new", "live", "--starter", "qa"], &sandbox.work);
+    assert!(ok, "{report}");
+    let created = report["created"].as_array().unwrap();
+    for path in
+        ["live/src/auth.rs", "live/src/events.rs", "live/src/questions.rs", "live/templates/questions/_list.html"]
+    {
+        assert!(created.contains(&json!(path)), "{path} in {report}");
+    }
+    let root = sandbox.work.join("live");
+    // The room replaces the generated question pages; the report lists only files that exist.
+    assert!(!root.join("templates/questions/index.html").exists());
+    assert!(!created.contains(&json!("live/templates/questions/index.html")), "{report}");
+    for path in created {
+        assert!(sandbox.work.join(path.as_str().unwrap()).exists(), "{path} exists");
+    }
+    let questions = fs::read_to_string(root.join("src/questions.rs")).unwrap();
+    assert!(questions.contains(".route(\"/questions/{id}/vote\", post(vote))"), "{questions}");
+    let layout = fs::read_to_string(root.join("templates/layout.html")).unwrap();
+    assert!(layout.contains("htmx-ext-ws@2.0.4/dist/ws.js"), "{layout}");
+    let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    assert!(cargo.contains("features = [\"realtime\"]"), "{cargo}");
+    // The generators' runs are recorded, so `ocre destroy` knows them.
+    let record = fs::read_to_string(root.join(".ocre/generated/0003_scaffold_question.json")).unwrap();
+    assert!(
+        record
+            .contains("ocre g scaffold Question event:references body:text votes:integer answered:boolean --realtime")
+    );
+}
+
+#[test]
+fn the_qa_starter_is_full_stack_only() {
+    let sandbox = Sandbox::new();
+    let (report, ok) = sandbox.json(&["new", "live", "--api", "--starter", "qa"], &sandbox.work);
+    assert!(!ok);
+    assert_eq!(report["error"], "the qa starter has HTML pages; it cannot be API-only");
+    assert!(report["hint"].as_str().unwrap().starts_with("drop --api"), "{report}");
+    assert!(!sandbox.work.join("live").exists(), "nothing written");
 }
 
 #[test]

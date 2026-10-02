@@ -172,34 +172,33 @@ footer .grow { margin-right: auto; }
 <section class="hero">
   <div class="wrap">
     <div>
-      <div class="badge-row"><span class="badge">Rust · Workers · v0.1</span><span class="hand">written with AI agents ↘</span></div>
+      <div class="badge-row"><span class="badge">Rust · Workers · v0.2</span><span class="hand">written with AI agents ↘</span></div>
       <h1>The Rails way, on Cloudflare's <em>free plan</em>.</h1>
       <p class="lead">Models, controllers, jobs, mailers, auth, file uploads and realtime pages, generated as plain Rust you can read, compiled to WebAssembly, and deployed to Cloudflare Workers with one command.</p>
       <div class="cta">
-        <a class="btn" href="/getting-started/tutorial.html">Build a blog →</a>
+        <a class="btn" href="/getting-started/tutorial.html">Build a live Q&amp;A app →</a>
         <div class="install"><span><span class="dollar">$</span> cargo install ocre-cli</span><button type="button" data-copy="cargo install ocre-cli">copy</button></div>
       </div>
       <div class="stats">
         <div><b>$0 / month</b><span>Workers, D1, R2, Queues</span></div>
         <div><b>1 command</b><span>to provision and deploy</span></div>
-        <div><b>420 KB</b><span>a whole blog, in WebAssembly</span></div>
+        <div><b>426 KB</b><span>the whole Q&amp;A app, gzipped WebAssembly</span></div>
       </div>
     </div>
     <div class="term" aria-label="An Ocre session in a terminal">
       <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span>~/code</span></div>
-<pre><span class="p">$</span> ocre new blog --starter blog --yes
-<span class="m">  create  blog/src/models/post.rs</span>
-<span class="m">  create  blog/src/posts.rs  …</span>
-<span class="p">$</span> cd blog
-<span class="p">$</span> ocre g scaffold Comment body:text post:references
-<span class="m">  create  migrations/0002_create_comments.sql  …</span>
-<span class="p">$</span> ocre migrate &amp;&amp; ocre dev
+<pre><span class="p">$</span> ocre new qa --starter qa --yes
+<span class="m">  create  qa/src/events.rs</span>
+<span class="m">  create  qa/src/questions.rs  …</span>
+<span class="p">$</span> cd qa &amp;&amp; ocre migrate &amp;&amp; ocre dev
 <span class="ok">  Ready on</span> <span class="u">http://localhost:8787</span>
+<span class="c">  # two windows on one event: ask, vote,</span>
+<span class="c">  # and watch the list reorder in both</span>
 <span class="p">$</span> ocre deploy
 <span class="m">  Created the SECRET_KEY_BASE secret on Cloudflare</span>
-<span class="m">  Created D1 database blog on Cloudflare</span>
+<span class="m">  Created D1 database qa on Cloudflare</span>
 
-<span class="u">  https://blog.you.workers.dev</span></pre>
+<span class="u">  https://qa.you.workers.dev</span></pre>
     </div>
   </div>
 </section>
@@ -225,62 +224,69 @@ footer .grow { margin-right: auto; }
 <section class="block">
   <div class="wrap">
     <div class="eyebrow">// a feature, end to end</div>
-    <h2>One feature, a few small files.</h2>
-    <p class="sub">What <code>ocre g scaffold Post title:string body:text</code> and <code>ocre g job</code> write, trimmed: you own every line.</p>
+    <h2>Live votes, a few small files.</h2>
+    <p class="sub">How the <a href="/getting-started/tutorial.html">tutorial's</a> Q&amp;A app counts a vote and pushes the new ranking to every open screen, trimmed: you own every line.</p>
     <div class="tour">
       <div class="steps" role="tablist">
         <button class="step" role="tab" aria-selected="true" data-panel="0"><b>The model</b><small>Queries and rules in one module, plain SQL.</small></button>
-        <button class="step" role="tab" aria-selected="false" data-panel="1"><b>The handler</b><small>An axum function: extractors in, HTML out.</small></button>
-        <button class="step" role="tab" aria-selected="false" data-panel="2"><b>A background job</b><small>Cloudflare Queues, retried for you.</small></button>
+        <button class="step" role="tab" aria-selected="false" data-panel="1"><b>The handler</b><small>An axum function: one vote per browser.</small></button>
+        <button class="step" role="tab" aria-selected="false" data-panel="2"><b>The broadcast</b><small>HTML over WebSockets, a Durable Object per channel.</small></button>
         <button class="step" role="tab" aria-selected="false" data-panel="3"><b>The test</b><small>Real HTTP against the Workers runtime.</small></button>
       </div>
       <div class="term" style="transform:none">
-        <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span id="tour-file">src/models/post.rs</span></div>
-<pre class="panel on" data-file="src/models/post.rs"><span class="c">/// A row of the `posts` table.</span>
-<span class="k">pub struct</span> <span class="t">Post</span> { <span class="k">pub</span> id: <span class="t">i64</span>, <span class="k">pub</span> title: <span class="t">String</span>, <span class="k">pub</span> body: <span class="t">String</span>, <span class="c">/* … */</span> }
-
-<span class="k">pub async fn</span> <span class="f">create</span>(ctx: &amp;<span class="t">Ctx</span>, <span class="k">mut</span> new: <span class="t">NewPost</span>) -&gt; <span class="t">Result</span>&lt;<span class="t">Post</span>&gt; {
-    <span class="f">before_create</span>(ctx, &amp;<span class="k">mut</span> new).<span class="k">await</span>?;
-    new.<span class="f">validate</span>().<span class="f">finish</span>()?;
-    <span class="k">let</span> post = ctx.<span class="f">db</span>()?
-        .<span class="f">first</span>(<span class="s">"INSERT INTO posts (title, body) VALUES (?1, ?2) RETURNING *"</span>, params![new.title, new.body])
-        .<span class="k">await</span>?
-        .<span class="f">ok_or_else</span>(|| <span class="t">Error</span>::<span class="f">internal</span>(<span class="s">"no row returned"</span>))?;
-    <span class="f">after_create</span>(ctx, &amp;post).<span class="k">await</span>?;
-    <span class="t">Ok</span>(post)
-}</pre>
-<pre class="panel" data-file="src/posts.rs"><span class="k">pub fn</span> <span class="f">routes</span>() -&gt; <span class="t">Router</span>&lt;<span class="t">Ctx</span>&gt; {
-    <span class="t">Router</span>::<span class="f">new</span>()
-        .<span class="f">route</span>(<span class="s">"/posts"</span>, <span class="f">get</span>(index).<span class="f">post</span>(create))
-        .<span class="f">route</span>(<span class="s">"/posts/{id}"</span>, <span class="f">get</span>(show).<span class="f">post</span>(update))
+        <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span id="tour-file">src/models/question.rs</span></div>
+<pre class="panel on" data-file="src/models/question.rs"><span class="c">/// Open questions first, most voted first, then answered ones.</span>
+<span class="k">pub async fn</span> <span class="f">for_event</span>(ctx: &amp;<span class="t">Ctx</span>, event_id: <span class="t">i64</span>) -&gt; <span class="t">Result</span>&lt;<span class="t">Vec</span>&lt;<span class="t">Question</span>&gt;&gt; {
+    <span class="f">query</span>()
+        .<span class="f">eq</span>(<span class="s">"event_id"</span>, event_id)
+        .<span class="f">order_asc</span>(<span class="s">"answered"</span>)
+        .<span class="f">order_desc</span>(<span class="s">"votes"</span>)
+        .<span class="f">limit</span>(<span class="s">200</span>)
+        .<span class="f">all</span>(&amp;ctx.<span class="f">db</span>()?)
+        .<span class="k">await</span>
 }
 
-<span class="k">async fn</span> <span class="f">show</span>(<span class="t">State</span>(ctx): <span class="t">State</span>&lt;<span class="t">Ctx</span>&gt;, flash: <span class="t">Flash</span>, <span class="t">Path</span>(id): <span class="t">Path</span>&lt;<span class="t">i64</span>&gt;) -&gt; <span class="t">Result</span>&lt;<span class="t">Html</span>&lt;<span class="t">String</span>&gt;&gt; {
-    <span class="k">let</span> post = post::<span class="f">find</span>(&amp;ctx, id).<span class="k">await</span>?.<span class="f">or_404</span>()?;
-    <span class="f">render</span>(&amp;<span class="t">ShowView</span> { flash, post })
+<span class="c">/// One UPDATE, so votes arriving at the same moment all count.</span>
+<span class="k">pub async fn</span> <span class="f">vote</span>(ctx: &amp;<span class="t">Ctx</span>, id: <span class="t">i64</span>) -&gt; <span class="t">Result</span>&lt;<span class="t">Option</span>&lt;<span class="t">Question</span>&gt;&gt; {
+    <span class="k">let</span> sql = <span class="s">"UPDATE questions SET votes = votes + 1 WHERE id = ?1 RETURNING *"</span>;
+    ctx.<span class="f">db</span>()?.<span class="f">first</span>(sql, params![id]).<span class="k">await</span>
 }</pre>
-<pre class="panel" data-file="src/jobs/send_welcome.rs"><span class="c">// ocre g job SendWelcome user_id:integer</span>
-<span class="k">pub struct</span> <span class="t">SendWelcome</span> { <span class="k">pub</span> user_id: <span class="t">i64</span> }
-
-<span class="k">impl</span> <span class="t">SendWelcome</span> {
-    <span class="k">pub async fn</span> <span class="f">perform</span>(<span class="k">self</span>, ctx: &amp;<span class="t">Ctx</span>) -&gt; <span class="t">Result</span>&lt;()&gt; {
-        <span class="k">let</span> user = user::<span class="f">find</span>(ctx, <span class="k">self</span>.user_id).<span class="k">await</span>?.<span class="f">or_404</span>()?;
-        ocre::mail::<span class="f">send</span>(ctx, mailers::user::<span class="f">welcome</span>(&amp;user.email)?).<span class="k">await</span>
+<pre class="panel" data-file="src/questions.rs"><span class="c">/// One vote per question and browser; voting again changes nothing.</span>
+<span class="k">async fn</span> <span class="f">vote</span>(<span class="t">State</span>(ctx): <span class="t">State</span>&lt;<span class="t">Ctx</span>&gt;, session: <span class="t">Session</span>, <span class="t">Htmx</span>(is_htmx): <span class="t">Htmx</span>, <span class="t">Path</span>(id): <span class="t">Path</span>&lt;<span class="t">i64</span>&gt;) -&gt; <span class="t">Result</span>&lt;<span class="t">Response</span>&gt; {
+    <span class="k">let</span> record = question::<span class="f">find</span>(&amp;ctx, id).<span class="k">await</span>?.<span class="f">or_404</span>()?;
+    <span class="k">let</span> event = record.<span class="f">event</span>(&amp;ctx).<span class="k">await</span>?.<span class="f">or_404</span>()?;
+    <span class="k">let mut</span> voted: <span class="t">Vec</span>&lt;<span class="t">i64</span>&gt; = session.<span class="f">get</span>(<span class="s">"voted"</span>)?.<span class="f">unwrap_or_default</span>();
+    <span class="k">if</span> !voted.<span class="f">contains</span>(&amp;id) {
+        question::<span class="f">vote</span>(&amp;ctx, id).<span class="k">await</span>?;
+        voted.<span class="f">push</span>(id);
+        session.<span class="f">insert</span>(<span class="s">"voted"</span>, &amp;voted)?;
+        <span class="f">broadcast</span>(&amp;ctx, &amp;event).<span class="k">await</span>?;
     }
+    <span class="t">Ok</span>(<span class="f">done</span>(is_htmx, &amp;event)) <span class="c">// htmx: 204, the broadcast updates the page</span>
+}</pre>
+<pre class="panel" data-file="src/questions.rs"><span class="c">/// The whole list, rendered once per audience, swapped into every open room.</span>
+<span class="k">async fn</span> <span class="f">broadcast</span>(ctx: &amp;<span class="t">Ctx</span>, event: &amp;<span class="t">Event</span>) -&gt; <span class="t">Result</span>&lt;()&gt; {
+    <span class="k">let</span> questions = question::<span class="f">for_event</span>(ctx, event.id).<span class="k">await</span>?;
+    <span class="k">let</span> audience = <span class="f">render</span>(&amp;<span class="t">ListView</span> { questions: &amp;questions, host: <span class="k">false</span> })?.0;
+    <span class="k">let</span> host = <span class="f">render</span>(&amp;<span class="t">ListView</span> { questions: &amp;questions, host: <span class="k">true</span> })?.0;
+    realtime::<span class="f">broadcast</span>(ctx, &amp;<span class="f">channel</span>(event), &amp;realtime::<span class="f">update</span>(<span class="s">"questions"</span>, &amp;audience)).<span class="k">await</span>.<span class="f">ok</span>();
+    realtime::<span class="f">broadcast</span>(ctx, &amp;<span class="f">host_channel</span>(event), &amp;realtime::<span class="f">update</span>(<span class="s">"questions"</span>, &amp;host)).<span class="k">await</span>.<span class="f">ok</span>();
+    <span class="t">Ok</span>(())
 }
 
-<span class="c">// In a handler: answered now, sent moments later.</span>
-<span class="t">SendWelcome</span> { user_id: user.id }.<span class="f">perform_later</span>(&amp;ctx).<span class="k">await</span>?;</pre>
-<pre class="panel" data-file="tests/posts.rs"><span class="k">#[test]</span>
+<span class="c">&lt;!-- templates/events/show.html: htmx connects and swaps, no custom JavaScript --&gt;</span>
+<span class="c">&lt;div hx-ext="ws" ws-connect="/realtime/event:{{ event.public_id }}"&gt;</span></pre>
+<pre class="panel" data-file="tests/questions.rs"><span class="k">#[test]</span>
 <span class="k">#[ignore = </span><span class="s">"request test: run with `ocre test --e2e`"</span><span class="k">]</span>
-<span class="k">fn</span> <span class="f">shows_a_post</span>() {
-    <span class="k">let</span> record = <span class="f">post</span>();                      <span class="c">// a factory</span>
-    <span class="k">let</span> title = record.title.<span class="f">clone</span>();
-    <span class="k">let</span> id = record.<span class="f">insert</span>();
-    <span class="t">Client</span>::<span class="f">new</span>()
-        .<span class="f">get</span>(&amp;<span class="f">format!</span>(<span class="s">"/posts/{id}"</span>))
-        .<span class="f">assert_status</span>(<span class="s">200</span>)
-        .<span class="f">assert_contains</span>(&amp;title);
+<span class="k">fn</span> <span class="f">each_browser_votes_once_per_question</span>() {
+    <span class="k">let</span> (_, event) = <span class="f">host_with_event</span>();
+    <span class="k">let mut</span> first = <span class="t">Client</span>::<span class="f">new</span>().<span class="f">htmx</span>();     <span class="c">// its own cookies, like a browser</span>
+    <span class="k">let</span> id = <span class="f">ask</span>(&amp;<span class="k">mut</span> first, &amp;event, <span class="s">"Can we get the slides?"</span>);
+    first.<span class="f">post</span>(&amp;<span class="f">format!</span>(<span class="s">"/questions/{id}/vote"</span>), &amp;()).<span class="f">assert_status</span>(<span class="s">204</span>);
+    first.<span class="f">post</span>(&amp;<span class="f">format!</span>(<span class="s">"/questions/{id}/vote"</span>), &amp;()).<span class="f">assert_status</span>(<span class="s">204</span>);
+    <span class="f">assert_eq!</span>(<span class="f">votes</span>(id), <span class="s">1</span>);
+    <span class="t">Client</span>::<span class="f">new</span>().<span class="f">htmx</span>().<span class="f">post</span>(&amp;<span class="f">format!</span>(<span class="s">"/questions/{id}/vote"</span>), &amp;()).<span class="f">assert_status</span>(<span class="s">204</span>);
+    <span class="f">assert_eq!</span>(<span class="f">votes</span>(id), <span class="s">2</span>);
 }</pre>
       </div>
     </div>
@@ -309,7 +315,7 @@ footer .grow { margin-right: auto; }
 <section class="closing">
   <div class="wrap">
     <h2>From idea to production, tonight.</h2>
-    <p class="sub">The tutorial builds a blog with comments, validations and sign-in, then deploys it.</p>
+    <p class="sub">The tutorial builds a live Q&amp;A app with accounts, realtime votes, moderation and tests, then deploys it.</p>
     <div class="cta">
       <a class="btn" href="/getting-started/tutorial.html">Start the tutorial →</a>
       <a class="pill" href="/llms.txt">llms.txt for your agent</a>

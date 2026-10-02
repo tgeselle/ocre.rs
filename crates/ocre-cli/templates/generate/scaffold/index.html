@@ -9,8 +9,7 @@
 <p><a href="{{ paths::new() }}">New <%= lower %></a></p>
 
 <% if realtime %>
-{# Live updates: htmx's WebSocket extension swaps in the rows other visitors create, edit and delete (src/realtime.rs). #}
-<script src="https://unpkg.com/htmx-ext-ws@2.0.4/dist/ws.js" crossorigin="anonymous"></script>
+{# Live updates: htmx's WebSocket extension (loaded by layout.html) swaps in the rows other visitors create, edit and delete (src/realtime.rs). #}
 <div hx-ext="ws" ws-connect="/realtime/<%= plural %>">
 <% endif %>
 <table>

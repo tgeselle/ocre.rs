@@ -37,8 +37,13 @@ pub fn new_app(args: NewArgs, cwd: &Path) -> CliResult {
 
     let starter = match args.starter {
         Some(starter) => starter,
+        None if api => ask(select("Pick a starter")
+            .item(Starter::Empty, "Empty", "a status endpoint")
+            .item(Starter::Blog, "Blog", "posts with title, body and published, full CRUD")
+            .interact())?,
         None => ask(select("Pick a starter")
-            .item(Starter::Empty, "Empty", if api { "a status endpoint" } else { "a home page" })
+            .item(Starter::Empty, "Empty", "a home page")
+            .item(Starter::Qa, "Live Q&A", "hosts create events, the audience asks and votes, live on every screen")
             .item(Starter::Blog, "Blog", "posts with title, body and published, full CRUD")
             .interact())?,
     };

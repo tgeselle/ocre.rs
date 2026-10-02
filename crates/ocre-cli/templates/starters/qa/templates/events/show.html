@@ -1,0 +1,37 @@
+{% extends "layout.html" %}
+
+{% block title %}{{ event.name }}{% endblock %}
+
+{% block content %}
+{% if let Some(notice) = flash.notice() %}<p class="notice">{{ notice }}</p>{% endif %}
+{% if let Some(alert) = flash.alert() %}<p class="alert">{{ alert }}</p>{% endif %}
+
+<section class="room-head">
+  <p class="eyebrow">Live Q&amp;A</p>
+  <h1>{{ event.name }}</h1>
+  <p class="share">Share this link: <code>{{ link }}</code></p>
+  {% if host %}
+  <div class="host-tools">
+    <p>You host this event. <a href="{{ paths::edit(event.public_id) }}">Rename</a> · <a href="{{ paths::index() }}">Your events</a></p>
+    <form action="{{ paths::delete(event.public_id) }}" method="post" hx-confirm="Delete this event and its questions?">
+      <button class="link danger" type="submit">Delete event</button>
+    </form>
+  </div>
+  {% endif %}
+</section>
+
+<form class="ask" action="{{ crate::questions::paths::ask(event.public_id) }}" method="post">
+  {% if !errors.is_empty() %}
+  <ul class="errors">
+    {% for error in errors %}<li>{{ error.full_message() }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+  <label>Your question <textarea name="body" rows="2" maxlength="280" required placeholder="Ask anything…">{{ form.body }}</textarea></label>
+  <button type="submit">Ask</button>
+</form>
+
+{# Live updates: htmx's WebSocket extension (loaded by layout.html) swaps in the list every change broadcasts (src/questions.rs, channels in src/realtime.rs). #}
+<div hx-ext="ws" ws-connect="/realtime/{{ self.channel() }}">
+  <div id="questions">{% include "questions/_list.html" %}</div>
+</div>
+{% endblock %}

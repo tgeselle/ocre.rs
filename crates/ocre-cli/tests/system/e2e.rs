@@ -1030,6 +1030,59 @@ fn generated_app_broadcasts_changes_to_websockets_on_workerd() {
     assert_eq!(receive(&mut quiet), r#"{"event":"left","from":"bob"}"#);
 }
 
+#[test]
+#[ignore = "builds WebAssembly and runs cf dev; run with --ignored"]
+fn qa_starter_runs_a_live_room_on_workerd() {
+    let sandbox = Sandbox::new();
+    sandbox.use_real_cloudflare();
+    let root = sandbox.new_app("e2e-qa", &["--starter", "qa"]);
+    let server = start(&sandbox, &root);
+    assert!(get(&server, "/").body.contains("Questions from the room"));
+
+    // A host signs up and creates an event; its page is the room.
+    let signed_up = post(&server, "/signup", &[("email", "host@example.com"), ("password", "correct horse")]);
+    assert_eq!(signed_up.status, 303);
+    let host = [("cookie", signed_up.cookie.as_str())];
+    let created = send(&server, "POST", "/events", &host, &[("name", "All-hands")]);
+    assert_eq!(created.status, 303, "{}", created.body);
+    let key = created.location.strip_prefix("/events/").unwrap().to_owned();
+    let room = get(&server, &created.location);
+    assert!(room.body.contains(&format!("ws-connect=\"/realtime/event:{key}\"")), "{}", room.body);
+    let host_room = send(&server, "GET", &created.location, &host, &[]);
+    assert!(host_room.body.contains(&format!("ws-connect=\"/realtime/host:{key}\"")), "{}", host_room.body);
+
+    // The audience's channel is open; the host's needs the host's session.
+    let mut audience = websocket(&server, &format!("/realtime/event:{key}"), &[]).unwrap();
+    let mut moderator = websocket(&server, &format!("/realtime/host:{key}"), &[("cookie", host[0].1)]).unwrap();
+    assert_eq!(websocket(&server, &format!("/realtime/host:{key}"), &[]).err(), Some(401));
+    assert_eq!(websocket(&server, "/realtime/event:nope", &[]).err(), Some(404));
+
+    // A visitor asks: both rooms get the list, only the host's with moderation.
+    let asked = post(&server, &format!("/events/{key}/questions"), &[("body", "Pizza <b>?")]);
+    assert_eq!((asked.status, asked.location.as_str()), (303, created.location.as_str()));
+    let list = receive(&mut audience);
+    assert!(list.starts_with("<div hx-swap-oob=\"innerHTML:#questions\">"), "{list}");
+    assert!(list.contains("Pizza &#60;b&#62;?") && !list.contains("Mark answered"), "{list}");
+    assert!(receive(&mut moderator).contains("Mark answered"));
+
+    // One vote per browser (the session remembers it).
+    let htmx = [("hx-request", "true")];
+    let voted = send(&server, "POST", "/questions/1/vote", &htmx, &[]);
+    assert_eq!(voted.status, 204);
+    assert!(receive(&mut audience).contains("<span>1</span>"));
+    receive(&mut moderator);
+    let again =
+        send(&server, "POST", "/questions/1/vote", &[("hx-request", "true"), ("cookie", voted.cookie.as_str())], &[]);
+    assert_eq!(again.status, 204);
+    assert!(get(&server, &created.location).body.contains("<span>1</span>"), "the second vote is ignored");
+
+    // Only the host moderates.
+    assert_eq!(post(&server, "/questions/1/answer", &[]).location, "/login");
+    let answered = send(&server, "POST", "/questions/1/answer", &host, &[]);
+    assert_eq!(answered.status, 303);
+    assert!(receive(&mut audience).contains("class=\"question answered\""));
+}
+
 /// A relaying channel: `?name=` identifies a publisher, no name only listens.
 const E2E_CHAT: &str = r#"use axum::{
     Router,

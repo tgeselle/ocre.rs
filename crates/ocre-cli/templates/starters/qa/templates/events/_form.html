@@ -1,0 +1,6 @@
+{% if !errors.is_empty() %}
+  <ul class="errors">
+    {% for error in errors %}<li>{{ error.full_message() }}</li>{% endfor %}
+  </ul>
+{% endif %}
+  <label>Name <input name="name" value="{{ form.name }}" required placeholder="Friday all-hands"></label>

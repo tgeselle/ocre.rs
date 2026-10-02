@@ -19,7 +19,7 @@ fn realtime_scaffold_sets_up_the_channel_once() {
         created.contains(&json!("templates/posts/_row.html")) && created.contains(&json!("src/realtime.rs")),
         "{report}"
     );
-    assert_eq!(report["updated"], json!(["src/lib.rs", "Cargo.toml", "cloudflare.config.ts"]));
+    assert_eq!(report["updated"], json!(["src/lib.rs", "Cargo.toml", "cloudflare.config.ts", "templates/layout.html"]));
     assert_eq!(report["next"][3], "open http://localhost:8787/posts in a second window, then create a post");
 
     let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
@@ -48,6 +48,12 @@ fn realtime_scaffold_sets_up_the_channel_once() {
     assert!(controller.contains("struct RowView<'a> {\n    post: &'a Post,\n}"), "{controller}");
     let index = fs::read_to_string(root.join("templates/posts/index.html")).unwrap();
     assert!(index.contains("<div hx-ext=\"ws\" ws-connect=\"/realtime/posts\">\n<table>"), "{index}");
+    assert!(!index.contains("<script"), "the layout loads the extension: {index}");
+    let layout = fs::read_to_string(root.join("templates/layout.html")).unwrap();
+    assert!(
+        layout.contains("crossorigin=\"anonymous\"></script>\n  <script src=\"https://unpkg.com/htmx-ext-ws@2.0.4/dist/ws.js\" crossorigin=\"anonymous\"></script>\n"),
+        "{layout}"
+    );
     assert!(index.contains("<tbody id=\"posts\">\n    {% for post in posts %}\n    {% include \"posts/_row.html\" %}"));
     assert!(index.contains("</table>\n</div>\n\n<nav class=\"pagination\">"), "{index}");
     let row = fs::read_to_string(root.join("templates/posts/_row.html")).unwrap();
@@ -79,6 +85,8 @@ fn realtime_scaffold_sets_up_the_channel_once() {
     assert_eq!(cargo.matches("\"realtime\"").count(), 1, "{cargo}");
     let lib = fs::read_to_string(root.join("src/lib.rs")).unwrap();
     assert_eq!(lib.matches("mod realtime;").count(), 1, "{lib}");
+    let layout = fs::read_to_string(root.join("templates/layout.html")).unwrap();
+    assert_eq!(layout.matches("htmx-ext-ws").count(), 1, "{layout}");
 }
 
 #[test]
@@ -105,6 +113,31 @@ fn realtime_scaffold_without_the_exports_marker_writes_nothing() {
     assert_eq!(report["error"], "cloudflare.config.ts is missing the `// ocre:exports` marker");
     assert!(report["hint"].as_str().unwrap().contains("inside `worker.exports: { ... }`"), "{report}");
     assert_eq!(fs::read_to_string(root.join("cloudflare.config.ts")).unwrap(), config);
+    assert!(!root.join("src/posts.rs").exists() && !root.join("src/realtime.rs").exists(), "nothing written");
+}
+
+#[test]
+fn realtime_scaffold_puts_the_extension_in_the_head_of_any_layout() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("live", &[]);
+    // htmx served by the app: the extension goes before </head>.
+    fs::write(
+        root.join("templates/layout.html"),
+        "<html><head>\n<script src=\"/htmx.js\"></script>\n</head><body></body></html>\n",
+    )
+    .unwrap();
+    let (report, ok) = sandbox.json(&["g", "scaffold", "Post", "title:string", "--realtime"], &root);
+    assert!(ok, "{report}");
+    let layout = fs::read_to_string(root.join("templates/layout.html")).unwrap();
+    assert!(layout.contains("<script src=\"/htmx.js\"></script>\n  <script src=\"https://unpkg.com/htmx-ext-ws@2.0.4/dist/ws.js\" crossorigin=\"anonymous\"></script>\n</head>"), "{layout}");
+
+    // No <head> at all: an error with the line to add, and nothing written.
+    let root = sandbox.new_app("bare", &[]);
+    fs::write(root.join("templates/layout.html"), "{% block content %}{% endblock %}\n").unwrap();
+    let (report, ok) = sandbox.json(&["g", "scaffold", "Post", "title:string", "--realtime"], &root);
+    assert!(!ok);
+    assert_eq!(report["error"], "templates/layout.html has no </head>");
+    assert!(report["hint"].as_str().unwrap().contains("htmx-ext-ws@2.0.4/dist/ws.js"), "{report}");
     assert!(!root.join("src/posts.rs").exists() && !root.join("src/realtime.rs").exists(), "nothing written");
 }
 

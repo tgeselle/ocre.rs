@@ -295,14 +295,14 @@ Next:
 
 The handlers parse the form into a `CommentForm` whose fields are all text (numbers are validated, so a typo shows a field error instead of a failed request), then call the model. The templates extend `layout.html`; `_form.html` holds the fields shared by `new.html` and `edit.html`.
 
-With `--realtime`, the scaffold also creates `templates/<plural>/_row.html` (one row, rendered for the page and for broadcasts), makes the handlers broadcast each change on the `<plural>` channel, and on first use creates `src/realtime.rs` (the `GET /realtime/{channel}` route and the list of channels anyone may listen to), turns on Ocre's `realtime` feature in `Cargo.toml` and declares the `CHANNELS` Durable Object binding and the `OcreChannel` export (`exports.durableObject({ storage: "sqlite" })`, SQLite-backed, as the free plan requires) in `cloudflare.config.ts`. Later `--realtime` scaffolds add their channel after `// ocre:channels` in `src/realtime.rs`:
+With `--realtime`, the scaffold also creates `templates/<plural>/_row.html` (one row, rendered for the page and for broadcasts), makes the handlers broadcast each change on the `<plural>` channel, and on first use creates `src/realtime.rs` (the `GET /realtime/{channel}` route and the list of channels anyone may listen to), turns on Ocre's `realtime` feature in `Cargo.toml`, declares the `CHANNELS` Durable Object binding and the `OcreChannel` export (`exports.durableObject({ storage: "sqlite" })`, SQLite-backed, as the free plan requires) in `cloudflare.config.ts`, and loads htmx's WebSocket extension in the `<head>` of `templates/layout.html` (after htmx's script tag, or before `</head>`; a layout without `</head>` stops the generator with the line to add). The extension belongs in the layout: a page that loaded it itself would not connect when reached through an `hx-boost` link, because htmx processes the page before the script arrives. Later `--realtime` scaffolds add their channel after `// ocre:channels` in `src/realtime.rs`:
 
 ```sh
 ocre g scaffold Message body:text --realtime --json
 ```
 
 ```json
-{"command":"generate scaffold","created":["migrations/0008_create_messages.sql","src/models/message.rs","src/messages.rs","templates/messages/index.html","templates/messages/show.html","templates/messages/new.html","templates/messages/edit.html","templates/messages/_form.html","templates/messages/_row.html","src/realtime.rs"],"next":["ocre migrate","ocre dev","open http://localhost:8787/messages","open http://localhost:8787/messages in a second window, then create a message"],"ok":true,"updated":["src/models/mod.rs","src/lib.rs","Cargo.toml","cloudflare.config.ts"]}
+{"command":"generate scaffold","created":["migrations/0008_create_messages.sql","src/models/message.rs","src/messages.rs","templates/messages/index.html","templates/messages/show.html","templates/messages/new.html","templates/messages/edit.html","templates/messages/_form.html","templates/messages/_row.html","src/realtime.rs"],"next":["ocre migrate","ocre dev","open http://localhost:8787/messages","open http://localhost:8787/messages in a second window, then create a message"],"ok":true,"updated":["src/models/mod.rs","src/lib.rs","Cargo.toml","cloudflare.config.ts","templates/layout.html"]}
 ```
 
 With attachments, the form becomes a file upload and `cloudflare.config.ts` gets the `STORAGE` bucket:

@@ -1,6 +1,7 @@
 //! The app side of `ocre::realtime`, set up by `ocre g scaffold ... --realtime`.
 //! The first use turns on Ocre's `realtime` feature, binds and exports the
-//! `OcreChannel` Durable Object in cloudflare.config.ts and writes
+//! `OcreChannel` Durable Object in cloudflare.config.ts, loads htmx's
+//! WebSocket extension in `templates/layout.html` and writes
 //! `src/realtime.rs` (the `/realtime/{channel}` route and who may listen);
 //! later uses add their channel to it.
 
@@ -11,6 +12,14 @@ use crate::{
 };
 
 const CHANNELS_MARKER: &str = "// ocre:channels";
+
+/// htmx's WebSocket extension, loaded by the layout. A page that loaded it
+/// itself would race on boosted navigations: htmx processes `ws-connect` in
+/// the swapped page before the script arrives, and never connects.
+const WS_SCRIPT: &str =
+    r#"<script src="https://unpkg.com/htmx-ext-ws@2.0.4/dist/ws.js" crossorigin="anonymous"></script>"#;
+/// The layout line the extension goes after.
+const HTMX_SCRIPT: &str = r#"<script src="https://unpkg.com/htmx.org@"#;
 
 /// Exported once. Deploying creates the namespace from the export, so
 /// `ocre deploy` has nothing to create beforehand.
@@ -49,6 +58,11 @@ fn add_channel_arm(edits: &mut Edits, arm: &str, command: &str) -> Result<(), Cl
         );
         edits.update(config::FILE, config.insert(ENV_MARKER, &binding)?);
     }
+    if let Some(layout) = edits.read(LAYOUT)?
+        && !layout.contains(WS_SCRIPT)
+    {
+        edits.update(LAYOUT, with_ws_script(&layout)?);
+    }
     match edits.read("src/realtime.rs")? {
         Some(module) if module.contains(arm) => {}
         Some(module) => {
@@ -65,6 +79,25 @@ fn add_channel_arm(edits: &mut Edits, arm: &str, command: &str) -> Result<(), Cl
         }
     }
     Ok(())
+}
+
+const LAYOUT: &str = "templates/layout.html";
+
+/// `layout` with [`WS_SCRIPT`] on the line after htmx's script tag, or
+/// before `</head>` when htmx comes from elsewhere.
+fn with_ws_script(layout: &str) -> Result<String, CliError> {
+    if let Some(start) = layout.find(HTMX_SCRIPT) {
+        let line_end = layout[start..].find('\n').map_or(layout.len(), |end| start + end);
+        let line_start = layout[..start].rfind('\n').map_or(0, |newline| newline + 1);
+        let indent = &layout[line_start..start];
+        let indent = &indent[..indent.len() - indent.trim_start().len()];
+        return Ok(format!("{}\n{indent}{WS_SCRIPT}{}", &layout[..line_end], &layout[line_end..]));
+    }
+    let head = layout.find("</head>").ok_or_else(|| {
+        CliError::new("templates/layout.html has no </head>")
+            .hint(format!("add `{WS_SCRIPT}` to the <head> of your layout, after htmx, then run the generator again"))
+    })?;
+    Ok(format!("{}  {WS_SCRIPT}\n{}", &layout[..head], &layout[head..]))
 }
 
 fn module_rs(arm: &str, command: &str) -> String {

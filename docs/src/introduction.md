@@ -6,10 +6,10 @@ An Ocre app is one Worker compiled to WebAssembly. It stores data in D1 (SQLite)
 
 ```sh
 cargo install --git https://github.com/tgeselle/ocre.rs ocre-cli
-ocre new blog --starter blog --yes
-cd blog
-ocre dev        # http://localhost:8787/posts
-ocre deploy     # https://blog.<your-subdomain>.workers.dev
+ocre new qa --starter qa --yes
+cd qa
+ocre dev        # http://localhost:8787: a live Q&A app
+ocre deploy     # https://qa.<your-subdomain>.workers.dev
 ```
 
 Status: early. The APIs described here are the ones in the repository's `main` branch; there is no stable release yet.
@@ -18,7 +18,7 @@ Status: early. The APIs described here are the ones in the repository's `main` b
 
 | Part | Read it when | Pages |
 |---|---|---|
-| Getting started | You are new: install the tools, then build and deploy a blog step by step | [Installation](getting-started/installation.md), [Tutorial](getting-started/tutorial.md) |
+| Getting started | You are new: install the tools, then build and deploy a live Q&A app step by step | [Installation](getting-started/installation.md), [Tutorial](getting-started/tutorial.md) |
 | Guides | You need to do one thing (add a model, send email, run a job...) | One page per domain, from [Models](guides/models.md) to [Deployment](guides/deployment.md) |
 | Reference | You need exact facts: every command and flag, field types, configuration keys, limits | [CLI](reference/cli.md), [Generators](reference/generators.md), [Field types](reference/field-types.md), [Configuration](reference/configuration.md), [Limits](reference/limits.md), [API index](api-index.md) |
 | Explanations | You want to know why Ocre works the way it does | [Architecture](explanations/architecture.md), [Generated code](explanations/generated-code.md), [Security model](explanations/security-model.md), [Cost model](explanations/cost-model.md) |

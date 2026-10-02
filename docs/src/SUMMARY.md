@@ -5,7 +5,7 @@
 # Getting started
 
 - [Installation](getting-started/installation.md)
-- [Tutorial: a blog](getting-started/tutorial.md)
+- [Tutorial: a live Q&A app](getting-started/tutorial.md)
 
 # Guides
 

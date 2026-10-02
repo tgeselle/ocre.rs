@@ -1,0 +1,20 @@
+{% extends "layout.html" %}
+
+{% block title %}Your events{% endblock %}
+
+{% block content %}
+<h1>Your events</h1>
+{% if let Some(notice) = flash.notice() %}<p class="notice">{{ notice }}</p>{% endif %}
+{% if let Some(alert) = flash.alert() %}<p class="alert">{{ alert }}</p>{% endif %}
+<p><a class="button" href="{{ paths::new() }}">New event</a></p>
+
+{% if events.is_empty() %}
+<p class="empty">No events yet: create one, then share its link with your audience.</p>
+{% else %}
+<ul class="events">
+  {% for event in events %}
+  <li><a href="{{ paths::show(event.public_id) }}">{{ event.name }}</a> <span class="muted">created {{ event.created_at }}</span></li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% endblock %}

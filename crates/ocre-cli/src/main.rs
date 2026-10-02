@@ -27,6 +27,7 @@ mod routes;
 mod schedules;
 mod secret;
 mod secrets;
+mod starter;
 mod stats;
 mod template;
 mod testing;

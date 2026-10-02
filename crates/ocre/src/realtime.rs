@@ -32,10 +32,15 @@
 //! ```
 //!
 //! In the page, htmx's WebSocket extension connects and swaps each message
-//! into the element with the same `id` (`hx-swap-oob`), without custom JavaScript:
+//! into the element with the same `id` (`hx-swap-oob`), without custom
+//! JavaScript. Load the extension in the layout's `<head>`, after htmx: a
+//! page that loaded it itself would not connect when reached through an
+//! `hx-boost` link.
 //!
 //! ```html
+//! <!-- templates/layout.html, in <head> -->
 //! <script src="https://unpkg.com/htmx-ext-ws@2.0.4/dist/ws.js" crossorigin="anonymous"></script>
+//! <!-- the page -->
 //! <div hx-ext="ws" ws-connect="/realtime/posts">
 //!   <table><tbody id="posts">...<tr id="post_1">...</tr></tbody></table>
 //! </div>

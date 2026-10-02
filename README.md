@@ -92,7 +92,7 @@ explanations, each page also as Markdown (`<page>.md`), with
 | Flag | Effect | Default without prompts |
 |---|---|---|
 | `--api` / `--full-stack` | API only: JSON, no templates, Ocre's `html` feature off (like `rails new --api`) | full-stack |
-| `--starter empty\|blog` | `blog` adds a `Post` resource (title, body, published) | `empty` |
+| `--starter empty\|qa\|blog` | `qa` builds the tutorial's live Q&A app (accounts, events, live questions and votes; full-stack only); `blog` adds a `Post` resource (title, body, published) | `empty` |
 | `--login` / `--no-login` | Log in to Cloudflare if needed (opens a browser) | no login |
 | `--account-id <id>` | Account to deploy to; required when the login has several | none |
 | `--git` / `--no-git` | `git init` | no git |

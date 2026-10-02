@@ -43,6 +43,7 @@ ocre g scaffold Message body:text --realtime
   update  src/lib.rs
   update  Cargo.toml
   update  cloudflare.config.ts
+  update  templates/layout.html
 
 Next:
   ocre migrate
@@ -56,11 +57,12 @@ Next:
 | Piece | What it does |
 |---|---|
 | `templates/messages/_row.html` | One table row with `id="message_<id>"`, included by the index and rendered for broadcasts |
-| `templates/messages/index.html` | Loads the htmx ws extension and wraps the table in `<div hx-ext="ws" ws-connect="/realtime/messages">`; the `<tbody>` has `id="messages"` |
+| `templates/messages/index.html` | Wraps the table in `<div hx-ext="ws" ws-connect="/realtime/messages">`; the `<tbody>` has `id="messages"` |
 | `src/messages.rs` | After a successful create, broadcasts `prepend("messages", row)`; after update, the new row (same `id`, so it replaces the old one); after delete, `remove("message_<id>")` |
 | `src/realtime.rs` (first use) | `GET /realtime/{channel}` routed to `connect`, which lists the channels anyone may open; later `--realtime` scaffolds add their channel under `// ocre:channels` |
 | `Cargo.toml` (first use) | Ocre's `realtime` feature |
 | `cloudflare.config.ts` (first use) | The `CHANNELS` Durable Object binding and the `OcreChannel` export |
+| `templates/layout.html` (first use) | `<script src="https://unpkg.com/htmx-ext-ws@2.0.4/dist/ws.js" crossorigin="anonymous"></script>` after htmx's script tag, so every page can connect. A page that loaded the extension itself would not connect when reached through an `hx-boost` link: htmx processes the swapped page before the script arrives |
 
 The `cloudflare.config.ts` entries (for an app named `chat`):
 
@@ -79,8 +81,7 @@ OcreChannel: exports.durableObject({ storage: "sqlite" }),
 The generated index page (`templates/messages/index.html`):
 
 ```html
-{# Live updates: htmx's WebSocket extension swaps in the rows other visitors create, edit and delete (src/realtime.rs). #}
-<script src="https://unpkg.com/htmx-ext-ws@2.0.4/dist/ws.js" crossorigin="anonymous"></script>
+{# Live updates: htmx's WebSocket extension (loaded by layout.html) swaps in the rows other visitors create, edit and delete (src/realtime.rs). #}
 <div hx-ext="ws" ws-connect="/realtime/messages">
 <table>
   <thead>
@@ -446,7 +447,8 @@ The scaffold only writes app code around three framework pieces, so any app, API
 1. Turn on the feature in `Cargo.toml`: `ocre = { ..., features = ["realtime"] }` (see [Configuration](../reference/configuration.md#ocre-features)).
 2. Add the `CHANNELS` binding and the `OcreChannel` export shown above to `cloudflare.config.ts`.
 3. Add a `connect` route like `src/realtime.rs` above (any path; `WebSocketUpgrade` is the extractor) and merge it in `routes()`.
-4. Broadcast from handlers or jobs. Non-htmx clients usually want JSON: `realtime::broadcast(&ctx, "orders", &ocre::serde_json::json!({"id": 12, "status": "paid"}).to_string())`. `WebSocketUpgrade` rejects a request without `Upgrade: websocket` with a 400 rendered as JSON in API-only apps.
+4. For htmx pages, load the WebSocket extension in the `<head>` of `templates/layout.html`, as shown in the table above.
+5. Broadcast from handlers or jobs. Non-htmx clients usually want JSON: `realtime::broadcast(&ctx, "orders", &ocre::serde_json::json!({"id": 12, "status": "paid"}).to_string())`. `WebSocketUpgrade` rejects a request without `Upgrade: websocket` with a 400 rendered as JSON in API-only apps.
 
 A browser client without htmx is a plain `new WebSocket("wss://<host>/realtime/orders")` with an `onmessage` handler; clients do not need to send anything.
 
