@@ -7,7 +7,13 @@
 use minijinja::Value;
 use serde::Serialize;
 
-use super::{Edits, fields::parse_model_fields, model::ensure_model, register_routes, templates::render};
+use super::{
+    Edits,
+    fields::{FieldType, parse_model_fields},
+    model::ensure_model,
+    register_routes,
+    templates::render,
+};
 use crate::{
     CliResult,
     names::{ModelNames, RUST_KEYWORDS, humanize, is_identifier, split_words},
@@ -141,6 +147,8 @@ struct ResourceContext<'a> {
     plural: &'a str,
     human_singular: &'a str,
     human_plural: &'a str,
+    /// The field links use: `id`, or `public_id` with `public_id:token`.
+    key: &'a str,
     fields: Vec<ResourceField>,
 }
 
@@ -151,8 +159,11 @@ pub fn resource(project: &Project, name: &str, specs: &[String], api: bool) -> C
     let command = format!("ocre g resource {name} {}{}", specs.join(" "), if api { " --api" } else { "" });
     let mut edits = Edits::new(project);
     ensure_model(&mut edits, &names, &fields, &many, &command)?;
+    let public_id = fields.iter().any(|f| f.ty == FieldType::PublicId);
+    let fields: Vec<_> = fields.into_iter().filter(|f| f.ty != FieldType::PublicId).collect();
     let ModelNames { model, singular, plural, human_singular, human_plural } = &names;
     let context = ResourceContext {
+        key: if public_id { "public_id" } else { "id" },
         command: &command,
         model,
         singular,
@@ -166,7 +177,10 @@ pub fn resource(project: &Project, name: &str, specs: &[String], api: bool) -> C
     };
     let module = if json { format!("{plural}_api") } else { plural.clone() };
     let values = Value::from_serialize(&context);
-    let source = render(&edits, if json { "resource/api.rs" } else { "resource/html.rs" }, &values)?;
+    let mut source = render(&edits, if json { "resource/api.rs" } else { "resource/html.rs" }, &values)?;
+    if public_id {
+        source = super::public_id::resource(&source, &names, json);
+    }
     edits.create(&format!("src/{module}.rs"), source)?;
     if !json {
         for view in ["index", "show"] {

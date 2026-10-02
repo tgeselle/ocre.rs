@@ -43,6 +43,7 @@ on stdout (`"ok": true|false`, plus `error` and `hint` on failure).
 | Receive email (Email Routing) | `ocre g mailbox` |
 | Signed webhook from a service (payments, GPU jobs), each event once | `ocre g webhook payments` (`--standard` for Standard Webhooks) |
 | Work a Worker cannot do (ffmpeg, GPU, AI): submit to a service, track its state | `ocre g external_job upscale video_id:integer` |
+| Unguessable ids in URLs (`/videos/Xq3v9L...`, not `/videos/42`) | add `public_id:token` to the scaffold/api/resource fields |
 | Job in steps, one run per key at a time | `ocre g job ProcessVideo video_id:integer --steps fetch,split,notify --lock video_id` |
 | Background job (Cloudflare Queues) | `ocre g job SendWelcome user_id:integer` |
 | Job on its own queue (never waits behind others) | `ocre g job SendCode user_id:integer --queue urgent` |

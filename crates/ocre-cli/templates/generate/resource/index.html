@@ -7,7 +7,7 @@
 
 <ul>
   {% for <%= singular %> in <%= plural %> %}
-  <li><a href="{{ paths::show(<%= singular %>.id) }}"><%= human_singular %> {{ <%= singular %>.id }}</a></li>
+  <li><a href="{{ paths::show(<%= singular %>.<%= key %>) }}"><%= human_singular %> {{ <%= singular %>.<%= key %> }}</a></li>
   {% endfor %}
 </ul>
 {% endblock %}

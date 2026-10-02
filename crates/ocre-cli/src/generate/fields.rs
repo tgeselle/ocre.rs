@@ -82,7 +82,7 @@ pub(super) const RESERVED: &[&str] = &[
     "values",
 ];
 
-pub(super) const TYPES: &str = "string, text, rich_text, integer (int, small_int, big_int), float (double), decimal, boolean (bool), date, time, datetime (date_time), uuid, references, attachment, json (jsonb), enum:<value>,<value>..., polymorphic:<model>,<model>..., attachments (many files, `photos:attachments`); `lock_version:integer` turns on optimistic locking";
+pub(super) const TYPES: &str = "string, text, rich_text, integer (int, small_int, big_int), float (double), decimal, boolean (bool), date, time, datetime (date_time), uuid, references, attachment, json (jsonb), enum:<value>,<value>..., polymorphic:<model>,<model>..., attachments (many files, `photos:attachments`); `lock_version:integer` turns on optimistic locking; `public_id:token` puts a random id in URLs instead of the integer one";
 
 /// Content types an attachment accepts until the app edits its `Rules`:
 /// common images, PDF and plain text, all safe to display inline.
@@ -127,6 +127,9 @@ pub(super) enum FieldType {
     /// `lock_version:integer`: a counter checked and bumped by every update
     /// (Rails' optimistic locking).
     LockVersion,
+    /// `public_id:token`: a random, unique text set when the row is created
+    /// and used in URLs instead of the integer `id`.
+    PublicId,
 }
 
 impl FieldType {
@@ -253,6 +256,27 @@ impl Field {
             return Err(CliError::new(format!("field name `{name}` is reserved")).hint(
                 "`id`, `created_at` and `updated_at` are generated; Rust and SQL keywords are not allowed. Pick another name, e.g. `kind` for `type`",
             ));
+        }
+        // A random public id, used in URLs instead of the integer `id`.
+        match (name, ty_name) {
+            ("public_id", "token") if !optional && !unique => {
+                return Ok(Self {
+                    name: name.to_owned(),
+                    ty: FieldType::PublicId,
+                    optional,
+                    unique: true,
+                    target: None,
+                    enumeration: None,
+                    polymorphic: None,
+                });
+            }
+            ("public_id", _) | (_, "token") => {
+                return Err(CliError::new("a public id is `public_id:token`").hint(
+                    "`public_id:token` gives each row a random id used in URLs instead of the integer one; write it \
+                     without `?` or `^`",
+                ));
+            }
+            _ => {}
         }
         let ty = FieldType::parse(ty_name).ok_or_else(|| {
             CliError::new(format!("unknown field type `{ty_name}` for `{name}`"))
@@ -399,7 +423,8 @@ impl Field {
             | FieldType::Time
             | FieldType::DateTime
             | FieldType::Decimal
-            | FieldType::Uuid => "String",
+            | FieldType::Uuid
+            | FieldType::PublicId => "String",
             FieldType::Integer | FieldType::References | FieldType::LockVersion => "i64",
             FieldType::Float => "f64",
             FieldType::Boolean => "bool",

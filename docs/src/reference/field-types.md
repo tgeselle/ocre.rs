@@ -41,6 +41,7 @@ Field names are snake_case identifiers starting with a letter (`published_at`). 
 | `attachment` | four columns: `<name>_key`, `_filename`, `_content_type` (`TEXT`), `_size` (`INTEGER`) | `ocre::storage::Upload` in inputs; four columns plus an `Attachment` accessor in the record | `<input type="file" accept="...">` | the four columns | the four columns (read only) | size and content type (`v.file`); "can't be blank" when required |
 | `json` | `TEXT CHECK (json_valid(<name>))` | `ocre::serde_json::Value` | `<textarea rows="5" spellcheck="false" placeholder="{}">` | the JSON value itself | `JSON` scalar | forms: "is not valid JSON"; cannot be unique |
 | `enum:<a>,<b>...` | `TEXT CHECK (<name> IN ('a', 'b'))` | a generated Rust enum (`Status`) | `<select>` with one `<option>` per value | string, one of the values | not supported (`--graphql` refuses it) | forms: "is not included in the list"; cannot be unique |
+| `public_id:token` | `TEXT NOT NULL` with a unique index | `String` in the record (set by `create`), absent from `New` and `Changes`; the record's `id` is not serialized | none | not sent | not supported with `--graphql` | none |
 | `lock_version:integer` | `INTEGER NOT NULL DEFAULT 0` | `i64` in the record, `Option<i64>` in `Changes`, absent from `New` | `<input type="hidden">` | number | `Int` (patch only) | none; `update` answers 409 when stale |
 | `polymorphic:<a>,<b>...` | `<name>_type TEXT CHECK (... IN ('a', 'b'))` and `<name>_id INTEGER`, indexed together | a generated enum (`CommentableType`) and `i64`; an accessor returning `Commentable` | `<select>` and `<input type="number">` | string and number | not supported | "must exist" in `create`/`update` |
 | `attachments` | a child table `<model>_<singular>` | a child model; `attach_<name>` / `replace_<name>` / `purge_<name>` on the parent | the show page's `<input type="file" multiple>` | `POST/GET/DELETE /api/<plural>/{id}/<name>` | not supported | the child's `FILE` rules |
@@ -390,6 +391,30 @@ pub lock_version: Option<i64>,
 - `update` adds `lock_version = lock_version + 1` and `WHERE ... AND (?N IS NULL OR lock_version = ?N)`; a stale version is `Error::Conflict` (409), `None` skips the check.
 - Forms: a hidden input on the edit page. JSON: returned with the record, sent back in `PATCH` bodies. GraphQL: `lockVersion` in the patch input only.
 - On an existing table: `ocre g migration add_lock_version_to_<table> lock_version:integer`. See [Models and migrations](../guides/models.md#optimistic-locking).
+
+## public_id
+
+`public_id:token` gives each row a random public id, 22 URL-safe characters (`ocre::token::public_id()`, 128 bits), set by `create`, and the generated controllers put it in URLs instead of the integer `id`: `/videos/Xq3v9Lr0TzK1mB7aYw2PcQ` instead of `/videos/42`, so pages cannot be found by counting and URLs do not reveal how many rows exist. It is the only way to write this field name, and the only use of the `token` type (`public_id:string`, `code:token` or `public_id:token^` fail with ``error: a public id is `public_id:token` ``).
+
+```sql
+public_id TEXT NOT NULL,
+-- ...
+CREATE UNIQUE INDEX index_videos_on_public_id ON videos (public_id);
+```
+
+```rust
+#[serde(skip_serializing)]
+pub id: i64,
+pub public_id: String,
+// ...
+pub async fn find_by_public_id(ctx: &Ctx, public_id: &str) -> Result<Option<Video>>
+```
+
+- The model keeps the integer `id` for references, `find`, `update` and `delete`; JSON leaves it out.
+- `ocre g scaffold`, `ocre g api` and `ocre g resource` route `/{plural}/{id}` with the public id: an `Id` extractor in the controller looks it up (one D1 query) and gives handlers `Id(id, key)`, the integer id and the public id. Links (`paths::show(video.public_id)`), redirects and the files of `photos:attachments` (whose rows get a public id too) use public ids. A public id no row has is a 404.
+- The generated request tests read `record.public_id` from the factory, which sets a random one.
+- On an existing table, `ocre g migration add_public_id_to_<table> public_id:token` adds the column, gives every row a random id (32 hex digits) and adds the unique index.
+- `ocre g api ... --graphql` refuses it for now (GraphQL nodes are keyed by the integer id).
 
 ## Modifiers
 

@@ -23,6 +23,11 @@ pub fn api(project: &Project, name: &str, specs: &[String], graphql: bool) -> Cl
             field.name
         )));
     }
+    if graphql && fields.iter().any(|f| f.ty == FieldType::PublicId) {
+        return Err(CliError::new("`public_id:token` is not supported with --graphql yet").hint(
+            "GraphQL nodes are keyed by the integer id: generate the JSON API without --graphql, or drop `public_id:token`",
+        ));
+    }
     if let Some(file) = fields.iter().find(|f| f.is_attachment() && !f.optional) {
         return Err(CliError::new(format!("attachment `{}` must be optional in a JSON API", file.name)).hint(format!(
             "JSON cannot carry a file, so create cannot require one: use `{0}:attachment?`, then upload with `curl -X PUT -F {0}=@file http://localhost:8787/api/<plural>/1/{0}`",
@@ -33,9 +38,16 @@ pub fn api(project: &Project, name: &str, specs: &[String], graphql: bool) -> Cl
     let module = format!("{}_api", names.plural);
     let mut edits = Edits::new(project);
     ensure_model(&mut edits, &names, &fields, &many, &command)?;
-    edits.create(&format!("src/{module}.rs"), module_rs(&names, &fields, &many, &command, graphql))?;
+    // `public_id:token`: URLs carry it instead of the integer id.
+    let public_id = fields.iter().any(|f| f.ty == FieldType::PublicId);
+    let fields: Vec<Field> = fields.into_iter().filter(|f| f.ty != FieldType::PublicId).collect();
+    let mut source = module_rs(&names, &fields, &many, &command, graphql);
+    if public_id {
+        source = super::public_id::api(&source, &names, &many);
+    }
+    edits.create(&format!("src/{module}.rs"), source)?;
     register_routes(&mut edits, &module)?;
-    super::test_files::api_tests(&mut edits, &names, &fields, &command)?;
+    super::test_files::api_tests(&mut edits, &names, &fields, &command, public_id)?;
     if graphql {
         let cargo = edits.read("Cargo.toml")?.unwrap_or_default();
         edits.update("Cargo.toml", with_graphql(&cargo)?);

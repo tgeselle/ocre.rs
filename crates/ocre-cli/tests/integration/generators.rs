@@ -800,3 +800,50 @@ fn external_job_adds_its_table_webhook_sweep_and_settings() {
         "{report}"
     );
 }
+
+#[test]
+fn public_ids_keep_integer_ids_out_of_urls() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    ok(
+        &sandbox,
+        &["g", "scaffold", "Video", "title:string", "photos:attachments", "public_id:token", "--realtime"],
+        &root,
+    );
+    let table = read(&root, "migrations/0001_create_videos.sql");
+    assert!(table.contains("public_id TEXT NOT NULL,") && table.contains("CREATE UNIQUE INDEX"), "{table}");
+    assert!(read(&root, "migrations/0002_create_video_photos.sql").contains("public_id TEXT NOT NULL"), "files too");
+    let model = read(&root, "src/models/video.rs");
+    assert!(
+        model.contains("    #[serde(skip_serializing)]\n    pub id: i64,")
+            && model.contains("pub async fn find_by_public_id(")
+    );
+    assert!(model.contains("INSERT INTO videos (public_id, title) VALUES (?1, ?2) RETURNING *\", params![ocre::token::public_id(), new.title]"), "{model}");
+    let controller = read(&root, "src/videos.rs");
+    assert!(!controller.contains("Path<i64>") && !controller.contains("(i64, i64)"), "{controller}");
+    assert!(controller.contains("async fn show(State(ctx): State<Ctx>, flash: Flash, Id(id, ..): Id)"), "{controller}");
+    assert!(controller.contains("Redirect::to(&paths::show(&record.public_id))"));
+    for view in ["index", "show", "_row"] {
+        let html = read(&root, &format!("templates/videos/{view}.html"));
+        assert!(!html.contains(".id)") && !html.contains(".id }}"), "{view}: {html}");
+    }
+    assert!(read(&root, "tests/videos.rs").contains("let id = record.public_id.clone();"));
+
+    ok(&sandbox, &["g", "api", "Clip", "name:string", "public_id:token"], &root);
+    let api = read(&root, "src/clips_api.rs");
+    assert!(api.contains("type Rejection = ocre::ApiError;") && !api.contains("Path<i64>"), "{api}");
+    assert!(read(&root, "tests/api_clips.rs").contains("assert!(shown.get(\"id\").is_none()"));
+    for (args, error) in [
+        (
+            &["g", "api", "Gql", "public_id:token", "--graphql"][..],
+            "`public_id:token` is not supported with --graphql yet",
+        ),
+        (&["g", "model", "A", "public_id:string"], "a public id is `public_id:token`"),
+        (&["g", "model", "A", "code:token"], "a public id is `public_id:token`"),
+        (&["g", "model", "A", "public_id:token^"], "a public id is `public_id:token`"),
+    ] {
+        assert_eq!(fails(&sandbox, args, &root)["error"], error);
+    }
+    ok(&sandbox, &["g", "resource", "Tag", "label:string", "public_id:token"], &root);
+    assert!(read(&root, "templates/tags/index.html").contains("paths::show(tag.public_id)"));
+}

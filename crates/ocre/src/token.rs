@@ -57,6 +57,25 @@ pub fn generate() -> String {
     URL_SAFE_NO_PAD.encode(random_bytes::<TOKEN_BYTES>())
 }
 
+/// A random id for URLs: 22 URL-safe characters (128 bits), the value of a
+/// `public_id:token` column. Unguessable, so a page at `/videos/<public_id>`
+/// cannot be found by counting, and it says nothing about how many rows exist.
+///
+/// # Panics
+///
+/// As [`generate`].
+///
+/// # Examples
+///
+/// ```
+/// let id = ocre::token::public_id();
+/// assert_eq!(id.len(), 22);
+/// assert!(id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+/// ```
+pub fn public_id() -> String {
+    URL_SAFE_NO_PAD.encode(random_bytes::<16>())
+}
+
 /// SHA-256 of `token` as 64 lowercase hex characters: the value to store and look up.
 ///
 /// Query by it (`WHERE digest = ?1`), so the database never holds the token

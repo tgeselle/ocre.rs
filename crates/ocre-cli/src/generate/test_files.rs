@@ -114,6 +114,8 @@ impl<'a> FactoryField<'a> {
             FieldType::Time => ("String", "\"12:00\".to_owned()".to_owned()),
             FieldType::DateTime => ("String", "\"2026-01-01 12:00:00\".to_owned()".to_owned()),
             FieldType::Uuid => ("String", "format!(\"00000000-0000-4000-8000-{n:012}\")".to_owned()),
+            // Random: unique across test files sharing the test database.
+            FieldType::PublicId => ("String", "ocre::token::public_id()".to_owned()),
             FieldType::Json => ("Value", "json!({})".to_owned()),
             FieldType::Enum => {
                 let first = &field.enumeration.as_ref().expect("enum fields have values").values[0];
@@ -182,7 +184,10 @@ fn factory_rs(
         writeln!(declarations, "    pub {name}: {},", factory_field.ty).expect("writing to a String");
         writeln!(defaults, "        {name}: {},", factory_field.default).expect("writing to a String");
         writeln!(values, "            (\"{name}\", {}),", factory_field.column_value()).expect("writing to a String");
-        writeln!(json_fields, "            \"{name}\": self.{name},").expect("writing to a String");
+        // The API sets the public id itself.
+        if field.ty != FieldType::PublicId {
+            writeln!(json_fields, "            \"{name}\": self.{name},").expect("writing to a String");
+        }
     }
     let mut attachment_values = String::new();
     for field in fields.iter().filter(|field| field.is_attachment() && !field.optional) {
@@ -280,11 +285,21 @@ pub(super) fn scaffold_tests(
     names: &ModelNames,
     fields: &[Field],
     command: &str,
+    public_id: bool,
 ) -> Result<(), CliError> {
     let ModelNames { model, singular, plural, human_plural, human_singular } = names;
     let text = text_field(fields);
+    // With a public id, URLs carry it: read it before the row is inserted.
+    let (show_insert, insert) = if public_id {
+        (
+            "    let id = record.public_id.clone();\n    record.insert();".to_owned(),
+            format!("let record = {singular}();\n    let id = record.public_id.clone();\n    record.insert();"),
+        )
+    } else {
+        ("    let id = record.insert();".to_owned(), format!("let id = {singular}().insert();"))
+    };
     // Clippy's `needless_update`: no `..factory()` when the text field is the only one.
-    let rest = if fields.iter().filter_map(FactoryField::new).count() > 1 {
+    let rest = if fields.iter().filter_map(FactoryField::new).count() + usize::from(public_id) > 1 {
         format!(", ..{}()", names.singular)
     } else {
         String::new()
@@ -310,14 +325,14 @@ fn lists_{plural}() {{
 {IGNORE}
 fn shows_a_{singular}() {{
     let record = {singular}();
-{keep_text}    let id = record.insert();
+{keep_text}{show_insert}
     Client::new().get(&format!("/{plural}/{{id}}")).assert_status(200){assert_text};
 }}
 
 #[test]
 {IGNORE}
 fn deletes_a_{singular}() {{
-    let id = {singular}().insert();
+    {insert}
     let mut client = Client::new();
     client.post(&format!("/{plural}/{{id}}/delete"), &()).assert_redirect_to("/{plural}");
     assert_eq!(client.flash("notice").as_deref(), Some("{human_singular} was successfully destroyed."));
@@ -346,7 +361,7 @@ fn creates_a_{singular}() {{
 #[test]
 {IGNORE}
 fn updates_a_{singular}() {{
-    let id = {singular}().insert();
+    {insert}
     let changes = {singular}();
 {keep_changed}    let mut client = Client::new();
     client.post(&format!("/{plural}/{{id}}"), &changes.form()).assert_redirect_to(&format!("/{plural}/{{id}}"));
@@ -383,11 +398,12 @@ pub(super) fn api_tests(
     names: &ModelNames,
     fields: &[Field],
     command: &str,
+    public_id: bool,
 ) -> Result<(), CliError> {
     let ModelNames { model, singular, plural, human_plural, .. } = names;
     let text = text_field(fields);
     // Clippy's `needless_update`: no `..factory()` when the text field is the only one.
-    let rest = if fields.iter().filter_map(FactoryField::new).count() > 1 {
+    let rest = if fields.iter().filter_map(FactoryField::new).count() + usize::from(public_id) > 1 {
         format!(", ..{}()", names.singular)
     } else {
         String::new()
@@ -462,6 +478,17 @@ fn rejects_an_invalid_{singular}() {{
 "#
         )
         .expect("writing to a String");
+    }
+    if public_id {
+        // URLs and JSON carry the public id: read it from the factory before inserting.
+        tests = tests
+            .replace(
+                &format!("    let id = {singular}().insert();"),
+                &format!("    let record = {singular}();\n    let id = record.public_id.clone();\n    record.insert();"),
+            )
+            .replace("assert_eq!(shown[\"id\"], id);", "assert_eq!(shown[\"public_id\"], id);\n    assert!(shown.get(\"id\").is_none(), \"the integer id stays internal\");")
+            .replace("let id = created[\"id\"].as_i64().expect(\"the new id\");", "let id = created[\"public_id\"].as_str().expect(\"the new public id\");")
+            .replace("assert_eq!(updated[\"id\"], id);", "assert_eq!(updated[\"public_id\"], id);");
     }
     edits.create(&format!("tests/api_{plural}.rs"), tests)
 }

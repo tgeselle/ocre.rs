@@ -22,7 +22,7 @@
 <% if realtime %>
     {% include "<%= plural %>/_row.html" %}
 <% else %>
-    <tr><% for field in fields if not field.hidden %><td><%= field.display %></td><% endfor %><td><a href="{{ paths::show(<%= singular %>.id) }}">Show</a> <a href="{{ paths::edit(<%= singular %>.id) }}">Edit</a></td></tr>
+    <tr><% for field in fields if not field.hidden %><td><%= field.display %></td><% endfor %><td><a href="{{ paths::show(<%= singular %>.<%= key %>) }}">Show</a> <a href="{{ paths::edit(<%= singular %>.<%= key %>) }}">Edit</a></td></tr>
 <% endif %>
     {% endfor %}
   </tbody>

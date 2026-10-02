@@ -1,9 +1,9 @@
 {% extends "layout.html" %}
 
-{% block title %}<%= human_singular %> {{ <%= singular %>.id }}{% endblock %}
+{% block title %}<%= human_singular %> {{ <%= singular %>.<%= key %> }}{% endblock %}
 
 {% block content %}
-<h1><%= human_singular %> {{ <%= singular %>.id }}</h1>
+<h1><%= human_singular %> {{ <%= singular %>.<%= key %> }}</h1>
 {% if let Some(notice) = flash.notice() %}<p class="notice">{{ notice }}</p>{% endif %}
 {% if let Some(alert) = flash.alert() %}<p class="alert">{{ alert }}</p>{% endif %}
 
@@ -20,20 +20,20 @@
 <ul>
 {% for file in <%= files.name %> %}
   <li>
-    <a href="{{ paths::<%= files.one %>(<%= singular %>.id, file.id) }}" hx-boost="false">{{ file.file_filename }}</a> ({{ file.file().human_size() }})
-    <form action="{{ paths::delete_<%= files.one %>(<%= singular %>.id, file.id) }}" method="post" hx-boost="true" hx-confirm="Delete {{ file.file_filename }}?"><button type="submit">Delete</button></form>
+    <a href="{{ paths::<%= files.one %>(<%= singular %>.<%= key %>, file.<%= key %>) }}" hx-boost="false">{{ file.file_filename }}</a> ({{ file.file().human_size() }})
+    <form action="{{ paths::delete_<%= files.one %>(<%= singular %>.<%= key %>, file.<%= key %>) }}" method="post" hx-boost="true" hx-confirm="Delete {{ file.file_filename }}?"><button type="submit">Delete</button></form>
   </li>
 {% endfor %}
 </ul>
-<form action="{{ paths::<%= files.name %>(<%= singular %>.id) }}" method="post" enctype="multipart/form-data">
+<form action="{{ paths::<%= files.name %>(<%= singular %>.<%= key %>) }}" method="post" enctype="multipart/form-data">
   <input type="file" name="<%= files.name %>" multiple required>
   <button type="submit">Add <%= files.lower %></button>
 </form>
 <% endfor %>
 
-<p><a href="{{ paths::edit(<%= singular %>.id) }}">Edit</a> · <a href="{{ paths::index() }}">Back</a></p>
+<p><a href="{{ paths::edit(<%= singular %>.<%= key %>) }}">Edit</a> · <a href="{{ paths::index() }}">Back</a></p>
 
-<form action="{{ paths::delete(<%= singular %>.id) }}" method="post" hx-boost="true" hx-confirm="Delete this <%= lower %>?">
+<form action="{{ paths::delete(<%= singular %>.<%= key %>) }}" method="post" hx-boost="true" hx-confirm="Delete this <%= lower %>?">
   <button type="submit">Delete <%= lower %></button>
 </form>
 {% endblock %}

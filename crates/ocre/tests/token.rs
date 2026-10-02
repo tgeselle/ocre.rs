@@ -25,3 +25,10 @@ fn constant_time_eq_compares_whole_values() {
     assert!(!constant_time_eq(b"xbc", b"abc"));
     assert!(!constant_time_eq(b"abc", b"abcd"));
 }
+
+#[test]
+fn public_ids_are_short_random_and_url_safe() {
+    let (a, b) = (public_id(), public_id());
+    assert_ne!(a, b);
+    assert_eq!(URL_SAFE_NO_PAD.decode(&a).unwrap().len(), 16);
+}

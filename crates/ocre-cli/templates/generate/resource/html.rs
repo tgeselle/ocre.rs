@@ -20,7 +20,7 @@ pub fn routes() -> Router<Ctx> {
         .route("/<%= plural %>/{id}", get(show))
 }
 
-/// Paths of the <%= human_singular | lower %> pages, for links (`{{ paths::show(<%= singular %>.id) }}`) and redirects.
+/// Paths of the <%= human_singular | lower %> pages, for links (`{{ paths::show(<%= singular %>.<%= key %>) }}`) and redirects.
 #[allow(dead_code)]
 pub mod paths {
     use std::fmt::Display;

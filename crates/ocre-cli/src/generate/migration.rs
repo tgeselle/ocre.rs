@@ -225,6 +225,15 @@ fn add_columns(table: &str, fields: &[Field]) -> Result<String, CliError> {
             return Err(CliError::new(format!("`{}` must be optional when added to an existing table", field.name))
                 .hint("existing rows have no file: use `name:attachment?`"));
         }
+        // Existing rows get a random public id each (32 hex digits), before the unique index.
+        if field.ty == FieldType::PublicId {
+            writeln!(
+                sql,
+                "ALTER TABLE {table} ADD COLUMN public_id TEXT NOT NULL DEFAULT '';\nUPDATE {table} SET public_id = lower(hex(randomblob(16))) WHERE public_id = '';"
+            )
+            .expect("writing to a String");
+            continue;
+        }
         // Existing rows need a value for NOT NULL columns.
         let default = match (&field.enumeration, field.ty) {
             _ if field.optional || matches!(field.ty, FieldType::Boolean | FieldType::LockVersion) => String::new(),

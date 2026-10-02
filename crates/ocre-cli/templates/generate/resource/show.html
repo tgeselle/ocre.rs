@@ -1,9 +1,9 @@
 {% extends "layout.html" %}
 
-{% block title %}<%= human_singular %> {{ <%= singular %>.id }}{% endblock %}
+{% block title %}<%= human_singular %> {{ <%= singular %>.<%= key %> }}{% endblock %}
 
 {% block content %}
-<h1><%= human_singular %> {{ <%= singular %>.id }}</h1>
+<h1><%= human_singular %> {{ <%= singular %>.<%= key %> }}</h1>
 
 <dl>
 <% for field in fields %>

@@ -20,6 +20,7 @@ mod mailbox;
 mod mailer;
 mod migration;
 mod model;
+mod public_id;
 mod pwa;
 mod realtime;
 pub(crate) mod record;

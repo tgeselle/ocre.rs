@@ -251,7 +251,7 @@ ocre g scaffold <NAME> <FIELDS>... [--realtime]
 | `FIELDS` | required, at least one | `name:type` fields |
 | `--realtime` | off | Live index page: creates, edits and deletes appear in every open browser over a WebSocket (htmx `ws` extension, a Durable Object per channel). Full-stack apps only |
 
-Creates the model (like [`ocre g model`](#ocre-g-model), unless `src/models/<model>.rs` exists, in which case the fields only shape the pages), then HTML pages for the full create, read, update, delete cycle.
+Creates the model (like [`ocre g model`](#ocre-g-model), unless `src/models/<model>.rs` exists, in which case the fields only shape the pages), then HTML pages for the full create, read, update, delete cycle. With a `public_id:token` field, URLs carry the record's random public id instead of its integer `id` (also for `ocre g api` and `ocre g resource`; see [Field types](field-types.md#public_id)).
 
 ```sh
 ocre g scaffold Comment author:string body:text post:references

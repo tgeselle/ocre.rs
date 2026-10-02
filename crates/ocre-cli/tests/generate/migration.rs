@@ -171,3 +171,14 @@ fn added_enums_default_to_their_first_value() {
          ALTER TABLE posts ADD COLUMN mood TEXT CHECK (mood IN ('ok'));\n"
     );
 }
+
+#[test]
+fn a_public_id_gives_every_existing_row_its_own_random_id() {
+    let sql = infer("add_public_id_to_posts", &fields(&["public_id:token"])).unwrap();
+    assert_eq!(
+        sql,
+        "ALTER TABLE posts ADD COLUMN public_id TEXT NOT NULL DEFAULT '';\n\
+         UPDATE posts SET public_id = lower(hex(randomblob(16))) WHERE public_id = '';\n\
+         CREATE UNIQUE INDEX index_posts_on_public_id ON posts (public_id);\n"
+    );
+}

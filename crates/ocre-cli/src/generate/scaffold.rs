@@ -31,9 +31,16 @@ pub fn scaffold(project: &Project, name: &str, specs: &[String], realtime: bool)
     let command = format!("ocre g scaffold {name} {}{}", specs.join(" "), if realtime { " --realtime" } else { "" });
     let mut edits = Edits::new(project);
     ensure_model(&mut edits, &names, &fields, &many, &command)?;
+    // `public_id:token`: URLs carry it instead of the integer id; no form or page shows it.
+    let public_id = fields.iter().any(|f| f.ty == FieldType::PublicId);
+    let fields: Vec<Field> = fields.into_iter().filter(|f| f.ty != FieldType::PublicId).collect();
     let plural = &names.plural;
-    edits.create(&format!("src/{plural}.rs"), controller_rs(&names, &fields, &many, &command, realtime))?;
-    for (file, contents) in views(&edits, &names, &fields, &many, realtime)? {
+    let mut controller = controller_rs(&names, &fields, &many, &command, realtime);
+    if public_id {
+        controller = super::public_id::html(&controller, &names, &many);
+    }
+    edits.create(&format!("src/{plural}.rs"), controller)?;
+    for (file, contents) in views(&edits, &names, &fields, &many, realtime, public_id)? {
         edits.create(&format!("templates/{plural}/{file}"), contents)?;
     }
     register_routes(&mut edits, plural)?;
@@ -46,7 +53,7 @@ pub fn scaffold(project: &Project, name: &str, specs: &[String], realtime: bool)
             edits.update("src/lib.rs", lib);
         }
     }
-    super::test_files::scaffold_tests(&mut edits, &names, &fields, &command)?;
+    super::test_files::scaffold_tests(&mut edits, &names, &fields, &command, public_id)?;
     if realtime {
         add_channel(&mut edits, plural, &command)?;
     }
@@ -682,6 +689,8 @@ struct ViewContext<'a> {
     human_plural: &'a str,
     /// `blog post`, in sentences.
     lower: String,
+    /// The field links and titles use: `id`, or `public_id` with `public_id:token`.
+    key: &'a str,
     realtime: bool,
     /// Some field is a file: forms are `multipart/form-data`.
     multipart: bool,
@@ -712,7 +721,9 @@ fn views(
     fields: &[Field],
     many: &[String],
     realtime: bool,
+    public_id: bool,
 ) -> Result<Vec<(String, String)>, CliError> {
+    let key = if public_id { "public_id" } else { "id" };
     let ModelNames { model, singular, plural, human_singular, human_plural } = names;
     let context = ViewContext {
         model,
@@ -721,6 +732,7 @@ fn views(
         human_singular,
         human_plural,
         lower: human_singular.to_lowercase(),
+        key,
         realtime,
         multipart: fields.iter().any(Field::is_attachment),
         fields: fields
@@ -731,7 +743,11 @@ fn views(
                 attachment: field.is_attachment(),
                 optional: field.optional,
                 display: field.display(singular),
-                show: if field.is_attachment() { file_link(field, singular) } else { field.display_full(singular) },
+                show: if field.is_attachment() {
+                    file_link(field, singular, key)
+                } else {
+                    field.display_full(singular)
+                },
                 input: input(field, singular, plural),
                 hidden: field.ty == FieldType::LockVersion,
             })
@@ -757,10 +773,10 @@ fn views(
 
 /// `<a href="{{ paths::avatar(post.id) }}">me.png</a> (12 KB)` on the show page;
 /// not boosted, so the browser opens or downloads the file itself.
-fn file_link(field: &Field, singular: &str) -> String {
+fn file_link(field: &Field, singular: &str, key: &str) -> String {
     let name = &field.name;
     let link = format!(
-        "<a href=\"{{{{ paths::{name}({singular}.id) }}}}\" hx-boost=\"false\">{{{{ file.filename }}}}</a> ({{{{ file.human_size() }}}})"
+        "<a href=\"{{{{ paths::{name}({singular}.{key}) }}}}\" hx-boost=\"false\">{{{{ file.filename }}}}</a> ({{{{ file.human_size() }}}})"
     );
     if field.optional {
         format!("{{% if let Some(file) = {singular}.{name}() %}}{link}{{% endif %}}")
@@ -783,7 +799,8 @@ fn input(field: &Field, singular: &str, plural: &str) -> String {
         FieldType::RichText => format!(
             r#"<input type="hidden" id="{singular}_{name}" name="{name}" value="{{{{ form.{name} }}}}"><trix-editor input="{singular}_{name}" data-embeds-url="/{plural}/embeds"></trix-editor>"#
         ),
-        FieldType::LockVersion => {
+        // Public ids never reach a form (the scaffold drops them); hidden if one did.
+        FieldType::LockVersion | FieldType::PublicId => {
             format!(r#"<input type="hidden" name="{name}" value="{{{{ form.{name} }}}}">"#)
         }
         FieldType::Json => format!(
