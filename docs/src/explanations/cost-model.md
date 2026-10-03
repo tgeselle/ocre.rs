@@ -6,7 +6,7 @@ This page explains how an Ocre app spends the Cloudflare Workers Free plan: what
 
 - This is an explanation, not a task: read it when designing a feature or when a limit is getting close. The exact limits, with their sources, are on [Free-plan limits](../reference/limits.md) (values of September 2026).
 - It assumes an Ocre app from `ocre new`, with the code the generators write: `ocre g scaffold` for pages, `ocre g job` for jobs, `ocre g cache` for KV, `--realtime` for WebSockets.
-- Measured numbers come from the Ocre README (production `wrangler tail` on the free plan, and `wrangler dev` on an Apple M5 Max). Everything else is computed from Cloudflare's published rules and marked as an estimate.
+- Measured numbers come from production `wrangler tail` on the free plan and from `wrangler dev` on an Apple M5 Max, as each table says. Everything else is computed from Cloudflare's published rules and marked as an estimate.
 
 ## The daily budgets
 
@@ -43,7 +43,7 @@ Subrequests (D1 queries, KV and R2 calls, `fetch`, broadcasts to a Durable Objec
 
 CPU time is the time the Worker spends computing. Waiting for D1, KV, R2 or `fetch` does not count, so a handler that runs three queries and renders a template stays well under 10 ms. Cloudflare tolerates occasional overruns per isolate and ends requests with error 1102 only when they become frequent ([CPU time](https://developers.cloudflare.com/workers/platform/limits/#cpu-time)).
 
-Measured on the blog starter (release build, production, free plan, `wrangler tail`, 55 requests; README "Measured"):
+Measured on the blog starter (release build, production, free plan, `wrangler tail`, 55 requests):
 
 | Route | CPU median | CPU max | Wall median |
 |---|---|---|---|
@@ -55,7 +55,7 @@ Other measured costs:
 
 | Work | CPU | Where measured |
 |---|---|---|
-| Worker startup (blog starter, 420 KB of WebAssembly) | 4 ms | README "Measured" |
+| Worker startup (blog starter: `index_bg.wasm` 420 KB, 130 KB gzipped, and `index.js` 24 KB; measured before sessions, auth and email were added) | 4 ms | Release build |
 | One password hash (PBKDF2-HMAC-SHA256, 100,000 iterations, WebCrypto) | 5.5 ms | `wrangler dev`, 100 hashes in 550 ms |
 | A login request (one hash) against `GET /up` | 9.5 ms against 3.5 ms | `wrangler dev` |
 | GraphQL schema at each new Worker instance (`--graphql`) | 20 to 60 ms | `wrangler tail` |

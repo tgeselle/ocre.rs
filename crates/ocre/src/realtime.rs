@@ -57,7 +57,7 @@
 //! duration, between broadcasts while browsers stay connected. It stores
 //! nothing.
 //!
-//! Free plan (see the README's Realtime section): each connection (and
+//! Free plan (see [Realtime](https://ocre.rs/guides/realtime#free-plan-costs)): each connection (and
 //! reconnection) and each broadcast is one Durable Object request (100,000 a
 //! day); messages sent to browsers are free; a connection is also one Worker
 //! request, while a broadcast is a subrequest of the request that sends it.

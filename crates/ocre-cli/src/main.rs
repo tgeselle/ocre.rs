@@ -908,7 +908,7 @@ fn generate_command(args: GenerateArgs) -> CliResult {
         GenerateCommand::Scaffold { name, fields, realtime } => {
             if project.api_only && realtime {
                 Err(CliError::new("--realtime updates HTML pages; this app is API-only").hint(
-                    "run `ocre g scaffold` without --realtime; to push JSON to clients, see Realtime in the Ocre README",
+                    "run `ocre g scaffold` without --realtime; to push JSON to clients, see https://ocre.rs/guides/realtime#without-the-scaffold-and-in-api-only-apps",
                 ))
             } else if project.api_only {
                 generate::api(project, &name, &fields, false)

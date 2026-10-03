@@ -8,9 +8,9 @@
 //! per-request [`Ctx`]. The `ocre` command-line tool (crate `ocre-cli`)
 //! generates the app, its models, scaffolds and migrations, and deploys it.
 //!
-//! Guides and the generated app's conventions live in the repository
-//! [README](https://github.com/tgeselle/ocre.rs#readme); a one-page list of
-//! every public item is in `docs/api-index.md`.
+//! Guides, references and the generated app's conventions are on the
+//! documentation site, <https://ocre.rs>; a one-page list of every public
+//! item is its [API index](https://ocre.rs/api-index.html).
 //!
 //! # Design rules
 //!

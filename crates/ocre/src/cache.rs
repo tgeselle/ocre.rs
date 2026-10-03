@@ -52,7 +52,7 @@
 //! The Workers Cache API (`caches.default`) is not wrapped: it is a no-op on
 //! `*.workers.dev`, where Ocre apps deploy by default, and still runs the
 //! Worker on every request. To have Cloudflare serve whole pages without
-//! running the Worker, see "Workers Cache" in the README: it honors the
+//! running the Worker, see [Caching](https://ocre.rs/guides/caching): Workers Cache honors the
 //! [`CacheControl::public`] header (hits still count toward the 100,000
 //! requests a day).
 

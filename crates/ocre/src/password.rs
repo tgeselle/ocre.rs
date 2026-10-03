@@ -13,8 +13,8 @@
 //! stored, so it can grow later without invalidating existing passwords
 //! ([`iterations`] reads it back).
 //!
-//! Cost: one hash measured at 5.5 ms of CPU in `wrangler dev` (README,
-//! "Authentication"), about half of the free plan's 10 ms per request, so
+//! Cost: one hash measured at 5.5 ms of CPU in `wrangler dev` (see the
+//! [cost model](https://ocre.rs/explanations/cost-model)), about half of the free plan's 10 ms per request, so
 //! only sign-up, login and password changes should hash. [`hash`] and
 //! [`verify`] each run PBKDF2 once. Passwords are never logged: errors name
 //! the operation only.
@@ -72,7 +72,7 @@ const HASH_BYTES: usize = 32;
 /// Two calls with the same password give different digests (new salt).
 ///
 /// Cost: one PBKDF2 run with [`ITERATIONS`], measured at 5.5 ms of CPU on
-/// Workers (README, "Authentication"): about half of the free plan's 10 ms
+/// Workers (see the [cost model](https://ocre.rs/explanations/cost-model)): about half of the free plan's 10 ms
 /// per request.
 ///
 /// # Errors

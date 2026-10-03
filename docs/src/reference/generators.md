@@ -345,7 +345,7 @@ Next:
   curl http://localhost:8787/api/posts
 ```
 
-Errors: the field and name errors; `src/<plural>.rs already exists` (or a template) when the pages exist; in an API-only app, `--realtime updates HTML pages; this app is API-only` with the hint ``run `ocre g scaffold` without --realtime; to push JSON to clients, see Realtime in the Ocre README``. See [Controllers and routing](../guides/controllers.md), [Views, helpers and forms](../guides/views.md), [File storage](../guides/files.md) and [Realtime](../guides/realtime.md).
+Errors: the field and name errors; `src/<plural>.rs already exists` (or a template) when the pages exist; in an API-only app, `--realtime updates HTML pages; this app is API-only` with the hint ``run `ocre g scaffold` without --realtime; to push JSON to clients, see https://ocre.rs/guides/realtime#without-the-scaffold-and-in-api-only-apps``. See [Controllers and routing](../guides/controllers.md), [Views, helpers and forms](../guides/views.md), [File storage](../guides/files.md) and [Realtime](../guides/realtime.md).
 
 ## ocre g api
 
