@@ -845,11 +845,13 @@ impl Response {
 
 /// Rows returned by `query`, run on the test database (Rails' `ActiveRecord::Base.connection.select_all`).
 ///
-/// It runs the app's wrangler (`node_modules/.bin/wrangler d1 execute DB
-/// --local`) on [`TEST_STATE`]: about a second per call, so keep it to
-/// setup and checks. Several statements may be separated by `;`; the rows
-/// of the last one are returned. Values are SQL literals: build them with
-/// [`quote`].
+/// It opens miniflare's SQLite file of the test database in [`TEST_STATE`]
+/// directly (WAL mode: the running server sees the writes at once), in a
+/// few milliseconds, so a check can be polled. Several statements may be
+/// separated by `;`; the rows of the last one are returned. Values are SQL
+/// literals: build them with [`quote`]. When the state holds no single D1
+/// file (several databases), it runs the app's wrangler (`d1 execute DB
+/// --local`) instead, about a second per call.
 ///
 /// # Panics
 ///
@@ -882,6 +884,58 @@ fn state_dir() -> String {
 }
 
 fn sql_in(root: &Path, state: &str, query: &str) -> Vec<Map<String, Value>> {
+    if let Some(file) = d1_file(&root.join(state)) {
+        return sql_direct(&file, query);
+    }
+    sql_wrangler(root, state, query)
+}
+
+/// The one D1 database of the state (miniflare keeps each in
+/// `v3/d1/miniflare-D1DatabaseObject/<id>.sqlite`, next to its `metadata.sqlite`).
+fn d1_file(state: &Path) -> Option<PathBuf> {
+    let dir = state.join("v3/d1/miniflare-D1DatabaseObject");
+    let mut files = std::fs::read_dir(dir).ok()?.filter_map(|entry| {
+        let path = entry.ok()?.path();
+        let sqlite = path.extension().is_some_and(|ext| ext == "sqlite");
+        (sqlite && path.file_stem().is_some_and(|stem| stem != "metadata")).then_some(path)
+    });
+    let file = files.next()?;
+    files.next().is_none().then_some(file)
+}
+
+fn sql_direct(file: &Path, query: &str) -> Vec<Map<String, Value>> {
+    use rusqlite::{Batch, Connection, OpenFlags, types::ValueRef};
+
+    let fail = |err: rusqlite::Error| -> ! { panic!("SQL failed: {query}\n{err}") };
+    let conn = Connection::open_with_flags(file, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)
+        .unwrap_or_else(|err| fail(err));
+    // The server writes too: wait for its transaction rather than fail.
+    conn.busy_timeout(Duration::from_secs(10)).unwrap_or_else(|err| fail(err));
+    let mut rows = Vec::new();
+    let mut batch = Batch::new(&conn, query);
+    while let Some(mut statement) = batch.next().unwrap_or_else(|err| fail(err)) {
+        let columns: Vec<String> = statement.column_names().into_iter().map(str::to_owned).collect();
+        let mut result = statement.raw_query();
+        rows.clear();
+        while let Some(row) = result.next().unwrap_or_else(|err| fail(err)) {
+            let mut map = Map::new();
+            for (index, column) in columns.iter().enumerate() {
+                let value = match row.get_ref(index).unwrap_or_else(|err| fail(err)) {
+                    ValueRef::Null => Value::Null,
+                    ValueRef::Integer(n) => Value::from(n),
+                    ValueRef::Real(x) => Value::from(x),
+                    ValueRef::Text(text) => Value::from(String::from_utf8_lossy(text).into_owned()),
+                    ValueRef::Blob(bytes) => Value::from(bytes.to_vec()),
+                };
+                map.insert(column.clone(), value);
+            }
+            rows.push(map);
+        }
+    }
+    rows
+}
+
+fn sql_wrangler(root: &Path, state: &str, query: &str) -> Vec<Map<String, Value>> {
     let output = Command::new(root.join("node_modules/.bin/wrangler"))
         .args(["d1", "execute", "DB", "--local", "--json", "--command", query])
         .args(["-c", ".wrangler/ocre-d1.json", "--persist-to", state])
@@ -930,7 +984,7 @@ fn quote_value(value: &Value) -> String {
 }
 
 /// Inserts a row into `table` of the test database and returns its `id`:
-/// what generated factories (`tests/factories/`) call. One wrangler call (about a second).
+/// what generated factories (`tests/factories/`) call. One statement on the test database.
 ///
 /// # Panics
 ///

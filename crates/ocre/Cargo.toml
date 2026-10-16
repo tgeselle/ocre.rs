@@ -63,7 +63,7 @@ graphql = ["dep:async-graphql"]
 realtime = []
 # Test helpers (`ocre::testing`, native builds only): generated apps enable it
 # in `[dev-dependencies]`, so it is never in the WebAssembly build.
-testing = ["dep:ureq", "dep:pollster"]
+testing = ["dep:ureq", "dep:pollster", "dep:rusqlite"]
 # Web push notifications (`ocre::push`); `ocre g push` turns it on.
 push = ["dep:p256"]
 
@@ -84,5 +84,8 @@ wasm-bindgen-futures = "0.4"
 pbkdf2 = { version = "0.12.2", default-features = false, features = ["hmac"] }
 # `ocre::testing::Client`: plain HTTP to the local test server (no TLS, no gzip).
 ureq = { version = "3.4.2", default-features = false, optional = true }
+# `ocre::testing::sql`: the local test database (miniflare's SQLite file) read and
+# written directly, in milliseconds instead of a wrangler process per query.
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 # `ocre::testing::block_on`: async code in unit tests.
 pollster = { version = "1.0.1", optional = true }
