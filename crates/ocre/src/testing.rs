@@ -56,6 +56,10 @@ use serde_json::{Map, Value};
 
 use crate::{SESSION_COOKIE, mail::Email};
 
+mod fake;
+
+pub use fake::{FakeServer, ReceivedRequest};
+
 /// Environment variable holding the base URL of the server `ocre test --e2e` started.
 ///
 /// # Examples
@@ -999,17 +1003,34 @@ fn quote_value(value: &Value) -> String {
 /// assert!(id > 0);
 /// ```
 pub fn insert(table: &str, values: &[(&str, Value)]) -> i64 {
-    sql(&insert_sql(table, values))
+    sql(&format!("{} RETURNING id", insert_sql(table, values)))
         .first()
         .and_then(|row| row.get("id"))
         .and_then(Value::as_i64)
         .expect("INSERT ... RETURNING id returns the id")
 }
 
+/// Inserts a row into `table` of the test database, for tables without an integer `id` (a UUID or composite key).
+///
+/// # Panics
+///
+/// Like [`sql`], e.g. on a constraint violation.
+///
+/// # Examples
+///
+/// ```no_run
+/// use ocre::serde_json::json;
+///
+/// ocre::testing::insert_row("videos", &[("id", json!("7f1c…")), ("name", json!("a.mp4"))]);
+/// ```
+pub fn insert_row(table: &str, values: &[(&str, Value)]) {
+    sql(&insert_sql(table, values));
+}
+
 fn insert_sql(table: &str, values: &[(&str, Value)]) -> String {
     let columns: Vec<&str> = values.iter().map(|(column, _)| *column).collect();
     let literals: Vec<String> = values.iter().map(|(_, value)| quote_value(value)).collect();
-    format!("INSERT INTO {table} ({}) VALUES ({}) RETURNING id", columns.join(", "), literals.join(", "))
+    format!("INSERT INTO {table} ({}) VALUES ({})", columns.join(", "), literals.join(", "))
 }
 
 /// Number of rows of `table` in the test database, for [`assert_difference`].
@@ -1183,8 +1204,25 @@ pub fn eventually<T>(check: impl FnMut() -> Option<T>) -> T {
     eventually_within(WAIT, check)
 }
 
+/// [`eventually`] with another deadline: retries `check` every 100 ms for up to `timeout`.
+///
+/// For effects slower than 30 seconds (a pipeline of several jobs), or to
+/// fail fast on a quick one.
+///
+/// # Panics
+///
+/// When `check` still returns `None` after `timeout`.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+///
+/// let value = ocre::testing::eventually_within(Duration::from_secs(120), || Some(42));
+/// assert_eq!(value, 42);
+/// ```
 #[track_caller]
-fn eventually_within<T>(timeout: Duration, check: impl FnMut() -> Option<T>) -> T {
+pub fn eventually_within<T>(timeout: Duration, check: impl FnMut() -> Option<T>) -> T {
     poll(timeout, check).unwrap_or_else(|| panic!("the condition did not hold within {timeout:?}"))
 }
 

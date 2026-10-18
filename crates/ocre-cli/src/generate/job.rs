@@ -451,12 +451,13 @@ fn wire(edits: &mut Edits) -> Result<String, CliError> {
 JOBS: bindings.queue({{ name: \"{queue}\" }}),"
         ),
         &format!(
-            "// Runs the jobs of {queue}: up to 10 messages per run, waiting at most 5 s
-// to fill a batch. Each run is one Worker request with 10 ms of CPU on the free
-// plan: lower maxBatchSize for CPU-heavy jobs. A failing job is retried with a
-// growing delay (30 s, 1 min, 3 min, 9 min, 27 min), then moved to
-// {queue}-failed, where it stays 24 hours (dashboard: Queues > {queue}-failed).
-triggers.queue({{ name: \"{queue}\", deadLetterQueue: \"{queue}-failed\", maxBatchSize: 10, maxBatchTimeout: 5, maxRetries: 5 }}),"
+            "// Runs the jobs of {queue}: up to 10 messages per run, delivered as soon as
+// they arrive (maxBatchTimeout 0: a lone job, the usual case, starts at once).
+// Each run is one Worker request with 10 ms of CPU on the free plan: lower
+// maxBatchSize for CPU-heavy jobs. A failing job is retried with a growing
+// delay (30 s, 1 min, 3 min, 9 min, 27 min), then moved to {queue}-failed,
+// where it stays 24 hours (dashboard: Queues > {queue}-failed).
+triggers.queue({{ name: \"{queue}\", deadLetterQueue: \"{queue}-failed\", maxBatchSize: 10, maxBatchTimeout: 0, maxRetries: 5 }}),"
         ),
     )?;
     Ok(queue)
@@ -477,11 +478,11 @@ fn wire_queue(edits: &mut Edits, queue: &str) -> Result<Option<String>, CliError
         &format!(
             "// The `{queue}` job queue (`ocre::jobs::queue(&ctx, \"{queue}\")`): its own
 // consumer, so its jobs never wait behind the `default` queue. Same Queues
-// costs per message; batches wait at most 1 s.
+// costs per message; delivered at once.
 {binding}: bindings.queue({{ name: \"{name}\" }}),"
         ),
         &format!(
-            "triggers.queue({{ name: \"{name}\", deadLetterQueue: \"{name}-failed\", maxBatchSize: 10, maxBatchTimeout: 1, maxRetries: 5 }}),"
+            "triggers.queue({{ name: \"{name}\", deadLetterQueue: \"{name}-failed\", maxBatchSize: 10, maxBatchTimeout: 0, maxRetries: 5 }}),"
         ),
     )?;
     Ok(Some(name))

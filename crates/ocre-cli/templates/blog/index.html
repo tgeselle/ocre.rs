@@ -1,0 +1,23 @@
+{% extends "layout.html" %}
+{# The blog's index: src/blog.rs. #}
+
+{% block title %}Blog{% endblock %}
+
+{% block content %}
+<section id="blog" lang="{{ lang }}" dir="{{ dir }}">
+  <h1>Blog</h1>
+  {% if posts.is_empty() %}
+  <p>No articles yet.</p>
+  {% else %}
+  <ul>
+    {% for post in posts %}
+    <li>
+      <a href="{{ post.path }}">{{ post.title }}</a>
+      <time datetime="{{ post.date }}">{{ post.date }}</time>
+      <p>{{ post.description }}</p>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+{% endblock %}

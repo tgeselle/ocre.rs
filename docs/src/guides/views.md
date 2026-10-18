@@ -436,6 +436,13 @@ Plain text is a `String` (`text/plain`), JavaScript is `([(header::CONTENT_TYPE,
 
 `ocre g seo` writes `src/seo.rs` with both routes and `PAGES`, the list of public pages (path, title, description) they share; records with a page of their own (posts, products) go in `sitemap` with their `updated_at` as `lastmod`. The base URL comes from `APP_URL` (added to `.dev.vars`; set it in `worker.env` for production), and `public/robots.txt` should name the sitemap (`Sitemap: https://<your host>/sitemap.xml`). For translated pages, see [canonical and hreflang](i18n.md#search-engines-canonical-and-hreflang).
 
+Two more pieces of `ocre::seo` keep search engines on one address per page and up to date:
+
+- `ocre::seo::redirect_www`, a middleware: a request to `www.` + the host of `APP_URL` answers `301` to the same path and query on `APP_URL` (for an app on both `example.com` and `www.example.com`). Add `.layer(axum::middleware::from_fn(ocre::seo::redirect_www))` to `routes()`.
+- [IndexNow](https://www.indexnow.org): set `INDEXNOW_KEY` (8 to 128 letters, digits or `-`) in `worker.env`, merge `ocre::seo::indexnow_routes()` (it serves the key at `/indexnow.txt`), then call `ocre::seo::submit_to_indexnow(&ctx, &urls).await?` after publishing pages: Bing, Yandex, Seznam and Naver learn about them without waiting for a crawl. One subrequest per call.
+
+Articles written as Markdown files (a blog, guides) are what `ocre g blog` sets up: compiled at build time, served in every locale, listed for the sitemap by `blog::pages()`.
+
 ## Localized views
 
 Translated text comes from `locales/*.yml` through the `I18n` extractor, passed to the view as a field (`{{ i18n.t("posts.title") }}`; see [Translations](i18n.md)). For pages whose whole markup differs per language (Rails' `show.fr.html.erb`), define one view struct per language and pick it with `match i18n.locale()`.

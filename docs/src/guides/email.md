@@ -386,6 +386,34 @@ Subject: Welcome
 
 Each `deliver_later` is one queue message: 3 of the 10,000 daily Queues operations on the free plan (September 2026), plus the provider's own limits. Prefer it for mail sent while a user waits, once the app has a job queue; use `send` otherwise.
 
+## Intercept outgoing email
+
+`ocre::mail::intercept` registers a function every outgoing email goes through before the adapter sends it, Rails' `register_interceptor`: it gets the `Email` and a lookup of Worker variables and secrets, and returns the email to send (changed or not) or `None` to drop it. It applies to `send` and to `deliver_later`, whatever the adapter. Register interceptors once per Worker instance, in the `start` event of `src/lib.rs`:
+
+```rust,ignore
+#[worker::event(start)]
+fn start() {
+    // A copy of production's users must not get automated mail by accident:
+    // marketing emails go out only when MARKETING_EMAILS is `on`.
+    ocre::mail::intercept(|email, vars| {
+        let marketing = email.headers.iter().any(|(name, value)| name == "X-Category" && value == "marketing");
+        let allowed = vars("MARKETING_EMAILS").is_some_and(|value| value.trim() == "on");
+        (!marketing || allowed).then_some(email)
+    });
+    // Staging: every email to one inbox.
+    ocre::mail::intercept(|mut email, vars| {
+        if let Some(inbox) = vars("STAGING_INBOX") {
+            email.to = vec![inbox];
+            email.cc.clear();
+            email.bcc.clear();
+        }
+        Some(email)
+    });
+}
+```
+
+A dropped email is logged as `[ocre mail] dropped by an interceptor: "<subject>" to <recipients>` and `send` returns `Ok`. Interceptors run in registration order, in the Worker: keep them to cheap checks (a variable, a header).
+
 ## Attachments and inline images
 
 `.attach(filename, content_type, bytes)` adds a file, like Rails' `attachments["name"] = ...`; `.inline(content_id, filename, content_type, bytes)` adds an image that the HTML shows with `cid:`, like `attachments.inline`. Mail clients show inline images without loading anything remote, so they are the reliable way to put a logo in an email:

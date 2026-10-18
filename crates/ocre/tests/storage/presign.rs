@@ -127,6 +127,45 @@ fn direct_uploads_check_the_declaration_and_sign_a_new_key() {
 }
 
 #[test]
+fn development_direct_uploads_go_to_the_app_and_sign_with_the_upload_secret() {
+    let upload = DirectUpload::sign_dev(
+        "http://localhost:8787",
+        "dev-secret",
+        "uploads",
+        "image",
+        &request("image/png", 9),
+        &PHOTO,
+        600,
+    );
+    let upload = upload.unwrap();
+    let key = verify_key("image", "dev-secret", &upload.signed_key).unwrap();
+    assert_eq!(upload.url, format!("http://localhost:8787/ocre/dev/storage/{key}?X-Amz-Expires=600"));
+    assert_eq!(upload.headers["Content-Type"], "image/png");
+    assert!(DirectUpload::sign_dev("x", "s", "u", "image", &request("image/gif", 9), &PHOTO, 600).is_err());
+    assert!(DirectUpload::sign_dev("x", "s", "u", "image", &request("image/png", 9), &PHOTO, 0).is_err());
+}
+
+#[test]
+fn development_gets_keep_the_safe_overrides() {
+    let html =
+        Attachment { key: "a b".into(), filename: "page.html".into(), content_type: "text/html".into(), size: 1 };
+    let url = dev_get_url("http://localhost:8787", &html, Disposition::Inline, 60).unwrap();
+    assert!(
+        url.starts_with("http://localhost:8787/ocre/dev/storage/a%20b?response-content-disposition=attachment"),
+        "{url}"
+    );
+    assert!(url.contains("&response-content-type=application%2Foctet-stream&X-Amz-Expires=60"), "{url}");
+    assert!(dev_get_url("http://localhost:8787", &html, Disposition::Inline, MAX_EXPIRES_IN + 1).is_err());
+}
+
+#[test]
+fn bucket_level_requests_sign_the_bucket_path() {
+    let url = r2().presign("GET", "", &[], &[("uploads", ""), ("prefix", "v/")], NOW, 60).unwrap();
+    assert!(url.starts_with("https://acc123.r2.cloudflarestorage.com/blog-storage?"), "{url}");
+    assert!(url.contains("&uploads=&"), "{url}");
+}
+
+#[test]
 fn signed_keys_only_verify_with_the_same_secret_and_key() {
     let signed = sign_key("secret", "uploads/abc");
     assert_eq!(verify_key("file", "secret", &signed).unwrap(), "uploads/abc");

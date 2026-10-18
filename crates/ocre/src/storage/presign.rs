@@ -12,8 +12,9 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::s3::dev_url;
 use super::{Attachment, BINARY_TYPES, Disposition, Rules, StoredObject, content_disposition, essence, new_key};
-use crate::{Error, Result, Validator, helpers::civil_from_days, token::constant_time_eq};
+use crate::{Error, Result, Validator, helpers::civil_from_days, percent_encode, token::constant_time_eq};
 
 /// Worker variable holding the Cloudflare account ID, for presigned R2 URLs.
 ///
@@ -170,16 +171,14 @@ impl S3Endpoint {
         now: i64,
         expires_in: u64,
     ) -> Result<String> {
-        if expires_in == 0 || expires_in > MAX_EXPIRES_IN {
-            return Err(Error::internal(format!(
-                "a presigned URL lasts 1 to {MAX_EXPIRES_IN} seconds (7 days), not {expires_in}"
-            )));
-        }
+        check_expires_in(expires_in)?;
         let (date, timestamp) = amz_date(now);
         let scope = format!("{date}/{}/s3/aws4_request", self.region);
-        let path = match self.bucket.as_str() {
-            "" => format!("/{}", encode(key, false)),
-            bucket => format!("/{}/{}", encode(bucket, false), encode(key, false)),
+        let path = match (self.bucket.as_str(), key) {
+            ("", key) => format!("/{}", percent_encode(key, true)),
+            // A request on the bucket itself (ListMultipartUploads).
+            (bucket, "") => format!("/{}", percent_encode(bucket, true)),
+            (bucket, key) => format!("/{}/{}", percent_encode(bucket, true), percent_encode(key, true)),
         };
         let mut signed: BTreeMap<String, String> =
             headers.iter().map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_owned())).collect();
@@ -196,7 +195,7 @@ impl S3Endpoint {
         ]
         .iter()
         .chain(query)
-        .map(|(name, value)| (encode(name, true), encode(value, true)))
+        .map(|(name, value)| (percent_encode(name, false), percent_encode(value, false)))
         .collect();
         params.sort();
         let canonical_query =
@@ -317,6 +316,41 @@ impl DirectUpload {
     }
 }
 
+impl DirectUpload {
+    /// [`sign`](Self::sign) for development: the URL is the app's development
+    /// route on the local bucket, and `secret` (`upload_secret`) signs the key.
+    pub(crate) fn sign_dev(
+        base: &str,
+        secret: &str,
+        prefix: &str,
+        field: &str,
+        request: &DirectUploadRequest,
+        rules: &Rules,
+        expires_in: u64,
+    ) -> Result<Self> {
+        Validator::new().file_size_and_type(field, request.size, &request.content_type, rules).finish()?;
+        check_expires_in(expires_in)?;
+        let key = new_key(prefix);
+        let content_type = essence(&request.content_type);
+        let url = dev_url(base, &key, &[], expires_in);
+        Ok(Self {
+            signed_key: sign_key(secret, &key),
+            url,
+            headers: BTreeMap::from([("Content-Type".to_owned(), content_type)]),
+        })
+    }
+}
+
+/// A presigned URL lasts 1 second to [`MAX_EXPIRES_IN`].
+pub(crate) fn check_expires_in(expires_in: u64) -> Result<()> {
+    if expires_in == 0 || expires_in > MAX_EXPIRES_IN {
+        return Err(Error::internal(format!(
+            "a presigned URL lasts 1 to {MAX_EXPIRES_IN} seconds (7 days), not {expires_in}"
+        )));
+    }
+    Ok(())
+}
+
 /// `<key>.<HMAC-SHA256 of the key, URL-safe base64>`, with a key derived from the R2 secret.
 pub(crate) fn sign_key(secret: &str, key: &str) -> String {
     let mac = hmac(&hmac(secret.as_bytes(), b"ocre.storage.direct_upload"), key.as_bytes());
@@ -372,11 +406,28 @@ pub(crate) fn presign_get_url(
     now: i64,
     expires_in: u64,
 ) -> Result<String> {
+    let [(a, b), (c, d)] = get_overrides(attachment, disposition);
+    endpoint.presign("GET", &attachment.key, &[], &[(a, &b), (c, &d)], now, expires_in)
+}
+
+/// [`presign_get_url`] for development: the app's route on the local bucket, with the same overrides.
+pub(crate) fn dev_get_url(
+    base: &str,
+    attachment: &Attachment,
+    disposition: Disposition,
+    expires_in: u64,
+) -> Result<String> {
+    check_expires_in(expires_in)?;
+    let [(a, b), (c, d)] = get_overrides(attachment, disposition);
+    Ok(dev_url(base, &attachment.key, &[(a, &b), (c, &d)], expires_in))
+}
+
+/// The response overrides of a presigned `GET`: a safe `Content-Type` and `Content-Disposition`.
+fn get_overrides(attachment: &Attachment, disposition: Disposition) -> [(&'static str, String); 2] {
     let binary = BINARY_TYPES.contains(&attachment.content_type.as_str());
     let content_type = if binary { "application/octet-stream" } else { &attachment.content_type };
     let disposition = content_disposition(disposition, &attachment.filename, &attachment.content_type);
-    let query = [("response-content-disposition", disposition.as_str()), ("response-content-type", content_type)];
-    endpoint.presign("GET", &attachment.key, &[], &query, now, expires_in)
+    [("response-content-disposition", disposition), ("response-content-type", content_type.to_owned())]
 }
 
 /// The attachment of a direct upload found by `head`, after checking it against `rules`.
@@ -407,19 +458,6 @@ fn amz_date(now: i64) -> (String, String) {
     let date = format!("{year:04}{month:02}{day:02}");
     let time = format!("{date}T{:02}{:02}{:02}Z", seconds / 3600, seconds % 3600 / 60, seconds % 60);
     (date, time)
-}
-
-/// RFC 3986 percent-encoding of everything but unreserved characters (and `/` in paths).
-fn encode(text: &str, slash: bool) -> String {
-    let mut out = String::with_capacity(text.len());
-    for byte in text.bytes() {
-        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) || (byte == b'/' && !slash) {
-            out.push(byte as char);
-        } else {
-            write!(out, "%{byte:02X}").expect("writing to a String");
-        }
-    }
-    out
 }
 
 fn hmac(key: &[u8], data: &[u8]) -> Vec<u8> {

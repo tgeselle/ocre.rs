@@ -309,6 +309,7 @@ esac"#,
     assert!(args.ends_with(&state_dir()), "{args}");
     assert_eq!(count("posts"), 3);
     assert_eq!(insert("posts", &[("title", json!("it's")), ("published", json!(true))]), 42);
+    insert_row("videos", &[("id", json!("v1"))]);
     assert_eq!(fixture("posts", "first")["args"].as_str().map(|a| a.contains("WHERE id = ")), Some(true));
     assert!(panics(|| drop(sql("fail"))).contains("SQL failed: fail\nno such table\nboom"));
     assert!(panics(|| drop(sql("garbage"))).contains("unexpected wrangler output"));
@@ -319,6 +320,29 @@ esac"#,
 
     APP_ROOT.with(|root| *root.borrow_mut() = dir.join("nowhere"));
     assert!(panics(|| drop(sql("SELECT 1"))).contains("npm install"));
+}
+
+#[test]
+fn sql_reads_and_writes_miniflares_sqlite_file_directly() {
+    let dir = temp_dir("sql-direct");
+    let state = ".wrangler/test-state";
+    let objects = dir.join(state).join("v3/d1/miniflare-D1DatabaseObject");
+    std::fs::create_dir_all(&objects).unwrap();
+    rusqlite::Connection::open(objects.join("metadata.sqlite")).unwrap();
+    rusqlite::Connection::open(objects.join("0a1b.sqlite")).unwrap();
+    let rows = sql_in(
+        &dir,
+        state,
+        "CREATE TABLE t (i INTEGER, r REAL, s TEXT, b BLOB, n TEXT); \
+         INSERT INTO t VALUES (1, 1.5, 'x', x'0102', NULL); SELECT * FROM t",
+    );
+    assert_eq!(rows, [json!({"i": 1, "r": 1.5, "s": "x", "b": [1, 2], "n": null}).as_object().unwrap().clone()]);
+    assert!(
+        panics(|| drop(sql_in(&dir, state, "SELECT * FROM missing"))).contains("SQL failed: SELECT * FROM missing")
+    );
+    // Two databases: which one is the app's is unknown, so wrangler decides.
+    rusqlite::Connection::open(objects.join("2c3d.sqlite")).unwrap();
+    assert!(d1_file(&dir.join(state)).is_none());
 }
 
 #[test]
@@ -341,9 +365,57 @@ fn insert_sql_quotes_every_value() {
                 ("x", json!(null))
             ]
         ),
-        r#"INSERT INTO posts (title, n, ok, tags, x) VALUES ('it''s', 1.5, 0, '["a"]', NULL) RETURNING id"#
+        r#"INSERT INTO posts (title, n, ok, tags, x) VALUES ('it''s', 1.5, 0, '["a"]', NULL)"#
     );
     assert_eq!(quote(json!({"q": "it's"})), r#"'{"q":"it''s"}'"#);
+}
+
+#[test]
+fn the_fake_server_answers_by_method_and_prefix_and_records_requests() {
+    let server = FakeServer::start();
+    server.answer("*", "/", 200, "any").answer_json("POST", "/v1/jobs", 201, &json!({"id": "j1"}));
+    let created = ureq::post(&format!("{}/v1/jobs?x=1", server.url())).header("X-Key", "k").send("{\"in\":1}").unwrap();
+    assert_eq!(created.status(), 201);
+    assert_eq!(created.headers()["content-type"], "application/json");
+    assert_eq!(created.into_body().read_to_string().unwrap(), r#"{"id":"j1"}"#);
+    let other = ureq::get(&format!("{}/v1/jobs", server.url())).call().unwrap();
+    assert_eq!(other.into_body().read_to_string().unwrap(), "any", "GET falls back to the older answer");
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!((requests[0].method.as_str(), requests[0].path.as_str()), ("POST", "/v1/jobs?x=1"));
+    assert_eq!(requests[0].header("X-KEY"), Some("k"));
+    assert_eq!(requests[0].json::<serde_json::Value>()["in"], 1);
+    assert_eq!(requests[0].text(), "{\"in\":1}");
+
+    let empty = FakeServer::start();
+    let missing =
+        ureq::get(&format!("{}/nothing", empty.url())).config().http_status_as_error(false).build().call().unwrap();
+    assert_eq!(missing.status(), 404);
+}
+
+#[test]
+fn requests_parse_chunked_and_sized_bodies() {
+    let chunked =
+        "POST /a HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n2;ext\r\nde\r\n0\r\n\r\n";
+    let request = fake::read_request(chunked.as_bytes()).unwrap();
+    assert_eq!(request.body, b"abcde");
+    assert_eq!(request.header("host"), Some("x"));
+    let sized =
+        fake::read_request("PUT /b HTTP/1.1\r\nContent-Length: 2\r\nBad header line\r\n\r\nhi".as_bytes()).unwrap();
+    assert_eq!((sized.method.as_str(), sized.body.as_slice()), ("PUT", b"hi".as_slice()));
+    assert!(fake::read_request("GET /c HTTP/1.1\r\n".as_bytes()).is_none(), "the connection closed in the headers");
+    assert!(fake::read_request("".as_bytes()).is_none());
+    assert!(fake::read_request("POST /d HTTP/1.1\r\nContent-Length: 5\r\n\r\nab".as_bytes()).is_none(), "short body");
+    let bad_chunk = "POST /e HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n";
+    assert!(fake::read_request(bad_chunk.as_bytes()).is_none());
+}
+
+#[test]
+#[should_panic(expected = "GET /x: the body is not the JSON expected")]
+fn received_bodies_that_are_not_json_panic_with_the_request() {
+    let request = fake::read_request("GET /x HTTP/1.1\r\nContent-Length: 1\r\n\r\n<".as_bytes()).unwrap();
+    let _: serde_json::Value = request.json();
 }
 
 #[test]

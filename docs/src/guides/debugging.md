@@ -208,6 +208,44 @@ impl Subscriber for Webhook {
 
 Register it in `start()` with `ocre::errors::subscribe(error_webhook::Webhook);`.
 
+### Keep personal data out of reports
+
+A report leaves the app with its message and context: email addresses, tokens or signed URLs in them go to the service too. `report.clone().scrubbed()` (or `ocre::errors::scrub(text)` on any text) replaces them first, and makes the same error group as one issue:
+
+| Found | Becomes |
+|---|---|
+| `Bearer`/`Basic` credentials, known key prefixes (`sk_live_`, `whsec_`, `ghp_`, `AKIA`...) | `[secret]` |
+| `password=`, `token=`, `key=`, `signature=`, `X-Amz-Signature=`... values | `<name>=[secret]` |
+| email addresses | `[email]` |
+| UUIDs | `[id]` |
+| runs of 32+ letters and digits (tokens, digests) | `[secret]` |
+| durations (`12.5 ms`, `3s`) | `[n]ms`, `[n]s` |
+
+```rust,ignore
+fn deliver(&self, report: &Report, vars: &dyn Fn(&str) -> Option<String>) -> Option<Delivery> {
+    let report = report.clone().scrubbed();
+    // ... build the body from `report`
+}
+```
+
+## Owner alerts by email
+
+Errors tell developers what broke; owner alerts tell the person running the app what customers just ran into: a refused payment, an upload that failed, a job stuck for an hour. `ocre g alerts` adds the `alerts` table and `ALERT_EMAIL` to `.dev.vars`; then:
+
+```rust,ignore
+use ocre::alerts::{self, Alert};
+
+alerts::record(&ctx, Alert::new("payment.failed").key(user_id).detail(format!("Provider said: {message}"))).await;
+```
+
+`record` never fails the request (a problem is logged) and decides in the same `INSERT`:
+
+- the same reason and key already emailed in the last 30 minutes ([`DEDUP_MINUTES`](https://docs.rs/ocre/latest/ocre/alerts/constant.DEDUP_MINUTES.html)): kept as `deduped`, no email;
+- 20 alerts already emailed in the last hour ([`HOURLY_CAP`](https://docs.rs/ocre/latest/ocre/alerts/constant.HOURLY_CAP.html)): kept as `overflow` for the digest;
+- otherwise emailed to `ALERT_EMAIL` at once (`sent`).
+
+`alerts::send_digest(ctx)` emails one list of the held-back alerts by reason and forgets alerts older than 30 days: call it from a schedule (`ocre g schedule alert_digest "every 15 minutes"`). Without `ALERT_EMAIL`, alerts are recorded as `unsent` and nothing is emailed. Costs: one D1 write per alert, an email only when one is sent, so a burst of failures costs at most 20 emails an hour.
+
 ## The development error page
 
 In `ocre dev`, a 500 shows the development error page instead of `templates/error.html`: the internal message, the request (id, method, path, query and headers, with cookies, `Authorization` and sensitive names filtered) and the D1 statements it ran, with their durations. A JSON error gets the message as `error.detail`:

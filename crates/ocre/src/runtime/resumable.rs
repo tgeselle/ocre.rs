@@ -7,9 +7,8 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     routing::{post, put},
 };
-use futures_util::StreamExt as _;
 use serde::Deserialize;
-use worker::{Env, FixedLengthStream, HttpMetadata, UploadedPart, send::SendFuture};
+use worker::{Env, send::SendFuture};
 
 use super::{Ctx, storage::bucket};
 use crate::{
@@ -140,19 +139,8 @@ async fn start(
     let content_type = essence(&request.content_type);
     let (part_size, part_count) = check_multipart(field, request.size, &content_type, rules, max_part)?;
     let key = new_key(prefix);
-    let metadata = HttpMetadata { content_type: Some(content_type), ..Default::default() };
-    let upload = bucket(env)?
-        .create_multipart_upload(key.clone())
-        .http_metadata(metadata)
-        .execute()
-        .await
-        .map_err(|err| Error::internal(format!("R2 could not start the upload of `{key}`: {err}")))?;
-    Ok(MultipartUpload {
-        signed_key: sign_key(&secret(env)?, &key),
-        upload_id: upload.upload_id().await,
-        part_size,
-        part_count,
-    })
+    let upload_id = super::s3::create(env, &key, content_type).await?;
+    Ok(MultipartUpload { signed_key: sign_key(&secret(env)?, &key), upload_id, part_size, part_count })
 }
 
 fn part_urls(ctx: &Ctx, path: &str, field: &str, request: &PartsRequest) -> Result<PartUrls> {
@@ -189,38 +177,20 @@ async fn upload_part(
             "a part sent through the Worker is at most {MAX_WORKER_PART} bytes"
         )));
     }
-    let chunks = body
-        .into_data_stream()
-        .map(|chunk| chunk.map(|bytes| bytes.to_vec()).map_err(|err| worker::Error::RustError(err.to_string())));
-    let upload = bucket(env)?.resume_multipart_upload(key.clone(), target.upload_id.clone())?;
-    let stored =
-        upload.upload_part(part, FixedLengthStream::wrap(chunks, size)).await.map_err(|err| match err.to_string() {
-            // The upload was completed, aborted or expired: the browser starts over.
-            text if text.contains("does not exist") => Error::NotFound,
-            text => Error::bad_request(format!("R2 refused part {part} of `{key}`: {text}")),
-        })?;
-    Ok(CompletedPart { part_number: stored.part_number(), etag: stored.etag() })
+    let etag = super::s3::upload_part(env, &key, &target.upload_id, part, size, body).await?;
+    Ok(CompletedPart { part_number: part, etag })
 }
 
 async fn finish(ctx: &Ctx, field: &str, request: &FinishRequest, complete: bool) -> Result<StatusCode> {
     let env = ctx.env();
     let key = verify_key(field, &secret(env)?, &request.signed_key)?;
-    let upload = bucket(env)?.resume_multipart_upload(key.clone(), request.upload_id.clone())?;
-    if complete {
-        if request.parts.is_empty() {
-            return Err(Error::bad_request("complete needs the parts"));
+    if !complete {
+        super::s3::abort(env, &key, &request.upload_id).await?;
+    } else if !super::s3::complete(env, &key, &request.upload_id, &request.parts).await? {
+        // Completed by an earlier request whose answer was lost, aborted or expired.
+        if bucket(env)?.head(key.clone()).await?.is_none() {
+            return Err(Error::NotFound);
         }
-        // R2 answers a part's ETag in quotes to a direct PUT, without them to the Worker.
-        let parts = request
-            .parts
-            .iter()
-            .map(|part| UploadedPart::new(part.part_number, part.etag.trim_matches('"').to_owned()));
-        upload
-            .complete(parts)
-            .await
-            .map_err(|err| Error::bad_request(format!("R2 could not assemble `{key}`: {err}")))?;
-    } else {
-        upload.abort().await.map_err(|err| Error::bad_request(format!("R2 could not abort `{key}`: {err}")))?;
     }
     Ok(StatusCode::NO_CONTENT)
 }

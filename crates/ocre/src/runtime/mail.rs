@@ -169,6 +169,11 @@ pub fn url(ctx: &Ctx, path: &str) -> Result<String> {
 }
 
 pub(crate) async fn deliver(env: &Env, email: Email) -> Result<()> {
+    let dropped = crate::mail::dropped_line(&email);
+    let Some(email) = crate::mail::intercepted(email, &|name| var(env, name)) else {
+        worker::console_log!("{dropped}");
+        return Ok(());
+    };
     let adapter = adapter_for(var(env, MAIL_ADAPTER).as_deref(), &email)?;
     let outgoing = Outgoing::new(var(env, MAIL_FROM), email)?;
     match adapter {

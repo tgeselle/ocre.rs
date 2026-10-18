@@ -273,7 +273,7 @@ Cookies other than the session go through the `Cookies` extractor (Rails' `cooki
 
 ### Futures that are not Send
 
-axum requires a handler's future to be `Send`. Ocre's types are, but a future holding a JavaScript value is not: `worker::Fetch`, reqwest in WebAssembly, `wasm_bindgen_futures::JsFuture`, a D1 or KV handle from `worker` itself. Awaiting one in a handler fails to compile at the route, far from the cause:
+axum requires a handler's future to be `Send`. Ocre's types are (including `ocre::http`), but a future holding a JavaScript value is not: `worker::Fetch`, reqwest in WebAssembly, `wasm_bindgen_futures::JsFuture`, a D1 or KV handle from `worker` itself. Awaiting one in a handler fails to compile at the route, far from the cause:
 
 ```text
 error[E0277]: the trait bound `fn() -> impl Future<Output = Result<..., ...>> {remote}: Handler<_, _>` is not satisfied
@@ -287,26 +287,31 @@ Put `#[worker::send]` on the handler: it wraps its future in `worker::send::Send
 
 ## Calling other services
 
-Ocre has no HTTP client of its own; two work in a Worker:
-
-- [reqwest](https://docs.rs/reqwest) with `default-features = false`: in WebAssembly it calls the Worker's `fetch`, with its usual API (`json`, headers, query strings). `cargo add reqwest --no-default-features --features json`.
-- `worker::Fetch`, the `worker` crate's thin wrapper over `fetch`.
+`ocre::http` sends requests through the Worker's `fetch`, with `Send` futures (no `#[worker::send]`), a timeout (30 s by default) and errors that name the call without its query string:
 
 ```rust,ignore
-use axum::Json;
-use ocre::{Error, Result};
+use std::time::Duration;
 
-#[worker::send] // reqwest's futures hold JavaScript values
-async fn rates() -> Result<Json<serde_json::Value>> {
-    let rates = reqwest::get("https://api.example.com/rates")
-        .await
-        .map_err(|err| Error::internal(format!("rates API: {err}")))?
-        .json()
-        .await
-        .map_err(|err| Error::internal(format!("rates API: {err}")))?;
+use axum::{Json, extract::State};
+use ocre::{Ctx, Result, http};
+
+async fn rates(State(ctx): State<Ctx>) -> Result<Json<serde_json::Value>> {
+    let key = ctx.secret("RATES_API_KEY").await?;
+    let rates = http::Request::get("https://api.example.com/rates")
+        .query(&[("base", "usd")])
+        .bearer(&key)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await?
+        .error_for_status()? // a non-2xx becomes Error::Internal with the status and the start of the body
+        .json()?;
     Ok(Json(rates))
 }
 ```
+
+`Request::post(url).json(&body)`, `.form(&pairs)`, `.body(bytes, content_type)` set the body; `.header(name, value)` adds headers; `.follow_redirects(false)` keeps a 3xx as the answer. The `Response` has `status`, `headers`, `body`, `text()`, `json::<T>()` and `header(name)`. [reqwest](https://docs.rs/reqwest) with `default-features = false` also works in WebAssembly, with `#[worker::send]` on the handler.
+
+Request tests reach a fake service on `127.0.0.1` ([Fake services](testing.md#fake-services)): read its address from a test header with `ocre::http::test_override(&headers, "rates-api").unwrap_or(RATES_URL)`, which only debug builds honor.
 
 Each call is a subrequest: 50 per invocation on the free plan (counted with the other calls a job makes, see [Long jobs](jobs.md#long-jobs-continue-in-steps)). Cache answers that change slowly with `ocre::cache::fetch`, and put secrets (API keys) in Worker secrets read with `ctx.config()`.
 

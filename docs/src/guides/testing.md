@@ -287,13 +287,36 @@ hello:
   author: ada              # author_id = id of the fixture labelled `ada` in users.yml
 ```
 
-Read them with `ocre::testing::fixture_id("hello")` and `fixture("posts", "hello")`. `ocre::testing::sql(query)`, `count(table)` and `insert(table, values)` reach the test database directly.
+Read them with `ocre::testing::fixture_id("hello")` and `fixture("posts", "hello")`. `ocre::testing::sql(query)`, `count(table)`, `insert(table, values)` (returns the new `id`) and `insert_row(table, values)` (tables keyed by a UUID or several columns) reach the test database directly.
+
+### Fake services
+
+`ocre test --e2e` runs the app in workerd on the same machine, so the app can call a server the test starts. `FakeServer::start()` listens on a free port of `127.0.0.1`, answers each request with the newest matching canned answer (by method, `*` for any, and path prefix; `404` otherwise) and records every request:
+
+```rust,ignore
+use ocre::{serde_json::{Value, json}, testing::{Client, FakeServer, eventually}};
+
+#[test]
+#[ignore = "request test: run with `ocre test --e2e`"]
+fn checkout_creates_an_invoice() {
+    let payments = FakeServer::start();
+    payments.answer_json("POST", "/invoices", 201, &json!({"id": "inv_1", "url": "https://pay.example/inv_1"}));
+    // The app reads it with `ocre::http::test_override(&headers, "payments-api")`, in debug builds only.
+    let mut client = Client::new().header("x-ocre-test-payments-api", payments.url());
+    client.post("/checkout", &[("plan", "pro")]).assert_redirect_to("https://pay.example/inv_1");
+    let invoice = eventually(|| payments.requests().into_iter().find(|request| request.path == "/invoices"));
+    assert_eq!(invoice.json::<Value>()["amount"], 900);
+    assert_eq!(invoice.header("authorization"), Some("Bearer test-key"));
+}
+```
+
+The same server receives the app's outgoing webhooks: register `payments.url()` as the endpoint (`webhooks::deliver` reaches `127.0.0.1` in debug builds) and check `requests()`. A header named `x-ocre-test-<name>` is how a test points one client's requests at a fake without a setting; release builds never read it, so visitors cannot redirect the app's calls.
 
 ### Assertions, the server log and time
 
 - `assert_difference(|| count("posts"), 1, || { ... })`, `assert_no_difference`, `assert_changes`, `assert_no_changes`: Rails' names.
 - `Log::mark()` then `log.wait_for("[ocre jobs] send_welcome done")`: lines the server printed since the mark.
-- `eventually(|| ...)`: retries a check for a few seconds (queues, broadcasts).
+- `eventually(|| ...)`: retries a check every 100 ms for up to 30 seconds (queues, broadcasts); `eventually_within(Duration::from_secs(120), || ...)` for slower chains of jobs.
 - `travel_to(unix)`, `travel(seconds)`, `freeze_time()`, `travel_back()`: `ocre::now()` in the test process (native code under test, such as token expiry).
 - `redact(text)`: replaces ids, dates and tokens, for stable snapshots.
 

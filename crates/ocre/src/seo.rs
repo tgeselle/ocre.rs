@@ -11,6 +11,12 @@
 //! The canonical and `hreflang` links of a page come from the visitor's
 //! locale: [`I18n::alternate_links`](crate::i18n::I18n::alternate_links).
 //! `ocre g seo` writes `src/seo.rs` with the routes and a list of pages.
+//!
+//! One address per page: [`redirect_www`] sends `www.` + the host of
+//! `APP_URL` to `APP_URL` with a `301`. [IndexNow](https://www.indexnow.org)
+//! tells Bing, Yandex and others that pages changed without waiting for a
+//! crawl: [`indexnow_routes`] serves the key file, [`submit_to_indexnow`]
+//! sends the URLs.
 
 use std::fmt::Write as _;
 
@@ -19,6 +25,46 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
+use serde_json::{Value, json};
+
+pub use crate::runtime::seo::{indexnow_routes, redirect_www, submit_to_indexnow};
+
+/// Worker variable holding the IndexNow key: 8 to 128 letters, digits or `-` (`ocre secret` prints one).
+///
+/// Not a secret: search engines check it by fetching [`INDEXNOW_KEY_PATH`].
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(ocre::seo::INDEXNOW_KEY, "INDEXNOW_KEY");
+/// ```
+pub const INDEXNOW_KEY: &str = "INDEXNOW_KEY";
+
+/// Where [`indexnow_routes`] serves the key: `/indexnow.txt` (the submission names it as `keyLocation`).
+pub const INDEXNOW_KEY_PATH: &str = "/indexnow.txt";
+
+/// The endpoint IndexNow submissions go to; participating engines share them.
+pub const INDEXNOW_ENDPOINT: &str = "https://api.indexnow.org/indexnow";
+
+/// `base` + `path_and_query` when `host` is `www.` + `base`'s host; `None` otherwise.
+pub(crate) fn www_target(base: &str, host: Option<&str>, path_and_query: &str) -> Option<String> {
+    let base = base.trim().trim_end_matches('/');
+    let (_, app_host) = base.split_once("://")?;
+    let host = host?.to_ascii_lowercase();
+    (host.strip_prefix("www.")? == app_host.to_ascii_lowercase()).then(|| format!("{base}{path_and_query}"))
+}
+
+/// Whether `key` is a valid IndexNow key.
+pub(crate) fn valid_indexnow_key(key: &str) -> bool {
+    (8..=128).contains(&key.len()) && key.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+/// The JSON body of an IndexNow submission of `urls` for the site at `base`.
+pub(crate) fn indexnow_body(base: &str, key: &str, urls: &[String]) -> Option<Value> {
+    let base = base.trim().trim_end_matches('/');
+    let host = base.split_once("://")?.1;
+    Some(json!({"host": host, "key": key, "keyLocation": format!("{base}{INDEXNOW_KEY_PATH}"), "urlList": urls}))
+}
 
 /// `data` as a JSON-LD `<script>` for a page's `<head>`.
 ///

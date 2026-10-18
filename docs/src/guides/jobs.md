@@ -98,10 +98,11 @@ And the queue in `cloudflare.config.ts` (for an app named `shop`), the producer 
 JOBS: bindings.queue({ name: "shop-jobs" }),
 
 // in worker.triggers
-// Runs the jobs of shop-jobs: up to 10 messages per run, waiting at most 5 s
-// to fill a batch. Each run is one Worker request with 10 ms of CPU on the free
-// plan: lower maxBatchSize for CPU-heavy jobs. ...
-triggers.queue({ name: "shop-jobs", deadLetterQueue: "shop-jobs-failed", maxBatchSize: 10, maxBatchTimeout: 5, maxRetries: 5 }),
+// Runs the jobs of shop-jobs: up to 10 messages per run, delivered as soon as
+// they arrive (maxBatchTimeout 0: a lone job, the usual case, starts at once).
+// Each run is one Worker request with 10 ms of CPU on the free plan: lower
+// maxBatchSize for CPU-heavy jobs. ...
+triggers.queue({ name: "shop-jobs", deadLetterQueue: "shop-jobs-failed", maxBatchSize: 10, maxBatchTimeout: 0, maxRetries: 5 }),
 ```
 
 ## Write perform
@@ -260,13 +261,13 @@ Next:
   ocre deploy creates the queue shop-jobs-urgent and its dead-letter queue
 ```
 
-The generated `perform_later` sends to that queue (`ocre::jobs::queue(ctx, "urgent").enqueue(...)`), and `cloudflare.config.ts` gets the producer `JOBS_URGENT` and a consumer that waits at most 1 second to fill a batch:
+The generated `perform_later` sends to that queue (`ocre::jobs::queue(ctx, "urgent").enqueue(...)`), and `cloudflare.config.ts` gets the producer `JOBS_URGENT` and its own consumer, which also delivers each message at once:
 
 ```ts
 // in worker.env
 JOBS_URGENT: bindings.queue({ name: "shop-jobs-urgent" }),
 // in worker.triggers
-triggers.queue({ name: "shop-jobs-urgent", deadLetterQueue: "shop-jobs-urgent-failed", maxBatchSize: 10, maxBatchTimeout: 1, maxRetries: 5 }),
+triggers.queue({ name: "shop-jobs-urgent", deadLetterQueue: "shop-jobs-urgent-failed", maxBatchSize: 10, maxBatchTimeout: 0, maxRetries: 5 }),
 ```
 
 Every queue is consumed by the same `queue` event and the same `perform`: the queue changes when a job runs, not how. Queue names are lowercase letters, digits and `-`; `default` is the `JOBS` queue. Queues are free to create; a message costs the same 3 operations on any queue. Loco's worker tags (a process that only runs some jobs) have no equivalent: there are no worker processes, and a queue per kind of work gives the same isolation.

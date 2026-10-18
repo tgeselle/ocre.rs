@@ -54,8 +54,13 @@
 //!
 //! Receiving uses Cloudflare Email Routing, free and unlimited on every plan.
 //! Every line Ocre logs about mail starts with [`LOG_PREFIX`].
+//!
+//! [`intercept`] registers a function every outgoing email goes through
+//! first (Rails' interceptors): rewrite recipients on a staging copy, or
+//! drop automated mail behind a switch.
 
 mod dev;
+mod intercept;
 mod parse;
 
 use serde::{Deserialize, Serialize};
@@ -64,6 +69,8 @@ use serde_json::{Value, json};
 pub use crate::runtime::mail::{InboundEmail, deliver_in, deliver_later, receive, send, url};
 pub(crate) use dev::capture;
 pub use dev::{Preview, dev_routes};
+pub use intercept::intercept;
+pub(crate) use intercept::{dropped_line, intercepted};
 pub(crate) use parse::Message;
 
 use crate::{Error, Result, validate::is_email};

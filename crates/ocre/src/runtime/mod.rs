@@ -2,6 +2,7 @@
 //! workerd, so it is exercised by the end-to-end tests
 //! (`crates/ocre-cli/tests/system/e2e.rs`) rather than by native unit tests.
 
+pub(crate) mod alerts;
 pub(crate) mod cache;
 #[cfg(target_arch = "wasm32")]
 mod crypto;
@@ -10,6 +11,7 @@ mod d1;
 pub(crate) mod errors;
 #[cfg(feature = "graphql")]
 mod graphql;
+pub(crate) mod http;
 pub(crate) mod jobs;
 pub(crate) mod jwt;
 pub(crate) mod mail;
@@ -20,8 +22,10 @@ mod query;
 #[cfg(feature = "realtime")]
 pub(crate) mod realtime;
 pub(crate) mod resumable;
+pub(crate) mod s3;
 pub(crate) mod secrets;
 pub(crate) mod security;
+pub(crate) mod seo;
 pub(crate) mod storage;
 pub(crate) mod webhooks;
 
@@ -79,7 +83,9 @@ use crate::{protect, session};
 /// total, in the browser's Network panel) and show the development error
 /// page: a 500 page with the internal message, the request's details
 /// (secrets filtered) and the D1 statements it ran, or `error.detail` in a
-/// JSON error. Release builds (`ocre deploy`) never show internal details.
+/// JSON error; and they mount [`DEV_STORAGE_PATH`](crate::storage::DEV_STORAGE_PATH),
+/// the route presigned storage URLs point to in development. Release
+/// builds (`ocre deploy`) never show internal details.
 ///
 /// # Errors
 ///
@@ -134,6 +140,8 @@ pub async fn serve(routes: Router<Ctx>, req: HttpRequest, env: Env) -> worker::R
     let mut req = req;
     req.extensions_mut().insert(ctx.clone());
     req.extensions_mut().insert(crate::RequestId(request_id));
+    // Debug builds: presigned storage URLs point to this route on the local bucket.
+    let routes = if dev { routes.merge(s3::dev_routes()) } else { routes };
     let mut app = protect::wrap(routes.with_state(ctx.clone()), config);
     let response = app.call(req).await?;
     let total_ms = crate::clock::now_millis() - started;

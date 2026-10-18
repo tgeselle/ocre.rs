@@ -871,6 +871,64 @@ fn seo_lists_pages_in_every_locale_when_the_app_has_translations() {
 }
 
 #[test]
+fn blog_compiles_markdown_articles_in_every_locale() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    let report = ok(&sandbox, &["g", "blog"], &root);
+    assert_eq!(
+        report["created"],
+        json!([
+            "build.rs",
+            "content/blog/README.md",
+            "content/blog/welcome/en.md",
+            "src/blog.rs",
+            "templates/blog/index.html",
+            "templates/blog/show.html"
+        ])
+    );
+    assert_eq!(report["updated"], json!(["Cargo.toml", "src/lib.rs"]));
+    assert_eq!(report["next"][1], "ocre dev, then open http://localhost:8787/blog");
+    assert!(read(&root, "build.rs").contains("const DEFAULT_LOCALE: &str = \"en\";"));
+    assert!(read(&root, "Cargo.toml").contains("[build-dependencies]\npulldown-cmark = "));
+    assert!(read(&root, "src/lib.rs").contains(".merge(blog::routes())"));
+    assert!(read(&root, "content/blog/welcome/en.md").contains("\npublished: 20"));
+
+    let root = sandbox.new_app("intl", &[]);
+    ok(&sandbox, &["g", "locale", "fr", "en"], &root);
+    let report = ok(&sandbox, &["g", "blog"], &root);
+    assert_eq!(report["next"][1], "ocre dev, then open http://localhost:8787/fr/blog");
+    assert!(read(&root, "content/blog/welcome/en.md").contains("Translate this file"));
+    assert!(read(&root, "build.rs").contains("const DEFAULT_LOCALE: &str = \"fr\";"));
+    assert!(read(&root, "src/blog.rs").contains("Router::new().nest(\"/{locale}\", pages)"));
+
+    let root = sandbox.new_app("svc", &["--api"]);
+    assert_eq!(fails(&sandbox, &["g", "blog"], &root)["error"], "a blog needs HTML pages; this app is API-only");
+}
+
+#[test]
+fn alerts_add_the_table_once_and_the_owner_address() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.new_app("shop", &[]);
+    let report = ok(&sandbox, &["g", "alerts"], &root);
+    let migration = report["created"][0].as_str().unwrap().to_owned();
+    assert!(migration.ends_with("_create_alerts.sql"), "{migration}");
+    assert!(read(&root, &migration).contains("CREATE TABLE alerts ("));
+    assert!(read(&root, ".dev.vars").ends_with("ALERT_EMAIL=owner@example.com\n"));
+    assert_eq!(report["next"][0], "ocre migrate");
+    let error = fails(&sandbox, &["g", "alerts"], &root);
+    assert_eq!(error["error"], "this app already has the alerts table");
+
+    let root = sandbox.new_app("ops", &[]);
+    fs::write(root.join(".dev.vars"), "ALERT_EMAIL=me@example.com").unwrap();
+    ok(&sandbox, &["g", "alerts"], &root);
+    assert_eq!(read(&root, ".dev.vars"), "ALERT_EMAIL=me@example.com", "already set");
+    let root = sandbox.new_app("desk", &[]);
+    fs::write(root.join(".dev.vars"), "X=1").unwrap();
+    ok(&sandbox, &["g", "alerts"], &root);
+    assert_eq!(read(&root, ".dev.vars"), "X=1\nALERT_EMAIL=owner@example.com\n");
+}
+
+#[test]
 fn push_needs_the_pwa_and_links_users_after_auth() {
     let sandbox = Sandbox::new();
     let root = sandbox.new_app("shop", &[]);

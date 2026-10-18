@@ -43,6 +43,8 @@ on stdout (`"ok": true|false`, plus `error` and `hint` on failure).
 | Receive email (Email Routing) | `ocre g mailbox` |
 | Push notifications to browsers (after `ocre g pwa`) | `ocre g push` |
 | Sitemap, llms.txt; JSON-LD with `ocre::seo::json_ld`; hreflang with `i18n.alternate_links` | `ocre g seo` |
+| Blog: Markdown articles in `content/blog/<slug>/<locale>.md`, compiled at build time | `ocre g blog` |
+| Owner alerts by email, deduplicated and capped (`ocre::alerts::record`) | `ocre g alerts` |
 | Signed webhook from a service (payments, GPU jobs), each event once | `ocre g webhook payments` (`--standard` for Standard Webhooks) |
 | Work a Worker cannot do (ffmpeg, GPU, AI): submit to a service, track its state | `ocre g external_job upscale video_id:integer` |
 | Unguessable ids in URLs (`/videos/Xq3v9L...`, not `/videos/42`) | add `public_id:token` to the scaffold/api/resource fields |
@@ -165,10 +167,16 @@ package.json        pinned cf, wrangler, typescript (commit package-lock.json); 
   `npx tsc -p .` (or `ocre doctor`).
 - Handlers are plain axum handlers taking `State(ctx): State<Ctx>`. Ocre types
   are `Send`; add `#[worker::send]` only to a handler that awaits another
-  crate's JavaScript-backed future (reqwest, `worker::Fetch`): without it the
+  crate's JavaScript-backed future (`worker::Fetch`): without it the
   route fails with "`Handler<_, _>` is not satisfied".
-- Outgoing HTTP: `reqwest` with `default-features = false` (it uses `fetch` in
-  WebAssembly) or `worker::Fetch`; each call is a subrequest.
+- Outgoing HTTP: `ocre::http::Request::post(url).bearer(&key).json(&body)
+  .timeout(..).send().await?.error_for_status()?.json::<T>()?` (a `Send`
+  future, 30 s timeout by default); each call is a subrequest. Request tests
+  point it at an `ocre::testing::FakeServer` through a header read with
+  `ocre::http::test_override(&headers, "payments-api")` (debug builds only).
+- Webhooks to users' URLs: `ocre::webhooks::deliver(url, secret, event_id, &json)`
+  (Standard Webhooks signature, no redirects, private hosts refused in
+  production; `check_public_url` when saving the URL), from a job that retries.
 - Queries: start from the model's `query()` (an `ocre::Query<T>`):
   `post::query().eq("published", true).order_desc("id").page(page).all(&ctx.db()?)`;
   `.first(&db)` (find_by), `.count`, `.exists`, `.pluck(&db, "id")`,
@@ -293,7 +301,12 @@ package.json        pinned cf, wrangler, typescript (commit package-lock.json); 
 - Errors: return `Error::internal("...")` for unexpected failures (logged with the
   request's details and sent to `ocre::errors` subscribers, e.g. Sentry with the
   `SENTRY_DSN` secret); `ctx.errors().report(...)` for errors you handle yourself.
+  A custom subscriber sends `report.scrubbed()` (no emails, tokens, ids).
   `ocre dev` shows a development error page with the D1 statements the request ran.
+- Owner alerts (after `ocre g alerts`): `ocre::alerts::record(&ctx,
+  Alert::new("payment.failed").key(user_id).detail(..)).await` emails
+  `ALERT_EMAIL`, once per reason and key per 30 minutes, 20 an hour at most;
+  `ocre::alerts::send_digest(ctx)` from a schedule sends the rest.
 - `GET /up` is the health check; keep it cheap (no database).
 - Email: build it in a mailer (`src/mailers/`), send it from the handler with
   `ocre::mail::send(&ctx, mailers::user::welcome(&address)?).await?`. Validate
@@ -398,7 +411,11 @@ package.json        pinned cf, wrangler, typescript (commit package-lock.json); 
     `R2_BUCKET` vars, `R2_ACCESS_KEY_ID`/`R2_SECRET_ACCESS_KEY` secrets and a
     bucket CORS rule) then `attach_direct_upload(signed_key)`; purge abandoned
     ones from a schedule with `purge_unattached`. `serve_redirect` sends a 302
-    to a presigned GET. Presigned URLs hit the real bucket, not `ocre dev`'s.
+    to a presigned GET. In `ocre dev` presigned URLs point to the app's
+    `/ocre/dev/storage/...` route on the local bucket (no R2_* settings needed).
+  - Files another service writes: `create_multipart`, `presign_part`,
+    `list_parts`, `complete_multipart`, `abort_multipart`,
+    `list_multipart_uploads`; `read_range` and `copy` for large objects.
   - Resized images: `Variant::new().width(300).path("/photos/1/image")`
     (Cloudflare Image Transformations; custom domain only, not workers.dev).
   - Files of rows deleted by `ON DELETE CASCADE` stay in R2: delete them in
@@ -459,6 +476,10 @@ package.json        pinned cf, wrangler, typescript (commit package-lock.json); 
   - Locale: `{locale}` path segment (`.nest("/{locale}", routes)`), else the
     `locale` cookie (`i18n.cookie()` is its `Set-Cookie` value), else
     `Accept-Language`, else the default (first code in `ocre::locales!`).
+    Public pages with one URL per language and the default unprefixed
+    (`/pricing`, `/fr/pricing`): `ocre::locales!("en", "fr"; unprefixed_default)`
+    and `.merge(ocre::i18n::localized(pages))`. `<html dir="{{ i18n.dir() }}">`
+    for right-to-left languages.
   - Defaults: `i18n.t("key").or_key("other.key").or("Text")`. Scoped keys:
     `i18n.scope("posts.index")` in the handler, then `{{ i18n.t(".title") }}`.
     Markup in a translation: `{{ i18n.t("terms").arg("name", n).html() }}`

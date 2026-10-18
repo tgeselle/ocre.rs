@@ -1368,7 +1368,7 @@ Ocre crate          git https://github.com/tgeselle/ocre.rs
 {"about":{"app":"ci-app","app_version":"0.1.0","cli":"0.1.0","ocre":"git https://github.com/tgeselle/ocre.rs"},"command":"version","ok":true}
 ```
 
-`ocre --version` (or `-V`) prints only the CLI's version, e.g. `ocre 0.2.0`.
+`ocre --version` (or `-V`) prints only the CLI's version, e.g. `ocre 0.3.0`.
 
 ## ocre stats
 

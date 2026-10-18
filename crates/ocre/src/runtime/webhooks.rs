@@ -1,6 +1,6 @@
 //! [`once`]: a webhook event's effect runs once, however many times it is delivered.
 
-use crate::{Db, Result, params};
+use crate::{Db, Error, Result, config::Environment, params, webhooks::UrlHost};
 
 /// A delivery left `processing` this long (seconds) is taken over by the
 /// next one: the invocation that claimed it died before finishing.
@@ -117,4 +117,96 @@ pub fn post_signed(
         let mut response = worker::Fetch::Request(worker::Request::new_with_init(&url, &init)?).send().await?;
         Ok(Answer { status: response.status_code(), text: response.text().await? })
     })
+}
+
+/// Checks that `url` may receive webhooks: `http(s)`, no credentials, and a host that is not (and does not resolve to) a private address.
+///
+/// Call it when a user saves an endpoint URL, to answer the form with the
+/// reason; [`deliver`] calls it again before each delivery in release
+/// builds, since a name can point elsewhere later. A host name is
+/// resolved with DNS over HTTPS (Cloudflare's resolver, `A` and `AAAA`
+/// records: two subrequests), as a Worker has no resolver of its own. A
+/// DNS change between the check and the delivery (DNS rebinding) is not
+/// caught; Workers cannot reach private networks anyway, so the check
+/// mainly keeps the app from calling itself or its own services.
+///
+/// # Errors
+///
+/// [`Error::BadRequest`](crate::Error::BadRequest) (400) with the reason
+/// ("must start with https:// or http://", "is a private address", "was
+/// not found"), or [`Error::Internal`](crate::Error::Internal) when the
+/// resolver cannot be reached.
+///
+/// # Examples
+///
+/// ```no_run
+/// use ocre::{Result, webhooks};
+///
+/// async fn save_endpoint(url: &str) -> Result<()> {
+///     webhooks::check_public_url(url).await?; // 400 "The webhook URL's host 10.0.0.5 is a private address"
+///     Ok(())
+/// }
+/// ```
+pub fn check_public_url(url: &str) -> impl Future<Output = Result<()>> + Send + use<> {
+    let url = url.to_owned();
+    async move {
+        let name = match crate::webhooks::url_host(&url)? {
+            UrlHost::Ip(ip) => {
+                let shown = ip.to_string();
+                return crate::webhooks::refused_addresses(&shown, &[ip]).map_or(Ok(()), Err);
+            }
+            UrlHost::Name(name) => name,
+        };
+        let mut addresses = Vec::new();
+        for kind in ["A", "AAAA"] {
+            let answer = crate::http::Request::get("https://cloudflare-dns.com/dns-query")
+                .query(&[("name", &name), ("type", kind)])
+                .header("accept", "application/dns-json")
+                .timeout(std::time::Duration::from_secs(5))
+                .send()
+                .await?
+                .error_for_status()?;
+            addresses.extend(crate::webhooks::dns_addresses(&answer.json()?));
+        }
+        crate::webhooks::refused_addresses(&name, &addresses).map_or(Ok(()), Err)
+    }
+}
+
+/// POSTs `payload` as JSON to the endpoint `url`, signed as a [Standard Webhooks](https://www.standardwebhooks.com) delivery, and returns the answer.
+///
+/// Headers: `webhook-id` (`id`, the event's id, the same on every retry so
+/// receivers can deduplicate), `webhook-timestamp` (now) and
+/// `webhook-signature` (`v1,<base64>` with `secret`, see
+/// [`sign_standard`](crate::webhooks::sign_standard)); receivers verify it
+/// with the Standard Webhooks libraries or [`verify_standard`](crate::webhooks::verify_standard).
+/// Waits at most [`DELIVERY_TIMEOUT`](crate::webhooks::DELIVERY_TIMEOUT)
+/// and never follows a redirect (a 3xx is the answer). In release builds
+/// the URL is checked first ([`check_public_url`]); debug builds deliver to
+/// any host, so request tests can run a receiver on `127.0.0.1`.
+///
+/// Any status is an answer: retry on a non-2xx from a job. One subrequest,
+/// plus two DNS lookups in release builds for a host name.
+///
+/// # Errors
+///
+/// [`Error::BadRequest`](crate::Error::BadRequest) when the URL is refused;
+/// [`Error::Internal`](crate::Error::Internal) when `secret` is not a
+/// `whsec_` secret, `payload` is not serializable, or the endpoint cannot
+/// be reached or does not answer in time.
+pub fn deliver(
+    url: &str,
+    secret: &str,
+    id: &str,
+    payload: &serde_json::Value,
+) -> impl Future<Output = Result<crate::http::Response>> + Send + use<> {
+    let body = serde_json::to_vec(payload).map_err(|err| Error::internal(format!("webhook payload: {err}")));
+    let request = body.and_then(|body| crate::webhooks::delivery_request(url, secret, id, body, crate::now()));
+    let url = url.to_owned();
+    async move {
+        let request = request?;
+        if !Environment::current().is_development() {
+            check_public_url(&url).await?;
+        }
+        request.send().await
+    }
 }

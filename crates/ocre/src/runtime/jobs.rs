@@ -19,7 +19,7 @@ use crate::{
 /// Sends `job` to the `JOBS` queue, to run in the background through [`consume`](crate::jobs::consume).
 ///
 /// Returns once Cloudflare stored the message; the `queue` event runs it
-/// within seconds (`maxBatchTimeout: 5` in cloudflare.config.ts). The job is
+/// at once (`maxBatchTimeout: 0` in cloudflare.config.ts). The job is
 /// serialized to JSON and wrapped as `{"at": <now>, "job": ...}`; the whole
 /// message must fit in 128 KB, so pass ids, not records. The returned future
 /// is `Send`, so axum handlers can await it.
@@ -101,10 +101,10 @@ pub fn enqueue_all<J: Serialize>(ctx: &Ctx, jobs: &[J]) -> impl Future<Output = 
 ///
 /// Cloudflare Queues has no priorities: Ocre gives urgent work its own
 /// queue instead, like Rails' `queue_as`/`set(queue:)` and Loco's named
-/// queues. Each queue has its own consumer settings in cloudflare.config.ts
-/// (`ocre g job <Name> --queue urgent` adds `<app>-jobs-urgent` with
-/// `maxBatchTimeout: 1`), so a backlog of slow jobs on `default` never
-/// delays it. Every queue is consumed by the same `queue` event and the
+/// queues. Each queue has its own consumer in cloudflare.config.ts
+/// (`ocre g job <Name> --queue urgent` adds `<app>-jobs-urgent`), so a
+/// backlog of slow jobs on `default` never delays it. Every queue is
+/// consumed by the same `queue` event and the
 /// same `perform`. The name `default` is the `JOBS` queue of
 /// [`enqueue`](crate::jobs::enqueue); `urgent` is bound as `JOBS_URGENT`.
 ///

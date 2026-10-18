@@ -507,6 +507,18 @@ enum GenerateCommand {
     ///
     /// Example: `ocre g seo`.
     Seo,
+    /// A Markdown blog: content/blog/<slug>/<locale>.md compiled at build
+    /// time by build.rs (pulldown-cmark, a build dependency), served at
+    /// /blog and /blog/<slug> by src/blog.rs in every locale of the app.
+    ///
+    /// Example: `ocre g blog`.
+    Blog,
+    /// Owner alerts by email (`ocre::alerts`): the `alerts` table migration
+    /// and ALERT_EMAIL in .dev.vars. Repeats are emailed once per 30
+    /// minutes, at most 20 an hour; the rest go into a digest.
+    ///
+    /// Example: `ocre g alerts`.
+    Alerts,
     /// Web push notifications (after `ocre g pwa`): src/push.rs stores the
     /// browsers' subscriptions and sends to them (`notify_all`, or
     /// `notify_user` after `ocre g auth`), push.js subscribes from a button
@@ -933,6 +945,8 @@ fn generate_command(args: GenerateArgs) -> CliResult {
         }
         GenerateCommand::Webhook { name, standard } => generate::webhook(project, &name, standard),
         GenerateCommand::Seo => generate::seo(project),
+        GenerateCommand::Blog => generate::blog(project),
+        GenerateCommand::Alerts => generate::alerts(project),
         GenerateCommand::Push => generate::push(project),
         GenerateCommand::Cache => generate::cache(project),
         GenerateCommand::Data { name } => generate::data(project, &name),

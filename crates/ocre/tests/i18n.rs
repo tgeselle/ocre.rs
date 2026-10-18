@@ -270,6 +270,84 @@ fn extractor_reads_the_layer_and_the_locale_segment() {
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "without the layer");
 }
 
+static UNPREFIXED: Locales =
+    LazyLock::new(|| Catalog::load(&[("en", EN), ("fr", FR), ("ar", "ar:\n  hello: مرحبا\n")]).unprefixed_default());
+
+/// Status, `Location`, `Set-Cookie` and body of a request with these headers.
+fn visit(
+    router: &mut Router,
+    method: &str,
+    uri: &str,
+    headers: &[(&str, &str)],
+) -> (StatusCode, String, String, String) {
+    let mut request = Request::builder().method(method).uri(uri);
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let response = block_on(router.call(request.body(Body::empty()).unwrap())).unwrap();
+    let header = |name| response.headers().get(name).map(|v| v.to_str().unwrap().to_owned()).unwrap_or_default();
+    let (location, cookie) = (header("location"), header("set-cookie"));
+    (response.status(), location, cookie, body_text(response))
+}
+
+#[test]
+fn localized_pages_serve_the_default_locale_unprefixed() {
+    let pages = Router::new().route("/", get(hello)).route("/hello", get(hello));
+    let mut app = localized(pages).layer(layer(&UNPREFIXED));
+    let ok = |body: &str| (StatusCode::OK, String::new(), String::new(), body.to_owned());
+
+    // Crawlers: each URL in its own language.
+    assert_eq!(visit(&mut app, "GET", "/hello", &[]), ok("Hello Ada"));
+    assert_eq!(visit(&mut app, "GET", "/", &[]), ok("Hello Ada"));
+    let french = visit(&mut app, "GET", "/fr/hello", &[]);
+    assert_eq!(
+        (french.0, french.2.as_str(), french.3.as_str()),
+        (StatusCode::OK, "locale=fr; Path=/; Max-Age=31536000; SameSite=Lax", "Bonjour Ada")
+    );
+    assert_eq!(visit(&mut app, "GET", "/fr", &[("cookie", "locale=fr")]), ok("Bonjour Ada"), "already remembered");
+
+    // Visitors who prefer another locale are sent to it, query kept; not for forms.
+    let redirect = visit(&mut app, "GET", "/hello?a=1", &[("accept-language", "fr-CH, en;q=0.5")]);
+    assert_eq!((redirect.0, redirect.1.as_str()), (StatusCode::SEE_OTHER, "/fr/hello?a=1"));
+    assert_eq!(visit(&mut app, "GET", "/", &[("cookie", "locale=ar")]).1, "/ar");
+    assert_eq!(
+        visit(&mut app, "GET", "/hello", &[("cookie", "locale=en"), ("accept-language", "fr")]),
+        ok("Hello Ada")
+    );
+    assert_eq!(visit(&mut app, "POST", "/hello", &[("accept-language", "fr")]).0, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(visit(&mut app, "HEAD", "/hello", &[("accept-language", "fr")]).0, StatusCode::SEE_OTHER);
+
+    // The default locale's prefix goes away; unknown codes are not pages.
+    let canonical = visit(&mut app, "GET", "/en/hello?b=2", &[]);
+    assert_eq!((canonical.0, canonical.1.as_str()), (StatusCode::PERMANENT_REDIRECT, "/hello?b=2"));
+    assert_eq!(visit(&mut app, "GET", "/xx/hello", &[]).0, StatusCode::NOT_FOUND);
+}
+
+#[test]
+fn localized_pages_need_the_layer_and_the_option() {
+    let pages = || Router::new().route("/hello", get(hello));
+    for mut app in [localized(pages()), localized(pages()).layer(layer(&LOCALES))] {
+        assert_eq!(visit(&mut app, "GET", "/hello", &[]).0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(visit(&mut app, "GET", "/fr/hello", &[]).0, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+}
+
+#[test]
+fn unprefixed_default_paths_and_alternates() {
+    let en = UNPREFIXED.locale("en");
+    assert_eq!((en.path("/"), en.path("pricing")), ("/".to_owned(), "/pricing".to_owned()));
+    assert_eq!(UNPREFIXED.locale("ar").path("/"), "/ar");
+    assert_eq!(
+        UNPREFIXED.locale("fr").alternates("https://ex.com/", "/pricing"),
+        [
+            ("en", "https://ex.com/pricing".to_owned()),
+            ("fr", "https://ex.com/fr/pricing".to_owned()),
+            ("ar", "https://ex.com/ar/pricing".to_owned())
+        ]
+    );
+    assert_eq!((UNPREFIXED.locale("ar").dir(), en.dir()), ("rtl", "ltr"));
+}
+
 #[test]
 fn check_reports_syntax_and_missing_keys() {
     let problems = check(&[

@@ -35,10 +35,13 @@ fn first_locales_wire_the_catalog_and_later_ones_extend_it() {
     assert!(read(&root, "locales/en.yml").ends_with("en:\n  app:\n    welcome: \"Welcome\"\n"));
     assert!(read(&root, "locales/fr.yml").contains("Translate every key of locales/en.yml"));
 
+    // Options after the codes stay when codes are added.
+    let lib = read(&root, "src/lib.rs").replace("\"fr\");", "\"fr\"; unprefixed_default);");
+    fs::write(root.join("src/lib.rs"), lib).unwrap();
     let (report, ok) = sandbox.json(&["g", "locale", "pt-BR", "zh-Hant"], &root);
     assert!(ok, "{report}");
     let lib = read(&root, "src/lib.rs");
-    assert!(lib.contains("ocre::locales!(\"en\", \"fr\", \"pt-BR\", \"zh-Hant\");"), "{lib}");
+    assert!(lib.contains("ocre::locales!(\"en\", \"fr\", \"pt-BR\", \"zh-Hant\"; unprefixed_default);"), "{lib}");
     assert_eq!(lib.matches(".layer(ocre::i18n::layer(&LOCALES))").count(), 1);
     assert!(read(&root, "locales/pt-BR.yml").ends_with("pt-BR:\n"));
 

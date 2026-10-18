@@ -1,0 +1,29 @@
+{% extends "layout.html" %}
+{# A blog article: src/blog.rs. #}
+
+{% block title %}{{ text.title }}{% endblock %}
+
+{% block content %}
+{{ json_ld|safe }}
+<article id="blog-post" lang="{{ lang }}" dir="{{ dir }}">
+  <p><a href="{{ index_path }}">Blog</a></p>
+  <h1>{{ text.title }}</h1>
+  <p>
+    <time datetime="{{ post.published_on }}">{{ post.published_on }}</time>
+    {% if post.updated_on != post.published_on %}(updated <time datetime="{{ post.updated_on }}">{{ post.updated_on }}</time>){% endif %}
+  </p>
+  {# The body is the app's own Markdown from content/blog/, rendered by build.rs with raw HTML escaped: never user input. #}
+  <div id="blog-body">{{ text.html|safe }}</div>
+
+  {% if !more.is_empty() %}
+  <nav id="blog-more">
+    <h2>Read next</h2>
+    <ul>
+      {% for other in more %}
+      <li><a href="{{ other.path }}">{{ other.title }}</a></li>
+      {% endfor %}
+    </ul>
+  </nav>
+  {% endif %}
+</article>
+{% endblock %}

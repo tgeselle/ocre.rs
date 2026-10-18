@@ -69,3 +69,30 @@ fn llms_txt_groups_links_by_section_in_first_seen_order() {
          ## Pages\n\n- [Pricing](https://ex.com/pricing): per minute\n"
     );
 }
+
+#[test]
+fn www_hosts_go_to_the_app_url() {
+    let base = "https://Shop.example/";
+    assert_eq!(www_target(base, Some("www.shop.example"), "/a?b=1").as_deref(), Some("https://Shop.example/a?b=1"));
+    assert_eq!(www_target(base, Some("shop.example"), "/"), None, "already canonical");
+    assert_eq!(www_target(base, Some("www.other.example"), "/"), None);
+    assert_eq!(www_target(base, None, "/"), None);
+    assert_eq!(www_target("not a url", Some("www.x"), "/"), None);
+}
+
+#[test]
+fn indexnow_submissions_name_the_key_and_its_location() {
+    assert!(valid_indexnow_key("abc-1234") && valid_indexnow_key(&"a".repeat(128)));
+    assert!(!valid_indexnow_key("short") && !valid_indexnow_key(&"a".repeat(129)) && !valid_indexnow_key("has space1"));
+    let body = indexnow_body("https://shop.example/", "abc-1234", &["https://shop.example/blog/a".to_owned()]).unwrap();
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "host": "shop.example",
+            "key": "abc-1234",
+            "keyLocation": "https://shop.example/indexnow.txt",
+            "urlList": ["https://shop.example/blog/a"]
+        })
+    );
+    assert!(indexnow_body("shop.example", "abc-1234", &[]).is_none());
+}

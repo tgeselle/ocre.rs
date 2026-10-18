@@ -104,8 +104,8 @@ What each generator inserts, for an app named `docs-app` (most come with a comme
 | `ocre new` | (written in place) | `DB: bindings.d1({ name: "docs-app" }),` |
 | `ocre g cache` | `// ocre:env` | `CACHE: bindings.kv(),`; `ocre deploy` rewrites it to `CACHE: bindings.kv({ id: "<id>" }),` |
 | first `ocre g job` | `// ocre:env` | `JOBS: bindings.queue({ name: "docs-app-jobs" }),` |
-| first `ocre g job` | `// ocre:triggers` | `triggers.queue({ name: "docs-app-jobs", deadLetterQueue: "docs-app-jobs-failed", maxBatchSize: 10, maxBatchTimeout: 5, maxRetries: 5 }),` |
-| `ocre g job <Name> --queue urgent` | both | `JOBS_URGENT: bindings.queue({ name: "docs-app-jobs-urgent" }),` and its own `triggers.queue({ name: "docs-app-jobs-urgent", deadLetterQueue: "docs-app-jobs-urgent-failed", maxBatchSize: 10, maxBatchTimeout: 1, maxRetries: 5 }),` |
+| first `ocre g job` | `// ocre:triggers` | `triggers.queue({ name: "docs-app-jobs", deadLetterQueue: "docs-app-jobs-failed", maxBatchSize: 10, maxBatchTimeout: 0, maxRetries: 5 }),` |
+| `ocre g job <Name> --queue urgent` | both | `JOBS_URGENT: bindings.queue({ name: "docs-app-jobs-urgent" }),` and its own `triggers.queue({ name: "docs-app-jobs-urgent", deadLetterQueue: "docs-app-jobs-urgent-failed", maxBatchSize: 10, maxBatchTimeout: 0, maxRetries: 5 }),` |
 | `ocre g schedule` | `// ocre:triggers` | `triggers.scheduled({ schedule: "0 3 * * *" }),`, one per expression |
 | first `attachment` field | `// ocre:env` | `STORAGE: bindings.r2({ name: "docs-app-storage" }),` |
 | first `--realtime` scaffold | `// ocre:env` | `CHANNELS: bindings.durableObject({ worker: "docs-app", exportName: "OcreChannel" }),` |
@@ -200,12 +200,13 @@ Added by the first `ocre g job`:
 JOBS: bindings.queue({ name: "docs-app-jobs" }),
 
 // in worker.triggers
-// Runs the jobs of docs-app-jobs: up to 10 messages per run, waiting at most 5 s
-// to fill a batch. Each run is one Worker request with 10 ms of CPU on the free
-// plan: lower maxBatchSize for CPU-heavy jobs. A failing job is retried with a
-// growing delay (30 s, 1 min, 3 min, 9 min, 27 min), then moved to
-// docs-app-jobs-failed, where it stays 24 hours (dashboard: Queues > docs-app-jobs-failed).
-triggers.queue({ name: "docs-app-jobs", deadLetterQueue: "docs-app-jobs-failed", maxBatchSize: 10, maxBatchTimeout: 5, maxRetries: 5 }),
+// Runs the jobs of docs-app-jobs: up to 10 messages per run, delivered as soon as
+// they arrive (maxBatchTimeout 0: a lone job, the usual case, starts at once).
+// Each run is one Worker request with 10 ms of CPU on the free plan: lower
+// maxBatchSize for CPU-heavy jobs. A failing job is retried with a growing
+// delay (30 s, 1 min, 3 min, 9 min, 27 min), then moved to docs-app-jobs-failed,
+// where it stays 24 hours (dashboard: Queues > docs-app-jobs-failed).
+triggers.queue({ name: "docs-app-jobs", deadLetterQueue: "docs-app-jobs-failed", maxBatchSize: 10, maxBatchTimeout: 0, maxRetries: 5 }),
 ```
 
 | Key | Value | Meaning |
@@ -213,7 +214,7 @@ triggers.queue({ name: "docs-app-jobs", deadLetterQueue: "docs-app-jobs-failed",
 | binding key | `JOBS` | Required name: `ocre::jobs::enqueue` looks it up (`JOBS_<NAME>` for a named queue) |
 | `name` | `<app>-jobs` | The same queue for the binding (producer) and the trigger (consumer): the app's Worker sends and runs its own jobs |
 | `maxBatchSize` | `10` | Messages per consumer run (Cloudflare allows up to 100) |
-| `maxBatchTimeout` | `5` | Seconds to wait to fill a batch (up to 60) |
+| `maxBatchTimeout` | `0` | Seconds to wait to fill a batch (up to 60); `0` delivers each message as soon as it arrives |
 | `maxRetries` | `5` | Deliveries after the first before the message goes to the dead-letter queue |
 | `deadLetterQueue` | `<app>-jobs-failed` | Where failed messages are kept (24 hours on the free plan) |
 
@@ -519,9 +520,9 @@ See [Email](../guides/email.md).
 
 ### R2_ACCOUNT_ID, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY
 
-- Kind: `R2_ACCOUNT_ID` and `R2_BUCKET` are variables (`bindings.text`); `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` are secrets. Required by presigned URLs and direct uploads (`storage::presign_get`, `presign_put`, `serve_redirect`, `direct_upload`, `attach_direct_upload`); nothing else reads them.
+- Kind: `R2_ACCOUNT_ID` and `R2_BUCKET` are variables (`bindings.text`); `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` are secrets. Required in release builds by presigned URLs, direct uploads and the S3 listings (`storage::presign_get`, `presign_put`, `presign_part`, `serve_redirect`, `direct_upload`, `list_parts`, `list_multipart_uploads`); nothing else reads them.
 - Values: the account ID (R2 overview page), the bucket name (`<app>-storage`), and the two keys of an R2 API token with "Object Read & Write" on that bucket (dashboard: R2 > Manage API tokens). The secret key also signs the keys handed out by `direct_upload`: replacing it invalidates uploads in progress.
-- Production: the variables in `worker.env`, the secrets with `ocre secrets push R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY --file .prod.vars`. Development: all four in `.dev.vars` (the URLs point to the real bucket, not `ocre dev`'s simulation).
+- Production: the variables in `worker.env`, the secrets with `ocre secrets push R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY --file .prod.vars`. Development needs none of them: debug builds point presigned URLs to the app's `/ocre/dev/storage/<key>` route on the local bucket. With `R2_SECRET_ACCESS_KEY` in `.dev.vars`, it still signs direct-upload keys (else `SECRET_KEY_BASE` does).
 - Errors (500, logged) when one is missing or blank: ``presigned R2 URLs need R2_ACCOUNT_ID, R2_BUCKET (not set). Fix: add `R2_ACCOUNT_ID: bindings.text("<account id>"),` and ...``, naming every missing one. See [File storage](../guides/files.md#presigned-urls-and-redirect-serving).
 
 ### STORAGE_PUBLIC_URL

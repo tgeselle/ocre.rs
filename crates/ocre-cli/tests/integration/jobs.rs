@@ -83,7 +83,7 @@ fn first_job_wires_the_queue_and_later_jobs_extend_the_registry() {
     assert!(
         config.contains(
             "\t\t\ttriggers.queue({ name: \"shop-jobs\", deadLetterQueue: \"shop-jobs-failed\", maxBatchSize: 10, \
-             maxBatchTimeout: 5, maxRetries: 5 }),\n"
+             maxBatchTimeout: 0, maxRetries: 5 }),\n"
         ),
         "{config}"
     );
@@ -131,7 +131,7 @@ fn a_named_queue_gets_its_own_cloudflare_queue_once() {
     assert!(
         config.contains(
             "triggers.queue({ name: \"shop-jobs-urgent\", deadLetterQueue: \"shop-jobs-urgent-failed\", \
-             maxBatchSize: 10, maxBatchTimeout: 1, maxRetries: 5 }),\n"
+             maxBatchSize: 10, maxBatchTimeout: 0, maxRetries: 5 }),\n"
         ),
         "{config}"
     );

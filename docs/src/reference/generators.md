@@ -37,6 +37,8 @@ The examples below were run with `ocre 0.1.0` on an app created by `ocre new blo
 | [`ocre g ci`](#ocre-g-ci) | The GitHub Actions workflow: `ocre ci`'s checks, then `ocre deploy` on main |
 | [`ocre g pwa`](#ocre-g-pwa) | Web app manifest, service worker and icon, linked from the layout |
 | [`ocre g locale`](#ocre-g-locale) | Translation files |
+| [`ocre g blog`](#ocre-g-blog) | Markdown articles compiled at build time, served at `/blog` in every locale |
+| [`ocre g alerts`](#ocre-g-alerts) | The table of owner alerts by email (`ocre::alerts`) |
 | [`ocre g override`](#ocre-g-override) | Copies of generator templates in `.ocre/templates/`, which then replace the built-in ones |
 | [`ocre g generator`](#ocre-g-generator) | An app generator in `.ocre/generators/<name>/` |
 | [`ocre g <name>`](#app-generators-ocre-g-name) | Runs the app generator `.ocre/generators/<name>/` |
@@ -850,6 +852,62 @@ Next:
   production: APP_URL (the public origin) in worker.env of cloudflare.config.ts; add `Sitemap: https://<your host>/sitemap.xml` to public/robots.txt
 ```
 
+## ocre g blog
+
+```text
+ocre g blog
+```
+
+No arguments; full-stack apps. A blog whose articles are Markdown files of the repository, compiled into the Worker when it builds (no Markdown parser in the WebAssembly, no request-time parsing):
+
+| File | Contents |
+|---|---|
+| `build.rs` | Reads `content/blog/<slug>/<locale>.md` (front matter `title`, `description`, and `published`/`updated` in the default locale's file), renders the Markdown with [pulldown-cmark](https://docs.rs/pulldown-cmark) (raw HTML shown as text, no `# ` heading in the body) and writes `$OUT_DIR/blog_posts.rs`. A missing locale, field or date fails the build. |
+| `src/blog.rs` | `POSTS` (newest first), `pages()` for a sitemap, and the routes `/blog` and `/blog/<slug>` (an article page carries `BlogPosting` JSON-LD) |
+| `templates/blog/index.html`, `show.html` | The pages, extending `layout.html` |
+| `content/blog/README.md`, `content/blog/welcome/<locale>.md` | The format, and a first article per locale |
+
+It adds `pulldown-cmark` to `[build-dependencies]` of `Cargo.toml` and the routes to `src/lib.rs`. The URLs follow the app's translations: `/blog` without `ocre g locale`; `/<locale>/blog` when locales are declared; `/blog` and `/fr/blog` with `ocre::locales!(...; unprefixed_default)` (see [The default locale without a prefix](../guides/i18n.md#the-default-locale-without-a-prefix)). Each article exists in every locale of `locales/`.
+
+```text
+  create  build.rs
+  create  content/blog/README.md
+  create  content/blog/welcome/en.md
+  create  src/blog.rs
+  create  templates/blog/index.html
+  create  templates/blog/show.html
+  update  Cargo.toml
+  update  src/lib.rs
+
+Next:
+  write articles in content/blog/<slug>/<locale>.md (format: content/blog/README.md)
+  ocre dev, then open http://localhost:8787/blog
+  list `blog::pages()` in the sitemap of src/seo.rs (`ocre g seo`)
+```
+
+Errors: `a blog needs HTML pages; this app is API-only`, `build.rs already exists` (the app has a build script: merge the blog's into it by hand), and the shared ones.
+
+## ocre g alerts
+
+```text
+ocre g alerts
+```
+
+No arguments. Creates the migration of the `alerts` table of [`ocre::alerts`](../guides/debugging.md#owner-alerts-by-email) (owner alerts by email, deduplicated per reason and key for 30 minutes, at most 20 an hour, the rest in a digest) and adds `ALERT_EMAIL=owner@example.com` to `.dev.vars` when it is not set.
+
+```text
+  create  migrations/0002_create_alerts.sql
+  update  .dev.vars
+
+Next:
+  ocre migrate
+  record alerts: ocre::alerts::record(&ctx, ocre::alerts::Alert::new("payment.failed").key(user_id)).await
+  send the digest of held-back alerts: ocre g schedule alert_digest "every 15 minutes", calling ocre::alerts::send_digest(ctx)
+  production: ALERT_EMAIL (your address) in worker.env of cloudflare.config.ts
+```
+
+Error: `this app already has the alerts table`.
+
 ## ocre g job
 
 ```text
@@ -864,7 +922,7 @@ ocre g job <NAME> [FIELDS]... [--queue <QUEUE>] [--steps <STEP,...>] [--lock <FI
 | `--steps <STEP,...>` | no | Run in steps, one queue message each, in this order (snake_case names): a failed step is retried on its own, from that step |
 | `--lock <FIELD>` | no | One run per value of this field at a time (a lock row in `job_locks`; the first such job adds its migration). Without `--steps`, the job has one `work` step |
 
-Creates `src/jobs/<name>.rs`: a struct holding the arguments (serialized as JSON in the queue message, 128 KB at most) with `fn perform_later(self, ctx)`, which sends it to its queue, and an `async fn perform(self, ctx: &Ctx) -> Result<()>` to fill in. It adds a variant to the `Job` enum and an arm to the `perform` match in `src/jobs/mod.rs`. The first job creates `src/jobs/mod.rs`, adds `mod jobs;` and the Worker's `queue` event to `src/lib.rs`, and, unless a `JOBS` producer exists, adds to `cloudflare.config.ts` the `JOBS: bindings.queue({ name: "<app>-jobs" })` producer (after `// ocre:env`) and its `triggers.queue(...)` consumer (after `// ocre:triggers`) (batches of up to 10 messages, 5 retries, dead-letter queue `<app>-jobs-failed`). `--queue urgent` also adds, unless a `JOBS_URGENT` binding exists, `JOBS_URGENT: bindings.queue({ name: "<app>-jobs-urgent" })` and its consumer (`maxBatchTimeout: 1`, dead-letter queue `<app>-jobs-urgent-failed`).
+Creates `src/jobs/<name>.rs`: a struct holding the arguments (serialized as JSON in the queue message, 128 KB at most) with `fn perform_later(self, ctx)`, which sends it to its queue, and an `async fn perform(self, ctx: &Ctx) -> Result<()>` to fill in. It adds a variant to the `Job` enum and an arm to the `perform` match in `src/jobs/mod.rs`. The first job creates `src/jobs/mod.rs`, adds `mod jobs;` and the Worker's `queue` event to `src/lib.rs`, and, unless a `JOBS` producer exists, adds to `cloudflare.config.ts` the `JOBS: bindings.queue({ name: "<app>-jobs" })` producer (after `// ocre:env`) and its `triggers.queue(...)` consumer (after `// ocre:triggers`) (batches of up to 10 messages delivered at once, `maxBatchTimeout: 0`, 5 retries, dead-letter queue `<app>-jobs-failed`). `--queue urgent` also adds, unless a `JOBS_URGENT` binding exists, `JOBS_URGENT: bindings.queue({ name: "<app>-jobs-urgent" })` and its consumer (dead-letter queue `<app>-jobs-urgent-failed`).
 
 ```sh
 ocre g job SendWelcome user_id:integer

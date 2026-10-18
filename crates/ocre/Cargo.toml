@@ -1,6 +1,6 @@
 [package]
 name = "ocre"
-version = "0.2.0"
+version = "0.3.0"
 description = "Rails-like Rust web framework for Cloudflare Workers, deployable on the free plan."
 edition.workspace = true
 license.workspace = true
@@ -70,6 +70,8 @@ push = ["dep:p256"]
 [dev-dependencies]
 pollster = "1.0.1"
 serde_urlencoded = "0.7.1"
+# Unit tests run SQL that D1 runs (SQLite) against an in-memory database.
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 # Random bytes (cookie nonces, salts, tokens) come from WebCrypto on Workers.
 [target.'cfg(target_arch = "wasm32")'.dependencies]

@@ -277,6 +277,34 @@ pub fn redirect_back(headers: &HeaderMap, fallback: &str) -> Redirect {
     Redirect::to(back.unwrap_or(fallback))
 }
 
+/// RFC 3986 percent-encoding: every byte but the unreserved characters (`A-Z a-z 0-9 - . _ ~`) becomes `%XX`, and `/` too unless `keep_slash`.
+///
+/// For a value in a query string or a path segment of a URL the app builds
+/// (an object key, an id sent to another service, a `return_to`
+/// parameter), and what AWS Signature Version 4 requires. `keep_slash`
+/// keeps `/` for a whole path (`videos/1/a b.mp4` → `videos/1/a%20b.mp4`).
+/// UTF-8 bytes are encoded one by one with uppercase hex.
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(ocre::percent_encode("a b/c~d.mp4", false), "a%20b%2Fc~d.mp4");
+/// assert_eq!(ocre::percent_encode("videos/a b", true), "videos/a%20b");
+/// assert_eq!(ocre::percent_encode("é&=", false), "%C3%A9%26%3D");
+/// ```
+pub fn percent_encode(text: &str, keep_slash: bool) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) || (byte == b'/' && keep_slash) {
+            out.push(char::from(byte));
+        } else {
+            out.extend(['%', char::from(HEX[usize::from(byte >> 4)]), char::from(HEX[usize::from(byte & 15)])]);
+        }
+    }
+    out
+}
+
 /// A route path with its non-ASCII characters percent-encoded, so Unicode routes match (Rails' Unicode routes).
 ///
 /// Browsers send `/über-uns` as `/%C3%BCber-uns`, and axum matches the path

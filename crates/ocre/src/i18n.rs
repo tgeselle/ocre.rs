@@ -68,8 +68,10 @@
 //! Dutch, under the rails-i18n keys (`date.formats.short`,
 //! `errors.messages.blank`...).
 //!
-//! The files are parsed once per Worker instance, on the first translation,
-//! by a small parser for this YAML subset; lookups are a `BTreeMap` search.
+//! Each file is parsed once per Worker instance, the first time a key of its
+//! locale is looked up (a request in French parses `fr`, and the default
+//! locale's file only for a key `fr` lacks), not every declared locale, by a
+//! small parser for this YAML subset; lookups are a `BTreeMap` search.
 //! No D1, KV or other billed resource is used. [`I18n`] picks the locale from
 //! a `{locale}` path segment, then the `locale` cookie, then
 //! `Accept-Language`, then the default locale. A key missing from the
@@ -88,13 +90,15 @@ use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     fmt,
-    sync::LazyLock,
+    sync::{LazyLock, OnceLock},
 };
 
 use axum::{
-    Extension,
-    extract::{FromRequestParts, RawPathParams},
-    http::{HeaderMap, header, request::Parts},
+    Extension, Router,
+    extract::{FromRequestParts, RawPathParams, Request},
+    http::{HeaderMap, HeaderValue, Method, header, request::Parts},
+    middleware::{Next, from_fn},
+    response::{IntoResponse, Redirect, Response},
 };
 
 use crate::{Error, Result};
@@ -145,27 +149,33 @@ pub type Locales = LazyLock<Catalog>;
 /// listed in [`Catalog::errors`](crate::i18n::Catalog::errors) (`ocre dev` and
 /// `ocre deploy` refuse it earlier).
 ///
+/// Options follow the codes after a `;`: `unprefixed_default` serves the
+/// default locale's pages without a prefix ([`Catalog::unprefixed_default`](crate::i18n::Catalog::unprefixed_default)).
+///
 /// # Examples
 ///
 /// ```ignore
 /// // Not compiled here: needs `locales/en.yml` and `locales/fr.yml` next to the app's Cargo.toml.
 /// static LOCALES: ocre::i18n::Locales = ocre::locales!("en", "fr");
+/// // `/pricing` in English, `/fr/pricing` in French:
+/// static LOCALES: ocre::i18n::Locales = ocre::locales!("en", "fr"; unprefixed_default);
 /// ```
 #[macro_export]
 macro_rules! locales {
-    ($($code:literal),+ $(,)?) => {
+    ($($code:literal),+ $(,)? $(; $option:ident)*) => {
         ::std::sync::LazyLock::new(|| {
             $crate::i18n::Catalog::load(&[$((
                 $code,
                 ::std::include_str!(::std::concat!(::std::env!("CARGO_MANIFEST_DIR"), "/locales/", $code, ".yml")),
             )),+])
+            $(.$option())*
         })
     };
 }
 
 /// Makes the catalog available to the [`I18n`] extractor, as an axum layer.
 ///
-/// Forces `locales` (parsing the files if no translation did yet) and returns
+/// Forces `locales` (the files themselves are parsed on first use) and returns
 /// an [`Extension`] holding it. Add it last in `routes()`, after the
 /// `// ocre:routes` marker, so it covers every route; without it, [`I18n`]
 /// fails with a 500 whose log line names this fix.
@@ -200,18 +210,47 @@ enum Value<'t> {
     Plural([Option<Cow<'t, str>>; 6]),
 }
 
-/// One parsed locale file.
+/// One locale file, parsed on first use: a Worker instance only pays for
+/// the locales its requests use (the default one and the visitor's).
 #[derive(Debug)]
 struct Table {
     code: &'static str,
     rule: Rule,
+    source: &'static str,
+    parsed: OnceLock<Parsed>,
+}
+
+/// A parsed file: its values (empty when it does not parse) and the parse error.
+#[derive(Debug)]
+struct Parsed {
     values: BTreeMap<String, Value<'static>>,
+    error: Option<String>,
 }
 
 impl Table {
+    fn new(code: &'static str, source: &'static str) -> Self {
+        Self { code, rule: Rule::for_locale(code), source, parsed: OnceLock::new() }
+    }
+
+    /// Parses the file the first time; a parse error is logged once.
+    fn parsed(&self) -> &Parsed {
+        self.parsed.get_or_init(|| match yaml::parse_locale(self.code, self.source) {
+            Ok(entries) => Parsed { values: group(entries), error: None },
+            Err(err) => {
+                let error = format!("locales/{}.yml line {}: {}", self.code, err.line, err.message);
+                crate::error::log_internal(&error);
+                Parsed { values: BTreeMap::new(), error: Some(error) }
+            }
+        })
+    }
+
+    fn values(&self) -> &BTreeMap<String, Value<'static>> {
+        &self.parsed().values
+    }
+
     /// Tables live in a `static` [`Locales`], so their strings are `'static`.
     fn get(&'static self, key: &str, count: Option<i64>) -> Option<&'static str> {
-        let text = match (self.values.get(key)?, count) {
+        let text = match (self.values().get(key)?, count) {
             (Value::Text(text), _) => text,
             (Value::Plural(forms), Some(0)) if forms[Category::Zero as usize].is_some() => {
                 forms[Category::Zero as usize].as_ref()?
@@ -225,13 +264,17 @@ impl Table {
     }
 }
 
-/// All locales of an app, parsed: one table of dotted keys per locale code, the first being the default.
+const NO_LOCALES: &str = "no locales: declare them with ocre::locales!(\"en\")";
+
+/// All locales of an app: one table of dotted keys per locale code, the first being the default.
 ///
-/// Built by [`locales!`](crate::locales) inside a [`Locales`] static. Files
+/// Built by [`locales!`](crate::locales) inside a [`Locales`] static. Each
+/// file is parsed the first time one of its keys is looked up, so adding
+/// locales costs a Worker instance nothing until a request uses them. Files
 /// that fail to parse are empty (so every key falls back to the default
-/// locale) and listed in [`errors`](Self::errors), which are also logged to
-/// the Worker logs. [`locale`](Self::locale) gives translations outside
-/// requests; in handlers, the [`I18n`] extractor picks the locale.
+/// locale), logged to the Worker logs when first used and listed in
+/// [`errors`](Self::errors). [`locale`](Self::locale) gives translations
+/// outside requests; in handlers, the [`I18n`] extractor picks the locale.
 ///
 /// # Examples
 ///
@@ -250,16 +293,20 @@ impl Table {
 #[derive(Debug)]
 pub struct Catalog {
     tables: Vec<Table>,
-    errors: Vec<String>,
+    /// No locale was declared.
+    undeclared: bool,
+    errors: OnceLock<Vec<String>>,
+    /// The default locale's URLs carry no prefix (`/pricing`, `/fr/pricing`).
+    unprefixed_default: bool,
 }
 
 impl Catalog {
-    /// Parses `(code, file contents)` pairs into a catalog; the first pair is the default locale.
+    /// Builds a catalog of `(code, file contents)` pairs; the first pair is the default locale.
     ///
     /// Each file must start with its code as the root key (`en:`); plural
-    /// rules come from the code (`fr-CH` uses French rules). A file that does
-    /// not parse becomes an empty table and one entry in
-    /// [`errors`](Self::errors); each error is logged. An empty `sources`
+    /// rules come from the code (`fr-CH` uses French rules). Files are
+    /// parsed on first use; one that does not parse becomes an empty table
+    /// and one entry in [`errors`](Self::errors), logged. An empty `sources`
     /// gives an empty `en` catalog with an error telling to declare locales.
     /// Never fails: missing translations show up at lookup time instead.
     ///
@@ -270,32 +317,42 @@ impl Catalog {
     /// assert!(catalog.errors().is_empty());
     /// ```
     pub fn load(sources: &[(&'static str, &'static str)]) -> Self {
-        let mut tables = Vec::with_capacity(sources.len().max(1));
-        let mut errors = Vec::new();
-        for (code, text) in sources {
-            let values = match yaml::parse_locale(code, text) {
-                Ok(entries) => group(entries),
-                Err(err) => {
-                    errors.push(format!("locales/{code}.yml line {}: {}", err.line, err.message));
-                    BTreeMap::new()
-                }
-            };
-            tables.push(Table { code, rule: Rule::for_locale(code), values });
+        let mut tables: Vec<Table> = sources.iter().map(|(code, text)| Table::new(code, text)).collect();
+        let undeclared = tables.is_empty();
+        if undeclared {
+            crate::error::log_internal(NO_LOCALES);
+            tables.push(Table::new("en", "en:\n"));
         }
-        if tables.is_empty() {
-            errors.push("no locales: declare them with ocre::locales!(\"en\")".to_owned());
-            tables.push(Table { code: "en", rule: Rule::One, values: BTreeMap::new() });
-        }
-        for error in &errors {
-            crate::error::log_internal(error);
-        }
-        Self { tables, errors }
+        Self { tables, undeclared, errors: OnceLock::new(), unprefixed_default: false }
     }
 
-    /// Parse errors from [`load`](Self::load), one line each (`locales/fr.yml line 3: ...`).
+    /// Serves the default locale's pages without a locale prefix: `/pricing` in English, `/fr/pricing` in French.
     ///
-    /// Empty when every file parsed. `ocre dev` and `ocre deploy` check the
-    /// same files before building, so a deployed app normally has none.
+    /// By default every locale has its prefix (`/en/pricing`). With this
+    /// option, [`I18n::path`], [`I18n::alternates`] and
+    /// [`I18n::alternate_links`] leave the default locale's paths as they
+    /// are, and [`localized`] serves pages both ways. Declare it with the
+    /// locales: `ocre::locales!("en", "fr"; unprefixed_default)`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::LazyLock;
+    /// static LOCALES: ocre::i18n::Locales =
+    ///     LazyLock::new(|| ocre::i18n::Catalog::load(&[("en", "en:\n"), ("fr", "fr:\n")]).unprefixed_default());
+    /// assert_eq!(LOCALES.locale("en").path("/pricing"), "/pricing");
+    /// assert_eq!(LOCALES.locale("fr").path("/pricing"), "/fr/pricing");
+    /// ```
+    pub fn unprefixed_default(mut self) -> Self {
+        self.unprefixed_default = true;
+        self
+    }
+
+    /// Parse errors of the locale files, one line each (`locales/fr.yml line 3: ...`).
+    ///
+    /// Parses every file not parsed yet. Empty when every file parsed.
+    /// `ocre dev` and `ocre deploy` check the same files before building, so
+    /// a deployed app normally has none.
     ///
     /// # Examples
     ///
@@ -305,7 +362,10 @@ impl Catalog {
     /// assert!(catalog.errors()[0].starts_with("locales/en.yml line 2: "));
     /// ```
     pub fn errors(&self) -> &[String] {
-        &self.errors
+        self.errors.get_or_init(|| {
+            let parse_errors = self.tables.iter().filter_map(|table| table.parsed().error.clone());
+            if self.undeclared { vec![NO_LOCALES.to_owned()] } else { parse_errors.collect() }
+        })
     }
 
     /// Returns the default locale code: the first code given to [`locales!`](crate::locales).
@@ -736,7 +796,7 @@ impl I18n {
         let tables = if strict || self.index == 0 { &[self.index][..] } else { &[0, self.index][..] };
         for &index in tables {
             let table: &'static Table = &self.catalog.tables[index];
-            for (key, _) in table.values.range(start.clone()..).take_while(|(key, _)| key.starts_with(&start)) {
+            for (key, _) in table.values().range(start.clone()..).take_while(|(key, _)| key.starts_with(&start)) {
                 if let Some(text) = table.get(key, None) {
                     texts.insert(&key[start.len()..], text);
                 }
@@ -749,7 +809,9 @@ impl I18n {
     ///
     /// `i18n.path("/posts")` is `/fr/posts` for French visitors, so links
     /// keep the locale; `"/"` gives `/fr`. Use it in templates:
-    /// `<a href="{{ i18n.path("/posts") }}">`.
+    /// `<a href="{{ i18n.path("/posts") }}">`. With
+    /// [`unprefixed_default`](Catalog::unprefixed_default), the default
+    /// locale's paths stay as they are (`/posts`).
     ///
     /// # Examples
     ///
@@ -762,10 +824,32 @@ impl I18n {
     /// assert_eq!(i18n.path("/"), "/fr");
     /// ```
     pub fn path(&self, path: &str) -> String {
-        match path.trim_start_matches('/') {
+        let rest = path.trim_start_matches('/');
+        match rest {
+            _ if self.catalog.unprefixed_default && self.index == 0 => format!("/{rest}"),
             "" => format!("/{}", self.locale()),
             rest => format!("/{}/{rest}", self.locale()),
         }
+    }
+
+    /// The text direction of the locale, `rtl` or `ltr`, for `<html dir="{{ i18n.dir() }}">`.
+    ///
+    /// Right to left for Arabic, Hebrew, Persian, Urdu, Pashto, Sindhi,
+    /// Uyghur, Yiddish, Dhivehi and Central Kurdish (by language, so `ar-EG`
+    /// too).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::LazyLock;
+    /// static LOCALES: ocre::i18n::Locales =
+    ///     LazyLock::new(|| ocre::i18n::Catalog::load(&[("en", "en:\n"), ("ar-EG", "ar-EG:\n")]));
+    /// assert_eq!(LOCALES.locale("ar-EG").dir(), "rtl");
+    /// assert_eq!(LOCALES.locale("en").dir(), "ltr");
+    /// ```
+    pub fn dir(&self) -> &'static str {
+        const RTL: [&str; 10] = ["ar", "he", "fa", "ur", "ps", "sd", "ug", "yi", "dv", "ckb"];
+        if RTL.iter().any(|language| primary(self.locale()).eq_ignore_ascii_case(language)) { "rtl" } else { "ltr" }
     }
 
     /// The absolute URL of `path` in every locale, the default first:
@@ -879,13 +963,21 @@ impl I18n {
     }
 
     /// The extractor's logic: the catalog put there by [`layer`], then [`select`](Self::select).
-    fn from_parts(catalog: Option<&'static Catalog>, path: Option<&str>, headers: &HeaderMap) -> Result<Self> {
+    fn from_parts(
+        catalog: Option<&'static Catalog>,
+        path: Option<&str>,
+        default_page: bool,
+        headers: &HeaderMap,
+    ) -> Result<Self> {
         let catalog = catalog.ok_or_else(|| {
             Error::internal(
                 "the I18n extractor needs the catalog. Fix: add `.layer(ocre::i18n::layer(&LOCALES))` at the end of \
                  routes() in src/lib.rs (`ocre g locale` does it)",
             )
         })?;
+        if default_page {
+            return Ok(Self { catalog, index: 0, scope: "" });
+        }
         Self::select(catalog, path, headers)
     }
 
@@ -894,21 +986,148 @@ impl I18n {
         if let Some(code) = path {
             return catalog.find(code).map(|index| Self { catalog, index, scope: "" }).ok_or(Error::NotFound);
         }
-        let cookie = headers
+        Ok(Self { catalog, index: catalog.preferred(headers).unwrap_or(0), scope: "" })
+    }
+}
+
+impl Catalog {
+    /// The visitor's locale from the `locale` cookie, else `Accept-Language`.
+    fn preferred(&self, headers: &HeaderMap) -> Option<usize> {
+        self.cookie_locale(headers).or_else(|| {
+            let accept = headers.get(header::ACCEPT_LANGUAGE)?.to_str().ok()?;
+            self.negotiate(accept)
+        })
+    }
+
+    /// The locale the `locale` cookie names, if it is one of the app's.
+    fn cookie_locale(&self, headers: &HeaderMap) -> Option<usize> {
+        headers
             .get_all(header::COOKIE)
             .iter()
             .filter_map(|value| value.to_str().ok())
             .flat_map(|value| value.split(';'))
             .filter_map(|pair| pair.trim().strip_prefix(LOCALE_COOKIE)?.strip_prefix('='))
-            .find_map(|code| catalog.find(code));
-        let index = cookie
-            .or_else(|| {
-                let accept = headers.get(header::ACCEPT_LANGUAGE)?.to_str().ok()?;
-                catalog.negotiate(accept)
-            })
-            .unwrap_or(0);
-        Ok(Self { catalog, index, scope: "" })
+            .find_map(|code| self.find(code))
     }
+
+    /// [`locale`](Self::locale) by index, on a `'static` catalog.
+    fn locale_ref(&'static self, index: usize) -> I18n {
+        I18n { catalog: self, index, scope: "" }
+    }
+}
+
+/// Marks a request served by the unprefixed copy of [`localized`] pages: the URL says the default locale.
+#[derive(Debug, Clone, Copy)]
+struct DefaultLocalePage;
+
+/// Serves `pages` in every locale: `/path` in the default locale, `/<code>/path` in the others.
+///
+/// For public pages search engines index in each language (Rails' `scope
+/// "(:locale)"`), with the catalog declared `unprefixed_default`
+/// (`ocre::locales!("en", "fr"; unprefixed_default)`): the URL decides the
+/// language, so each page has one address per locale for `hreflang`
+/// ([`I18n::alternate_links`]).
+///
+/// - `/pricing` is the default locale's page. A visitor whose `locale`
+///   cookie or `Accept-Language` prefers another locale of the app gets a
+///   `303 See Other` to it (`/fr/pricing`); crawlers send neither, so they index each
+///   URL in its own language. Only `GET` and `HEAD` are redirected.
+/// - `/fr/pricing` is French, and remembers the choice in the `locale`
+///   cookie, so the visitor's next unprefixed URL leads back to French.
+/// - `/en/pricing` (the default locale's code) answers `308 Permanent Redirect` to `/pricing`;
+///   an unknown code (`/xx/pricing`) is a `404`.
+///
+/// Pages outside `localized` keep the usual choice (cookie, then
+/// `Accept-Language`). A language switcher sets the cookie with
+/// [`I18n::cookie`] and links to [`I18n::path`]. No billed resource is
+/// used: headers only.
+///
+/// # Errors
+///
+/// A request answers 500 when [`layer`] is missing or the catalog is not
+/// declared `unprefixed_default`; the log line names the fix.
+///
+/// # Examples
+///
+/// ```
+/// use std::sync::LazyLock;
+/// use axum::{Router, routing::get};
+/// use ocre::{Ctx, i18n::{Catalog, I18n, Locales}};
+///
+/// static LOCALES: Locales =
+///     LazyLock::new(|| Catalog::load(&[("en", "en:\n  title: Pricing\n"), ("fr", "fr:\n  title: Tarifs\n")]).unprefixed_default());
+///
+/// async fn pricing(i18n: I18n) -> String {
+///     i18n.t("title").to_string()
+/// }
+///
+/// fn routes() -> Router<Ctx> {
+///     let pages = Router::new().route("/pricing", get(pricing));
+///     Router::new()
+///         .merge(ocre::i18n::localized(pages)) // /pricing, /fr/pricing
+///         // ocre:routes
+///         .layer(ocre::i18n::layer(&LOCALES))
+/// }
+/// # let _ = routes;
+/// ```
+pub fn localized<S: Clone + Send + Sync + 'static>(pages: Router<S>) -> Router<S> {
+    let prefixed = Router::new().nest(&format!("/{{{LOCALE_PARAM}}}"), pages.clone().layer(from_fn(prefixed_page)));
+    pages.layer(from_fn(default_page)).merge(prefixed)
+}
+
+/// The catalog of a request, or the error naming the missing layer or option.
+fn localized_catalog(request: &Request) -> Result<&'static Catalog> {
+    let catalog = request.extensions().get::<&'static Catalog>().copied().ok_or_else(|| {
+        Error::internal(
+            "localized pages need the catalog. Fix: add `.layer(ocre::i18n::layer(&LOCALES))` at the end of routes() \
+             in src/lib.rs (`ocre g locale` does it)",
+        )
+    })?;
+    if !catalog.unprefixed_default {
+        return Err(Error::internal(
+            "ocre::i18n::localized serves the default locale without a prefix. Fix: declare the locales with \
+             `ocre::locales!(\"en\", \"fr\"; unprefixed_default)` in src/lib.rs",
+        ));
+    }
+    Ok(catalog)
+}
+
+/// The unprefixed copy: the default locale, or a redirect to the visitor's preferred one.
+async fn default_page(mut request: Request, next: Next) -> Response {
+    let catalog = match localized_catalog(&request) {
+        Ok(catalog) => catalog,
+        Err(err) => return crate::session::reject(err).into_response(),
+    };
+    let read = matches!(*request.method(), Method::GET | Method::HEAD);
+    if let Some(index) = catalog.preferred(request.headers()).filter(|&index| index != 0 && read) {
+        let uri = request.uri();
+        let query = uri.query().map(|query| format!("?{query}")).unwrap_or_default();
+        return Redirect::to(&format!("{}{query}", catalog.locale_ref(index).path(uri.path()))).into_response();
+    }
+    request.extensions_mut().insert(DefaultLocalePage);
+    next.run(request).await
+}
+
+/// The prefixed copy: `/en/...` to the unprefixed URL, unknown codes to 404, and the choice remembered.
+async fn prefixed_page(params: RawPathParams, request: Request, next: Next) -> Response {
+    let catalog = match localized_catalog(&request) {
+        Ok(catalog) => catalog,
+        Err(err) => return crate::session::reject(err).into_response(),
+    };
+    let code = params.iter().find(|(name, _)| *name == LOCALE_PARAM).map(|(_, code)| code).unwrap_or_default();
+    let Some(index) = catalog.find(code) else { return crate::session::reject(Error::NotFound).into_response() };
+    if index == 0 {
+        // Inside the nested router, the URI is the page's own path, without the locale.
+        let uri = request.uri();
+        let query = uri.query().map(|query| format!("?{query}")).unwrap_or_default();
+        return Redirect::permanent(&format!("{}{query}", uri.path())).into_response();
+    }
+    let remembered = catalog.cookie_locale(request.headers()) == Some(index);
+    let mut response = next.run(request).await;
+    if !remembered && let Ok(cookie) = HeaderValue::from_str(&catalog.locale_ref(index).cookie()) {
+        response.headers_mut().append(header::SET_COOKIE, cookie);
+    }
+    response
 }
 
 /// Failures render as HTML pages in full-stack apps and as JSON in API-only apps.
@@ -921,6 +1140,7 @@ impl<S: Send + Sync> FromRequestParts<S> for I18n {
         Self::from_parts(
             parts.extensions.get::<&'static Catalog>().copied(),
             path.map(|(_, code)| code),
+            parts.extensions.get::<DefaultLocalePage>().is_some(),
             &parts.headers,
         )
         .map_err(crate::session::reject)

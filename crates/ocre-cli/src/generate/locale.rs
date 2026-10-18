@@ -103,12 +103,15 @@ pub fn locale(project: &Project, codes: &[String]) -> CliResult {
         let contents = if *code == default { default_file(code) } else { other_file(code, &default) };
         edits.create(&format!("locales/{code}.yml"), contents)?;
     }
-    let call = format!(
-        "{LOCALES_MACRO}{})",
-        declared_codes.iter().map(|code| format!("\"{code}\"")).collect::<Vec<_>>().join(", ")
-    );
     let start = lib.find(LOCALES_MACRO).expect("declared above");
     let end = start + lib[start..].find(')').expect("declared() found the closing parenthesis") + 1;
+    // Options after the codes (`; unprefixed_default`) stay.
+    let options =
+        lib[start..end - 1].split_once(';').map(|(_, options)| format!("; {}", options.trim())).unwrap_or_default();
+    let call = format!(
+        "{LOCALES_MACRO}{}{options})",
+        declared_codes.iter().map(|code| format!("\"{code}\"")).collect::<Vec<_>>().join(", ")
+    );
     lib.replace_range(start..end, &call);
     edits.update("src/lib.rs", lib);
     let mut report = edits.apply("generate locale")?;

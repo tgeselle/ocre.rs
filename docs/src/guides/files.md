@@ -519,7 +519,7 @@ R2_BUCKET: bindings.text("docs-app-storage"),
 ocre secrets push R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY --file .prod.vars
 ```
 
-For `ocre dev`, put the four values in `.dev.vars`. A missing one makes every presigning call fail with a 500 whose log names the missing settings and these steps. Presigned URLs always point to the real bucket: `ocre dev`'s local R2 simulation has no S3 API, so a file uploaded through a presigned URL is not visible to `storage::head` or `storage::serve` in `ocre dev`. Try direct uploads on a deployed Worker.
+For a release build, a missing setting makes every presigning call fail with a 500 whose log names the missing settings and these steps. Debug builds (`ocre dev`, `ocre test --e2e`) need none of them: every presigned URL (`presign_get`, `presign_put`, `presign_part`, `direct_upload`, `serve_redirect`) points to the app's own `/ocre/dev/storage/<key>` route, which `ocre::serve` mounts in debug builds only and which works on the local bucket like R2 does (`GET` with `Range` and the `response-content-*` overrides, `PUT`, `PUT ?partNumber=&uploadId=` answering the part's `ETag`). Uploads and downloads that skip the Worker in production therefore work locally, and development never touches the real bucket. The route's base is `APP_URL` (else `http://localhost:8787`); its URLs are not signed, as it exists only on a developer's machine.
 
 ### Download URLs and redirects
 
@@ -754,9 +754,42 @@ What happens, with the routes under `/videos/uploads`:
 Where the parts go:
 
 - **Straight to R2** in a release build with the `R2_*` [settings](#settings): presigned `PUT` URLs (valid 24 hours), so the file never passes through the Worker, whatever its size. The bucket's [CORS rule](#bucket-cors-rule) must allow `PUT` and expose `ETag`.
-- **Through the Worker** otherwise: in `ocre dev` (whose local R2 has no S3 API) and without the `R2_*` settings. Each part is one request to `PUT /videos/uploads/parts/<n>`, streamed into R2 (parts of at most 95 MB, under the 100 MB request limit; files up to about 950 GB). It works on the free plan, but every part costs a Worker request and the CPU of copying it through WebAssembly: prefer the direct mode in production.
+- **Through the Worker** in `ocre dev` and without the `R2_*` settings. Each part is one request to `PUT /videos/uploads/parts/<n>`, streamed into R2 (parts of at most 95 MB, under the 100 MB request limit; files up to about 950 GB). It works on the free plan, but every part costs a Worker request and the CPU of copying it through WebAssembly: prefer the direct mode in production.
 
 The upload's key is signed with `R2_SECRET_ACCESS_KEY`, or `SECRET_KEY_BASE` without it. The through-the-Worker mode was checked in `ocre dev` with a browser (a 25 MB file in three parts, the third failing until the form was sent again, then only that part resent); the direct mode has not been run against a live bucket (October 2026).
+
+## Files another service uploads or reads
+
+When the bytes come from somewhere else than a form (a GPU worker writing its output, a partner's API sending an export), the app drives the multipart upload itself and hands out URLs:
+
+```rust,ignore
+use ocre::storage;
+
+// Where the worker uploads a 3-part result, valid a day.
+let key = format!("processed/{job_id}.mp4");
+let upload_id = storage::create_multipart(&ctx, &key, "video/mp4").await?;
+let urls: Vec<String> =
+    (1..=3).map(|part| storage::presign_part(&ctx, &key, &upload_id, part, 86_400)).collect::<ocre::Result<_>>()?;
+
+// Later (its webhook, or a sweep): assemble what it stored.
+if let Some(parts) = storage::list_parts(&ctx, &key, &upload_id).await? {
+    let parts: Vec<_> = parts.iter().map(storage::StoredPart::completed).collect();
+    storage::complete_multipart(&ctx, &key, &upload_id, &parts).await?; // `false`: the upload is gone
+}
+```
+
+| Function | Does | Cost |
+|---|---|---|
+| `create_multipart(ctx, key, content_type)` | Starts an upload, returns its id | 1 class A |
+| `presign_part(ctx, key, upload_id, n, expires_in)` | `PUT` URL of part `n` (1 to 10,000) | none |
+| `list_parts(ctx, key, upload_id)` | The parts stored so far (number, ETag, size); `None` when the upload is gone | 1 class A per 1,000 parts |
+| `complete_multipart(ctx, key, upload_id, &parts)` | Assembles the object; `false` when the upload was completed, aborted or expired | 1 class A |
+| `abort_multipart(ctx, key, upload_id)` | Drops the upload (already gone is fine) | free |
+| `list_multipart_uploads(ctx, prefix)` | Uploads in progress under `prefix`, oldest first | 1 class A per 1,000 |
+| `read_range(ctx, key, offset, length)` | Bytes from `offset` (a video's index at its end, a ZIP's directory) | 1 class B |
+| `copy(ctx, from, to)` | Copies an object inside the bucket, streamed; in 1 GiB parts above 5 GiB | 1 class B + 1 class A per part |
+
+The R2 binding has no ListParts or ListMultipartUploads: `list_parts` and `list_multipart_uploads` call R2's S3 API, so they need the `R2_*` [settings](#settings) in a release build. In debug builds they read what the development route and `create_multipart` recorded under `.ocre-dev-storage/` in the local bucket.
 
 ## Purging unattached uploads
 

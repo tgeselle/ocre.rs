@@ -9,11 +9,14 @@ use worker::{
 use super::Ctx;
 use crate::{
     Error, IntoParam as _, Result,
+    config::Environment,
+    mail::APP_URL,
     storage::{
-        Attachment, ByteRange, DirectUpload, DirectUploadRequest, Disposition, Fetch, KEYS_PER_QUERY, Listing,
-        MAX_LIST, Purged, Rules, S3Endpoint, STORAGE_BINDING, STORAGE_PUBLIC_URL, StoredObject, Upload,
-        attachment_from_head, essence, file_response, join_public_url, missing_binding, not_modified, presign_get_url,
-        r2_endpoint, redirect_response, referenced_keys_sql, stale_keys, unsatisfiable, upload_secret, verify_key,
+        Attachment, ByteRange, DEV_APP_URL, DirectUpload, DirectUploadRequest, Disposition, Fetch, KEYS_PER_QUERY,
+        Listing, MAX_LIST, Purged, Rules, S3Endpoint, STORAGE_BINDING, STORAGE_PUBLIC_URL, StoredObject, Upload,
+        attachment_from_head, check_expires_in, dev_get_url, dev_url, essence, file_response, join_public_url,
+        missing_binding, not_modified, presign_get_url, r2_endpoint, redirect_response, referenced_keys_sql,
+        stale_keys, unsatisfiable, upload_secret, verify_key,
     },
 };
 
@@ -321,8 +324,20 @@ fn stored(object: &Object) -> StoredObject {
 }
 
 /// The S3 endpoint of the `R2_*` variables and secrets.
-fn endpoint(env: &Env) -> Result<S3Endpoint> {
+pub(super) fn endpoint(env: &Env) -> Result<S3Endpoint> {
     r2_endpoint(&|name| env.var(name).ok().map(|value| value.to_string()))
+}
+
+/// In development, the app address presigned URLs point to instead of R2
+/// (`APP_URL`, else `http://localhost:8787`); `None` in release builds.
+pub(super) fn dev_base(env: &Env) -> Option<String> {
+    Environment::current().is_development().then(|| {
+        env.var(APP_URL)
+            .ok()
+            .map(|value| value.to_string().trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| DEV_APP_URL.to_owned())
+    })
 }
 
 /// How long the URL of a [`direct_upload`] can be used to start the `PUT`: 10 minutes.
@@ -494,14 +509,15 @@ pub fn read_first(ctx: &Ctx, key: &str, length: u64) -> impl Future<Output = Res
 /// [`R2_ACCESS_KEY_ID`](crate::storage::R2_ACCESS_KEY_ID) and
 /// [`R2_SECRET_ACCESS_KEY`](crate::storage::R2_SECRET_ACCESS_KEY) secrets.
 /// Signing is local: no R2 operation, microseconds of CPU; the download
-/// is one class B operation. In `ocre dev` the URL points to the real
-/// bucket, not the local simulation.
+/// is one class B operation. In debug builds (`ocre dev`, `ocre test`) the
+/// URL points to the app's [`DEV_STORAGE_PATH`](crate::storage::DEV_STORAGE_PATH)
+/// route on the local bucket instead, and no `R2_*` setting is needed.
 ///
 /// # Errors
 ///
 /// [`Error::Internal`](crate::Error::Internal) (500) when one of the four
-/// settings is missing (the message names them and how to set them), or
-/// `expires_in` is 0 or over 7 days.
+/// settings is missing in a release build (the message names them and how
+/// to set them), or `expires_in` is 0 or over 7 days.
 ///
 /// # Examples
 ///
@@ -519,7 +535,10 @@ pub fn read_first(ctx: &Ctx, key: &str, length: u64) -> impl Future<Output = Res
 /// }
 /// ```
 pub fn presign_get(ctx: &Ctx, attachment: &Attachment, disposition: Disposition, expires_in: u64) -> Result<String> {
-    presign_get_url(&endpoint(ctx.env())?, attachment, disposition, crate::now(), expires_in)
+    match dev_base(ctx.env()) {
+        Some(base) => dev_get_url(&base, attachment, disposition, expires_in),
+        None => presign_get_url(&endpoint(ctx.env())?, attachment, disposition, crate::now(), expires_in),
+    }
 }
 
 /// Presigns a `PUT` of exactly `size` bytes of type `content_type` at `key`, valid `expires_in` seconds.
@@ -542,6 +561,10 @@ pub fn presign_get(ctx: &Ctx, attachment: &Attachment, disposition: Disposition,
 /// ```
 pub fn presign_put(ctx: &Ctx, key: &str, content_type: &str, size: u64, expires_in: u64) -> Result<String> {
     let content_type = essence(content_type);
+    if let Some(base) = dev_base(ctx.env()) {
+        check_expires_in(expires_in)?;
+        return Ok(dev_url(&base, key, &[], expires_in));
+    }
     let size = size.to_string();
     let headers = [("content-type", content_type.as_str()), ("content-length", size.as_str())];
     endpoint(ctx.env())?.presign("PUT", key, &headers, &[], crate::now(), expires_in)
@@ -558,9 +581,10 @@ pub fn presign_put(ctx: &Ctx, key: &str, content_type: &str, size: u64, expires_
 /// `<prefix>/<22 random characters>`; use a prefix of its own (`uploads/photos`)
 /// so [`purge_unattached`] can find abandoned uploads.
 ///
-/// Settings as [`presign_get`]; the bucket also needs a CORS rule allowing
-/// `PUT` from the app's origin (see the file storage guide). Signing costs
-/// no R2 operation; the upload is one class A operation.
+/// Settings as [`presign_get`] (none in debug builds, where the browser
+/// uploads to the app's development route); the bucket also needs a CORS
+/// rule allowing `PUT` from the app's origin (see the file storage guide).
+/// Signing costs no R2 operation; the upload is one class A operation.
 ///
 /// # Errors
 ///
@@ -590,7 +614,16 @@ pub fn direct_upload(
     request: &DirectUploadRequest,
     rules: &Rules,
 ) -> Result<DirectUpload> {
-    DirectUpload::sign(&endpoint(ctx.env())?, prefix, field, request, rules, crate::now(), DIRECT_UPLOAD_EXPIRES_IN)
+    let env = ctx.env();
+    match dev_base(env) {
+        Some(base) => {
+            let secret = upload_secret(&|name| env.var(name).ok().map(|value| value.to_string()))?;
+            DirectUpload::sign_dev(&base, &secret, prefix, field, request, rules, DIRECT_UPLOAD_EXPIRES_IN)
+        }
+        None => {
+            DirectUpload::sign(&endpoint(env)?, prefix, field, request, rules, crate::now(), DIRECT_UPLOAD_EXPIRES_IN)
+        }
+    }
 }
 
 /// Finishes a direct upload (or a [`multipart_uploads`](crate::storage::multipart_uploads) one): checks the object behind `signed_key` against `rules` and returns its [`Attachment`].

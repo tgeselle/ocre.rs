@@ -58,7 +58,10 @@
 //! (sentry.io or any Sentry-compatible service, such as GlitchTip or
 //! Bugsink). Other services implement [`Subscriber`]: it turns a [`Report`]
 //! into the HTTP request to send ([`Delivery`]), and Ocre sends it with
-//! `fetch` once the response is ready.
+//! `fetch` once the response is ready. [`scrub`] (or [`Report::scrubbed`])
+//! takes emails, credentials and tokens out of a report before it leaves
+//! the app, and normalizes ids and durations so one error groups as one
+//! issue.
 //!
 //! # Free plan
 //!
@@ -67,6 +70,8 @@
 //! handler, before the response goes out, so an error response waits for
 //! it. Only reports that happen are sent; a request without errors makes no
 //! subrequest.
+
+mod scrub;
 
 use std::{
     fmt::Display,
@@ -77,6 +82,7 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use crate::{config::Environment, log::Logger};
+pub use scrub::scrub;
 
 /// How bad a report is (Rails' `severity:`).
 ///

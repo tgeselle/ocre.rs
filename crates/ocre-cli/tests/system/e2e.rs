@@ -71,8 +71,13 @@ fn type_checks(root: &Path) {
 }
 
 fn start(sandbox: &Sandbox, root: &Path) -> Server {
+    start_on(sandbox, root, free_port())
+}
+
+/// [`start`] on `port`, for apps whose settings name their own address (`APP_URL`).
+fn start_on(sandbox: &Sandbox, root: &Path, port: u16) -> Server {
     type_checks(root);
-    let port = free_port().to_string();
+    let port = port.to_string();
     let mut command = sandbox.command(&["dev", "--port", &port], root);
     app_build_env(&mut command);
     let log = sandbox.work.join("dev.log");
@@ -1805,4 +1810,211 @@ fn generated_app_uses_the_newer_backend_features_on_workerd() {
     assert!(jobs.contains(r#"{"record_visit":{"name":"e2e"}}"#), "{jobs}");
     let raw = "From: ada@example.com\r\nTo: app@example.com\r\nSubject: Hi\r\nMessage-ID: <1@e2e>\r\n\r\nHello";
     assert_eq!(deliver(&server, "ada@example.com", "app@example.com", raw).0, 200);
+}
+
+const E2E_PLATFORM: &str = r#"use axum::{
+    Json, Router,
+    extract::{Query, State},
+    http::HeaderMap,
+    routing::{get, post},
+};
+use ocre::{Ctx, Error, OptionExt, Result, alerts, http, params, storage, webhooks};
+use serde::Deserialize;
+use ocre::serde_json::{Value, json};
+
+pub fn routes() -> Router<Ctx> {
+    Router::new()
+        .route("/e2e/presign", get(presign))
+        .route("/e2e/multipart", post(multipart))
+        .route("/e2e/multipart/complete", post(complete))
+        .route("/e2e/range", get(range))
+        .route("/e2e/copy", post(copy))
+        .route("/e2e/fetch", get(fetch))
+        .route("/e2e/deliver", post(deliver))
+        .route("/e2e/alert", post(alert))
+}
+
+#[derive(Deserialize)]
+struct Params {
+    key: String,
+    #[serde(default)]
+    upload_id: String,
+    #[serde(default)]
+    to: String,
+}
+
+/// A presigned PUT, and a GET of the object once it exists.
+async fn presign(State(ctx): State<Ctx>, Query(p): Query<Params>) -> Result<Json<Value>> {
+    let put = storage::presign_put(&ctx, &p.key, "text/plain", 5, 600)?;
+    let get = match storage::head(&ctx, &p.key).await? {
+        Some(object) => {
+            let attachment = object.attachment("hello.txt");
+            Some(storage::presign_get(&ctx, &attachment, storage::Disposition::Download, 600)?)
+        }
+        None => None,
+    };
+    Ok(Json(json!({"put": put, "get": get})))
+}
+
+async fn multipart(State(ctx): State<Ctx>, Query(p): Query<Params>) -> Result<Json<Value>> {
+    let upload_id = storage::create_multipart(&ctx, &p.key, "application/octet-stream").await?;
+    let urls: Vec<String> =
+        (1..=2).map(|part| storage::presign_part(&ctx, &p.key, &upload_id, part, 600)).collect::<Result<_>>()?;
+    let pending = storage::list_multipart_uploads(&ctx, "e2e/").await?;
+    Ok(Json(json!({"upload_id": upload_id, "urls": urls, "pending": pending.len()})))
+}
+
+async fn complete(State(ctx): State<Ctx>, Query(p): Query<Params>) -> Result<Json<Value>> {
+    let parts = storage::list_parts(&ctx, &p.key, &p.upload_id).await?.or_404()?;
+    let sizes: Vec<u64> = parts.iter().map(|part| part.size).collect();
+    let completed: Vec<_> = parts.iter().map(storage::StoredPart::completed).collect();
+    let done = storage::complete_multipart(&ctx, &p.key, &p.upload_id, &completed).await?;
+    let again = storage::complete_multipart(&ctx, &p.key, &p.upload_id, &completed).await?;
+    let gone = storage::list_parts(&ctx, &p.key, &p.upload_id).await?.is_none();
+    let pending = storage::list_multipart_uploads(&ctx, "e2e/").await?.len();
+    Ok(Json(json!({"sizes": sizes, "done": done, "again": again, "gone": gone, "pending": pending})))
+}
+
+async fn range(State(ctx): State<Ctx>, Query(p): Query<Params>) -> Result<Vec<u8>> {
+    storage::read_range(&ctx, &p.key, 5 * 1024 * 1024 - 2, 6).await?.or_404()
+}
+
+async fn copy(State(ctx): State<Ctx>, Query(p): Query<Params>) -> Result<String> {
+    let size = storage::copy(&ctx, &p.key, &p.to).await?.or_404()?;
+    let missing = storage::copy(&ctx, "e2e/none", "e2e/none-copy").await?;
+    Ok(format!("{size} {missing:?}"))
+}
+
+/// A GET to the fake service the test points us at.
+async fn fetch(headers: HeaderMap) -> Result<String> {
+    let base = http::test_override(&headers, "api").ok_or_else(|| Error::bad_request("no fake"))?;
+    let answer = http::Request::get(format!("{base}/hello")).query(&[("q", "a b")]).bearer("k1").send().await?;
+    let failed = http::Request::get(format!("{base}/missing")).send().await?.error_for_status().is_err();
+    let late = http::Request::get("http://10.255.255.1/").timeout(std::time::Duration::from_millis(300)).send().await;
+    Ok(format!("{} {} {failed} {}", answer.status, answer.text(), late.is_err()))
+}
+
+async fn deliver(headers: HeaderMap) -> Result<String> {
+    let base = http::test_override(&headers, "api").ok_or_else(|| Error::bad_request("no fake"))?;
+    let event = json!({"type": "video.completed", "data": {"video_id": 7}});
+    let response = webhooks::deliver(&format!("{base}/hook"), "whsec_c2VjcmV0", "evt_1", &event).await?;
+    let refused = webhooks::check_public_url("http://10.0.0.5/hook").await.unwrap_err().to_string();
+    Ok(format!("{} {refused}", response.status))
+}
+
+async fn alert(State(ctx): State<Ctx>) -> Result<Json<Value>> {
+    for _ in 0..2 {
+        alerts::record(&ctx, alerts::Alert::new("e2e.alert").key("k").detail("from the test")).await;
+    }
+    #[derive(Deserialize)]
+    struct Row {
+        status: String,
+    }
+    let rows: Vec<Row> = ctx.db()?.all("SELECT status FROM alerts ORDER BY id", params![]).await?;
+    let digest = alerts::send_digest(&ctx).await?;
+    Ok(Json(json!({"statuses": rows.iter().map(|row| row.status.as_str()).collect::<Vec<_>>(), "digest": digest})))
+}
+"#;
+
+#[test]
+#[ignore = "builds WebAssembly and runs cf dev; run with --ignored"]
+fn generated_app_uses_storage_http_webhooks_alerts_and_localized_pages_on_workerd() {
+    use ocre::testing::FakeServer;
+
+    let sandbox = Sandbox::new();
+    sandbox.use_real_cloudflare();
+    let root = sandbox.new_app("e2e-platform", &[]);
+    for args in [
+        &["g", "scaffold", "Photo", "title:string", "image:attachment"][..],
+        &["g", "locale", "en", "fr"],
+        &["g", "alerts"],
+    ] {
+        let (report, ok) = sandbox.json(args, &root);
+        assert!(ok, "{args:?}: {report}");
+    }
+    let lib =
+        std::fs::read_to_string(root.join("src/lib.rs")).unwrap().replace("\"fr\");", "\"fr\"; unprefixed_default);");
+    std::fs::write(root.join("src/lib.rs"), lib).unwrap();
+    let (report, ok) = sandbox.json(&["g", "blog"], &root);
+    assert!(ok, "{report}");
+    std::fs::write(root.join("src/e2e_platform.rs"), E2E_PLATFORM).unwrap();
+    let lib = std::fs::read_to_string(root.join("src/lib.rs"))
+        .unwrap()
+        .replace("// ocre:modules", "// ocre:modules\nmod e2e_platform;")
+        .replace("// ocre:routes", "// ocre:routes\n        .merge(e2e_platform::routes())");
+    std::fs::write(root.join("src/lib.rs"), lib).unwrap();
+    let port = free_port();
+    let vars = std::fs::read_to_string(root.join(".dev.vars")).unwrap();
+    std::fs::write(root.join(".dev.vars"), format!("{vars}APP_URL=http://localhost:{port}\n")).unwrap();
+    let server = start_on(&sandbox, &root, port);
+    let agent = agent();
+
+    // Presigned URLs in development: the app's own route on the local bucket.
+    let urls: serde_json::Value = serde_json::from_str(&get(&server, "/e2e/presign?key=e2e/hello.txt").body).unwrap();
+    let put = urls["put"].as_str().unwrap();
+    assert!(put.starts_with(&format!("{}/ocre/dev/storage/e2e/hello.txt?", server.base)), "{put}");
+    let stored = agent.put(put).header("content-type", "text/plain").send("hello").unwrap();
+    assert_eq!(stored.status(), 200);
+    assert!(stored.headers().get("etag").is_some());
+    let urls: serde_json::Value = serde_json::from_str(&get(&server, "/e2e/presign?key=e2e/hello.txt").body).unwrap();
+    let mut got = agent.get(urls["get"].as_str().unwrap()).header("range", "bytes=1-3").call().unwrap();
+    assert_eq!(got.status(), 206);
+    assert_eq!(got.headers()["content-disposition"], "attachment; filename=\"hello.txt\"");
+    assert_eq!(got.body_mut().read_to_string().unwrap(), "ell");
+
+    // A multipart upload driven by the app, parts PUT by "another service".
+    let started: serde_json::Value =
+        serde_json::from_str(&post(&server, "/e2e/multipart?key=e2e/big.bin", &[]).body).unwrap();
+    assert_eq!(started["pending"], 1, "{started}");
+    let first = vec![7u8; 5 * 1024 * 1024];
+    for (url, bytes) in started["urls"].as_array().unwrap().iter().zip([first.as_slice(), b"0123456789"]) {
+        let part = agent.put(url.as_str().unwrap()).send(bytes).unwrap();
+        assert_eq!(part.status(), 200);
+    }
+    let upload_id = started["upload_id"].as_str().unwrap();
+    let path = format!("/e2e/multipart/complete?key=e2e/big.bin&upload_id={}", ocre::percent_encode(upload_id, false));
+    let completed: serde_json::Value = serde_json::from_str(&post(&server, &path, &[]).body).unwrap();
+    assert_eq!(
+        completed,
+        serde_json::json!({"sizes": [5 * 1024 * 1024, 10], "done": true, "again": false, "gone": true, "pending": 0})
+    );
+    assert_eq!(get(&server, "/e2e/range?key=e2e/big.bin").body.as_bytes(), [7, 7, b'0', b'1', b'2', b'3']);
+    assert_eq!(post(&server, "/e2e/copy?key=e2e/big.bin&to=e2e/big-copy.bin", &[]).body, "5242890 None");
+
+    // Outgoing HTTP and webhooks, to a fake service of the test process.
+    let fake = FakeServer::start();
+    fake.answer("GET", "/hello", 200, "hi").answer("POST", "/hook", 204, "");
+    let fetched = send(&server, "GET", "/e2e/fetch", &[("x-ocre-test-api", fake.url())], &[]);
+    assert_eq!(fetched.body, "200 hi true true", "{}", fetched.body);
+    let hello = fake.requests().into_iter().find(|request| request.path.starts_with("/hello")).unwrap();
+    assert_eq!((hello.path.as_str(), hello.header("authorization")), ("/hello?q=a%20b", Some("Bearer k1")));
+    let delivered = send(&server, "POST", "/e2e/deliver", &[("x-ocre-test-api", fake.url())], &[]);
+    assert_eq!(delivered.body, "204 bad request: The webhook URL's host 10.0.0.5 is a private address");
+    let hook = fake.requests().into_iter().find(|request| request.path == "/hook").unwrap();
+    let mut headers = axum::http::HeaderMap::new();
+    for name in ["webhook-id", "webhook-timestamp", "webhook-signature"] {
+        headers.insert(name, hook.header(name).unwrap().parse().unwrap());
+    }
+    let id = ocre::webhooks::verify_standard("whsec_c2VjcmV0", &headers, &hook.body, 300, ocre::now()).unwrap();
+    assert_eq!((id.as_str(), hook.json::<serde_json::Value>()["data"]["video_id"].as_i64()), ("evt_1", Some(7)));
+
+    // Owner alerts: the repeat is deduplicated; nothing waited for the digest.
+    let alerts: serde_json::Value = serde_json::from_str(&post(&server, "/e2e/alert", &[]).body).unwrap();
+    assert_eq!(alerts, serde_json::json!({"statuses": ["sent", "deduped"], "digest": 0}));
+    wait_for_log(&sandbox, "Subject: Alert: e2e.alert");
+
+    // The blog, in every locale, the default one without a prefix.
+    let index = get(&server, "/blog");
+    assert_eq!(index.status, 200);
+    assert!(index.body.contains("<a href=\"/blog/welcome\">Welcome to the blog</a>"), "{}", index.body);
+    let french = get(&server, "/fr/blog/welcome");
+    assert_eq!(french.status, 200);
+    assert_eq!(french.cookie, "locale=fr");
+    assert!(french.body.contains("<h1>Welcome to the blog</h1>") && french.body.contains("application/ld+json"));
+    assert!(french.body.contains("<a href=\"/fr/blog\">Blog</a>"), "{}", french.body);
+    assert_eq!((get(&server, "/en/blog").status, get(&server, "/en/blog").location.as_str()), (308, "/blog"));
+    let preferred = send(&server, "GET", "/blog", &[("accept-language", "fr")], &[]);
+    assert_eq!((preferred.status, preferred.location.as_str()), (303, "/fr/blog"));
+    assert_eq!(get(&server, "/blog/nope").status, 404);
+    assert_eq!(get(&server, "/de/blog").status, 404);
 }

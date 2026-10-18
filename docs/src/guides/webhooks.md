@@ -149,16 +149,42 @@ When the app calls a service that checks signatures (or another app of yours), s
 ```rust
 let body = serde_json::to_vec(&job)?;
 let signature = ocre::webhooks::sign(secret.as_bytes(), &body); // lowercase hex HMAC-SHA256
-let response = reqwest::Client::new()
-    .post(url)
-    .header("X-Signature", signature)
-    .header("Content-Type", "application/json")
-    .body(body)
+let response = ocre::http::Request::post(url)
+    .header("X-Signature", &signature)
+    .body(body, "application/json")
     .send()
-    .await;
+    .await?
+    .error_for_status()?;
 ```
 
 `ocre::webhooks::post_signed(url, secret, bearer, &json)` does it in one call (one subrequest) and returns the status and body; `ocre g external_job` uses it. `webhooks::sign_standard(secret, id, timestamp, body)` gives the `webhook-signature` value of a Standard Webhooks delivery. Outgoing HTTP is covered in [Calling other services](controllers.md#calling-other-services).
+
+## Send webhooks to your users
+
+When users register their own URL to be notified (an API's "notify me" setting), `ocre::webhooks::deliver` sends each event as a [Standard Webhooks](https://www.standardwebhooks.com) delivery, which the receivers' libraries verify:
+
+```rust,ignore
+use ocre::webhooks;
+use serde_json::json;
+
+// When the endpoint is saved: its secret, and a check of the URL (400 with the reason).
+let secret = webhooks::new_secret(); // `whsec_...`: show it once, store it encrypted
+webhooks::check_public_url(&form.url).await?;
+
+// In a job (src/jobs/deliver_webhook.rs), so the queue retries a failure:
+let event = json!({"type": "video.completed", "data": {"video_id": 7}});
+let response = webhooks::deliver(&endpoint.url, &endpoint.secret, &event_id, &event).await?;
+if !response.is_success() {
+    return Err(ocre::Error::internal(format!("{} answered {}", endpoint.url, response.status)));
+}
+```
+
+- **Headers**: `webhook-id` (the event's id: keep it the same on retries so receivers deduplicate), `webhook-timestamp`, `webhook-signature` (`v1,<base64 HMAC-SHA256>` of `id.timestamp.body`), `content-type: application/json`.
+- **No redirects, 10-second timeout** ([`DELIVERY_TIMEOUT`](https://docs.rs/ocre/latest/ocre/webhooks/constant.DELIVERY_TIMEOUT.html)): a 3xx is the answer.
+- **No private addresses**: in release builds the URL must be `http(s)` without credentials, and its host must not be, or resolve to, a private, loopback, link-local, CGNAT or reserved address (IPv4 and IPv6; names are resolved with DNS over HTTPS, two subrequests), so a user cannot make the app call its own network. Debug builds deliver anywhere, so request tests can receive on `127.0.0.1` with [`FakeServer`](testing.md#fake-services).
+
+Costs: one subrequest per delivery, plus two DNS lookups in production; a retried job is one more Queues read.
+
 
 ## See also
 

@@ -62,3 +62,105 @@ fn standard_webhooks_check_the_signature_and_the_timestamp() {
     let err = verify_standard("plain", &headers, body, 300, 1000).unwrap_err();
     assert!(err.to_string().contains("`whsec_` followed by base64"), "{err}");
 }
+
+#[test]
+fn private_addresses_cover_every_internal_range() {
+    let private = [
+        "10.1.2.3",
+        "127.0.0.1",
+        "169.254.169.254",
+        "172.16.0.1",
+        "172.31.255.255",
+        "192.168.1.1",
+        "100.64.0.1",
+        "100.127.0.1",
+        "0.0.0.0",
+        "0.1.2.3",
+        "255.255.255.255",
+        "224.0.0.1",
+        "240.0.0.1",
+        "198.18.0.1",
+        "192.0.0.8",
+        "192.0.2.1",
+        "::1",
+        "::",
+        "fc00::1",
+        "fdff::1",
+        "fe80::1",
+        "ff02::1",
+        "::ffff:10.0.0.1",
+        "2001:db8::1",
+        "64:ff9b::a00:1",
+    ];
+    for ip in private {
+        assert!(private_ip(ip.parse().unwrap()), "{ip}");
+    }
+    let public = [
+        "8.8.8.8",
+        "172.32.0.1",
+        "172.15.0.1",
+        "100.128.0.1",
+        "1.1.1.1",
+        "192.169.0.1",
+        "198.20.0.1",
+        "2606:4700::1111",
+        "::ffff:1.1.1.1",
+    ];
+    for ip in public {
+        assert!(!private_ip(ip.parse().unwrap()), "{ip}");
+    }
+}
+
+#[test]
+fn webhook_urls_need_an_http_scheme_and_a_host_without_credentials() {
+    assert_eq!(url_host("https://Hooks.Example.com./x").unwrap(), UrlHost::Name("hooks.example.com".into()));
+    assert_eq!(url_host(" http://10.0.0.5:8080/ ").unwrap(), UrlHost::Ip("10.0.0.5".parse().unwrap()));
+    assert_eq!(url_host("http://[::1]/").unwrap(), UrlHost::Ip("::1".parse().unwrap()));
+    assert_eq!(url_host("http://api.localhost/").unwrap(), UrlHost::Ip("127.0.0.1".parse().unwrap()));
+    for (url, reason) in [
+        ("ftp://example.com", "must start with https:// or http://"),
+        ("https://user:pw@example.com", "must not contain a user name or password"),
+        ("not a url", "is not a valid URL"),
+        ("file:///etc/passwd", "must start with https:// or http://"),
+    ] {
+        assert_eq!(url_host(url).unwrap_err().to_string(), format!("bad request: The webhook URL {reason}"), "{url}");
+    }
+}
+
+#[test]
+fn dns_answers_give_a_and_aaaa_records() {
+    let answer = serde_json::json!({"Status": 0, "Answer": [
+        {"name": "x.example.", "type": 5, "data": "y.example."},
+        {"name": "y.example.", "type": 1, "data": "93.184.216.34"},
+        {"name": "y.example.", "type": 28, "data": "2606:4700::1111"},
+        {"name": "y.example.", "type": 1, "data": "not an ip"}
+    ]});
+    let addresses = dns_addresses(&answer);
+    assert_eq!(addresses, ["93.184.216.34".parse::<IpAddr>().unwrap(), "2606:4700::1111".parse().unwrap()]);
+    assert!(dns_addresses(&serde_json::json!({"Status": 3})).is_empty());
+    assert!(refused_addresses("y.example", &addresses).is_none());
+    let unknown = refused_addresses("nx.example", &[]).unwrap().to_string();
+    assert_eq!(unknown, "bad request: The webhook URL's host nx.example was not found");
+    let private = refused_addresses("in.example", &[addresses[0], "10.0.0.1".parse().unwrap()]).unwrap().to_string();
+    assert_eq!(private, "bad request: The webhook URL's host in.example is a private address");
+}
+
+#[test]
+fn deliveries_are_signed_standard_webhooks_without_redirects() {
+    let secret = new_secret();
+    let request =
+        delivery_request(" https://hooks.example.com/in ", &secret, "evt_1", b"{\"a\":1}".to_vec(), 1_700_000_000)
+            .unwrap();
+    assert_eq!(request.url(), "https://hooks.example.com/in");
+    assert!(!request.follows_redirects());
+    assert_eq!(request.timeout_duration(), DELIVERY_TIMEOUT);
+    let mut headers = HeaderMap::new();
+    for (name, value) in request.headers() {
+        headers.insert(axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(), value.parse().unwrap());
+    }
+    assert_eq!(headers["content-type"], "application/json");
+    let id = verify_standard(&secret, &headers, request.body_bytes().unwrap(), 300, 1_700_000_010).unwrap();
+    assert_eq!(id, "evt_1");
+    assert!(delivery_request("https://x", "not-whsec", "evt_1", Vec::new(), 0).is_err());
+    assert_ne!(new_secret(), secret, "secrets are random");
+}

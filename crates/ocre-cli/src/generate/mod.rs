@@ -1,12 +1,14 @@
-//! `ocre generate model|scaffold|api|migration|mailer|mailbox|job|schedule|cache|locale|ci|pwa|...`.
+//! `ocre generate model|scaffold|api|migration|mailer|mailbox|job|schedule|cache|locale|ci|pwa|blog|...`.
 //!
 //! Generators collect every change in [`Edits`] and write nothing until the
 //! whole generation succeeded, so a failure never leaves half a resource.
 //! [`Edits::apply`] honours `--pretend`, `--force` and `--skip` and writes a
 //! [`record`] of the run for `ocre destroy`.
 
+mod alerts;
 mod api;
 mod auth;
+mod blog;
 mod cache;
 mod ci;
 mod controller;
@@ -36,8 +38,10 @@ mod webhook;
 
 use std::{fmt::Write as _, path::PathBuf};
 
+pub use alerts::alerts;
 pub use api::api;
 pub use auth::{AuthOptions, auth};
+pub use blog::blog;
 pub use cache::cache;
 pub use ci::ci;
 pub use controller::{controller, resource};

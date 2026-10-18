@@ -21,6 +21,17 @@
 //! reads a file's real type and image size, [`Variant`] builds Cloudflare
 //! Image Transformations URLs, [`public_url`] links to a public bucket.
 //!
+//! Files another service writes or reads: [`create_multipart`],
+//! [`presign_part`], [`list_parts`], [`complete_multipart`],
+//! [`abort_multipart`] and [`list_multipart_uploads`] drive a multipart
+//! upload the app hands out (a GPU worker's output); [`read_range`] reads
+//! a piece of a large file and [`copy`] duplicates one inside the bucket.
+//!
+//! In debug builds (`ocre dev`, `ocre test`), every presigned URL points to
+//! the app's [`DEV_STORAGE_PATH`] route on the local bucket, so uploads and
+//! downloads that skip the Worker in production work locally too, without
+//! `R2_*` settings and without touching the real bucket.
+//!
 //! Keys are random (`<prefix>/<22 characters>`, 128 bits, never derived from
 //! file names) and never reused, so a stored object never changes: replacing
 //! a file means storing a new key and deleting the old one. `ocre g scaffold
@@ -88,6 +99,7 @@ mod analyze;
 mod multipart;
 mod presign;
 mod resumable;
+mod s3;
 mod variant;
 
 use std::fmt::Write as _;
@@ -101,6 +113,10 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
 pub use crate::runtime::resumable::multipart_uploads;
+pub use crate::runtime::s3::{
+    abort_multipart, complete_multipart, copy, create_multipart, list_multipart_uploads, list_parts, presign_part,
+    read_range,
+};
 pub use crate::runtime::storage::{
     attach_direct_upload, delete, delete_attachments, direct_upload, exists, head, list, presign_get, presign_put,
     public_url, purge_unattached, read, read_first, serve, serve_redirect, store, store_body, store_bytes,
@@ -112,12 +128,20 @@ pub use presign::{
     DirectUpload, DirectUploadRequest, MAX_EXPIRES_IN, R2_ACCESS_KEY_ID, R2_ACCOUNT_ID, R2_BUCKET,
     R2_SECRET_ACCESS_KEY, S3Endpoint,
 };
-pub(crate) use presign::{attachment_from_head, presign_get_url, r2_endpoint, sign_key, upload_secret, verify_key};
+pub(crate) use presign::{
+    attachment_from_head, check_expires_in, dev_get_url, presign_get_url, r2_endpoint, sign_key, upload_secret,
+    verify_key,
+};
 pub(crate) use resumable::check_part_numbers;
 pub use resumable::{
     CompletedPart, FinishRequest, MAX_PART, MAX_PARTS, MAX_PARTS_PER_REQUEST, MAX_WORKER_PART, MultipartUpload,
     PART_SIZE, PartUrls, PartsRequest, check_multipart, part_layout, presign_parts,
 };
+pub(crate) use s3::{
+    DEV_APP_URL, DEV_MARKERS, DevGet, DevPut, dev_parts_prefix, dev_upload_from_marker, dev_upload_marker, dev_url,
+    parse_parts, parse_uploads, upload_gone,
+};
+pub use s3::{DEV_STORAGE_PATH, PendingUpload, StoredPart};
 pub use variant::{Fit, Variant};
 
 /// Name of the R2 binding holding every file: `STORAGE: bindings.r2({ name: "<app>-storage" })` in cloudflare.config.ts.
