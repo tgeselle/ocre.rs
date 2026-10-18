@@ -101,7 +101,7 @@ fn build() -> Res<PathBuf> {
     let pages = summary(&src)?;
     check_links(&pages, &src)?;
     mdbook(&docs)?;
-    home(&docs.join("site"), &out)?;
+    home(&docs.join("site"), &out, &ocre_version(&repo)?)?;
 
     for page in &pages {
         write(&out.join(&page.path), &read(&src.join(&page.path))?)?;
@@ -114,15 +114,30 @@ fn build() -> Res<PathBuf> {
 }
 
 /// The hand-written home page (`docs/site/`, flat) replaces mdBook's
-/// `index.html`.
-fn home(site: &Path, out: &Path) -> Res<()> {
+/// `index.html`. `__OCRE_VERSION__` in its HTML becomes the framework's
+/// `major.minor`, so the badge follows each release.
+fn home(site: &Path, out: &Path, version: &str) -> Res<()> {
     let entries = fs::read_dir(site).map_err(|e| format!("{}: {e}", site.display()))?;
     for entry in entries {
         let from = entry.map_err(|e| format!("{}: {e}", site.display()))?.path();
         let to = out.join(from.file_name().expect("a directory entry has a name"));
-        fs::copy(&from, &to).map_err(|e| format!("{} -> {}: {e}", from.display(), to.display()))?;
+        if from.extension().is_some_and(|ext| ext == "html") {
+            write(&to, &read(&from)?.replace("__OCRE_VERSION__", version))?;
+        } else {
+            fs::copy(&from, &to).map_err(|e| format!("{} -> {}: {e}", from.display(), to.display()))?;
+        }
     }
     Ok(())
+}
+
+/// `0.3` for `version = "0.3.0"` in crates/ocre/Cargo.toml.
+fn ocre_version(repo: &Path) -> Res<String> {
+    let manifest = read(&repo.join("crates/ocre/Cargo.toml"))?;
+    let version = manifest
+        .lines()
+        .find_map(|line| line.strip_prefix("version = \"")?.strip_suffix('"'))
+        .ok_or("crates/ocre/Cargo.toml has no `version = \"...\"` line")?;
+    Ok(version.splitn(3, '.').take(2).collect::<Vec<_>>().join("."))
 }
 
 fn mdbook(docs: &Path) -> Res<()> {
