@@ -11,8 +11,9 @@ use crate::{
     Error, Result,
     jobs::{DEFAULT_QUEUE, Payload},
     mail::{
-        APP_URL, Adapter, Attachment, EMAIL_BINDING, Email, LOG_PREFIX, MAIL_ADAPTER, MAIL_FROM, Message, Outgoing,
-        RESEND_API_KEY, RESEND_URL, absolute_url, adapter_for, cloudflare_error, resend_error, resend_key,
+        APP_URL, Adapter, Attachment, EMAIL_BINDING, Email, Failure, LOG_PREFIX, MAIL_ADAPTER, MAIL_FROM, Message,
+        Outgoing, RESEND_API_KEY, RESEND_URL, absolute_url, adapter_for, cloudflare_error, cloudflare_fails_over,
+        resend_error, resend_fails_over, resend_key,
     },
 };
 
@@ -22,7 +23,10 @@ use crate::{
 /// [`LOG_PREFIX`](crate::mail::LOG_PREFIX) lines and sends nothing; `resend`
 /// makes one `POST https://api.resend.com/emails` subrequest; `cloudflare`
 /// calls the [`EMAIL_BINDING`](crate::mail::EMAIL_BINDING) send_email
-/// binding. The request waits for the provider; use
+/// binding. With a list in `MAIL_ADAPTER` (`resend,cloudflare`), the next
+/// adapter sends when the previous provider did not take the email (see
+/// [`MAIL_ADAPTER`](crate::mail::MAIL_ADAPTER)), each one more subrequest.
+/// The request waits for the provider; use
 /// [`deliver_later`](crate::mail::deliver_later) to answer first and retry failures.
 ///
 /// The returned future is `Send`, so axum handlers can await it.
@@ -39,7 +43,8 @@ use crate::{
 ///   subject that is empty or spans several lines; the `RESEND_API_KEY`
 ///   secret or the `EMAIL: bindings.sendEmail()` binding missing; the
 ///   provider refused the email (e.g. Resend's quota reached, an unverified
-///   domain or recipient) or could not be reached.
+///   domain or recipient) or could not be reached; with a list of adapters,
+///   the last one's error, the others' in `warn` lines.
 ///
 /// # Examples
 ///
@@ -174,43 +179,60 @@ pub(crate) async fn deliver(env: &Env, email: Email) -> Result<()> {
         worker::console_log!("{dropped}");
         return Ok(());
     };
-    let adapter = adapter_for(var(env, MAIL_ADAPTER).as_deref(), &email)?;
+    let adapters = adapter_for(var(env, MAIL_ADAPTER).as_deref(), &email)?;
     let outgoing = Outgoing::new(var(env, MAIL_FROM), email)?;
-    match adapter {
-        Adapter::Log => {
-            worker::console_log!("{}", outgoing.log_text());
-            crate::mail::capture(outgoing);
-            Ok(())
+    let mut adapters = adapters.into_iter().peekable();
+    while let Some(adapter) = adapters.next() {
+        let sent = match adapter {
+            Adapter::Log => {
+                worker::console_log!("{}", outgoing.log_text());
+                crate::mail::capture(outgoing);
+                return Ok(());
+            }
+            Adapter::Resend => resend(env, &outgoing).await,
+            Adapter::Cloudflare => cloudflare(env, &outgoing).await,
+        };
+        let Err(failure) = sent else { return Ok(()) };
+        match adapters.peek() {
+            Some(next) if failure.fail_over => crate::log::Logger::new().warn(format_args!(
+                "{LOG_PREFIX} {} did not send the email, trying {} ({MAIL_ADAPTER}): {}",
+                adapter.name(),
+                next.name(),
+                failure.error
+            )),
+            _ => return Err(failure.error),
         }
-        Adapter::Resend => resend(env, &outgoing).await,
-        Adapter::Cloudflare => cloudflare(env, &outgoing).await,
     }
+    unreachable!("MAIL_ADAPTER names at least one adapter")
 }
 
-async fn resend(env: &Env, outgoing: &Outgoing) -> Result<()> {
-    let key = resend_key(super::secrets::lookup(env, RESEND_API_KEY).await?)?;
+async fn resend(env: &Env, outgoing: &Outgoing) -> std::result::Result<(), Failure> {
+    let key = resend_key(super::secrets::lookup(env, RESEND_API_KEY).await?).map_err(Failure::provider)?;
     let headers = Headers::new();
-    headers.set("Authorization", &format!("Bearer {key}"))?;
-    headers.set("Content-Type", "application/json")?;
+    headers.set("Authorization", &format!("Bearer {key}")).map_err(Error::from)?;
+    headers.set("Content-Type", "application/json").map_err(Error::from)?;
     let mut init = RequestInit::new();
     init.with_method(Method::Post)
         .with_headers(headers)
         .with_body(Some(JsValue::from_str(&outgoing.resend_json().to_string())));
-    let mut response = Fetch::Request(Request::new_with_init(RESEND_URL, &init)?).send().await?;
+    let request = Request::new_with_init(RESEND_URL, &init).map_err(Error::from)?;
+    // No answer (connection failed): Resend did not take the email.
+    let mut response = Fetch::Request(request).send().await.map_err(|err| Failure::provider(err.into()))?;
     let status = response.status_code();
     if (200..300).contains(&status) {
         Ok(())
     } else {
-        Err(resend_error(status, &response.text().await.unwrap_or_default()))
+        let error = resend_error(status, &response.text().await.unwrap_or_default());
+        Err(Failure { error, fail_over: resend_fails_over(status) })
     }
 }
 
-async fn cloudflare(env: &Env, outgoing: &Outgoing) -> Result<()> {
+async fn cloudflare(env: &Env, outgoing: &Outgoing) -> std::result::Result<(), Failure> {
     let binding = env.send_email(EMAIL_BINDING).map_err(|err| {
-        Error::internal(format!(
+        Failure::provider(Error::internal(format!(
             "cannot send email: the send_email binding `{EMAIL_BINDING}` is missing ({err}). Fix: add \
              `{EMAIL_BINDING}: bindings.sendEmail(),` to worker.env in cloudflare.config.ts"
-        ))
+        )))
     })?;
     let Outgoing { from, email } = outgoing;
     let to = Outgoing::addresses(&email.to);
@@ -261,7 +283,10 @@ async fn cloudflare(env: &Env, outgoing: &Outgoing) -> Result<()> {
             .collect();
         builder = builder.attachments(&files);
     }
-    binding.send_with_builder(&builder.build()).await.map_err(|err| cloudflare_error(&js_error(&err)))?;
+    binding.send_with_builder(&builder.build()).await.map_err(|err| {
+        let detail = js_error(&err);
+        Failure { error: cloudflare_error(&detail), fail_over: cloudflare_fails_over(&detail) }
+    })?;
     Ok(())
 }
 

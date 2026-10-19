@@ -187,6 +187,7 @@ mod query;
 pub mod realtime;
 pub mod replicas;
 mod request;
+mod retry;
 mod runtime;
 pub mod security;
 pub mod seo;

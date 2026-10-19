@@ -143,7 +143,7 @@ Total Upload: 790.66 KiB / gzip: 238.60 KiB
 |---|---|---|---|
 | `SECRET_KEY_BASE` | secret | `ocre deploy` (first deploy) | Sessions, flash, CSRF-protected forms, JWTs |
 | `MAIL_FROM` | var | `MAIL_FROM: bindings.text(...)`, written by `ocre new` with a placeholder | Sending email: an address on your domain |
-| `MAIL_ADAPTER` | var | `MAIL_ADAPTER: bindings.text("resend")` or `"cloudflare"` | Sending email at all: unset, `ocre::mail::send` fails with a 500 whose log names the fix |
+| `MAIL_ADAPTER` | var | `MAIL_ADAPTER: bindings.text("resend")` or `"cloudflare"`, or both in fallback order (`"resend,cloudflare"`) | Sending email at all: unset, `ocre::mail::send` fails with a 500 whose log names the fix |
 | `RESEND_API_KEY` | secret | `ocre secrets push RESEND_API_KEY --file .prod.vars` | `MAIL_ADAPTER = "resend"` |
 | `ALLOWED_ORIGINS` | var | `ALLOWED_ORIGINS: bindings.text("https://app.example.com")` | A frontend on another origin calling the app from the browser (CORS, CSRF) |
 | `ALLOWED_HOSTS` | var | `ALLOWED_HOSTS: bindings.text("example.com, .example.com")` | Answering only on your own host names (other hosts get 403) |
@@ -286,7 +286,7 @@ Ocre never shows internal errors to users: a 500 page or JSON error says `Intern
 | `[ocre]` | Any `Error::Internal`: missing binding or secret, failed D1 query (with its SQL), invalid digest... |
 | `[ocre jobs]` | Background jobs: `<job> done`, failures and retries, `dropped message` |
 | `[ocre cron]` | Scheduled tasks, including failed runs (not retried) |
-| `[ocre mail]` | The `log` mail adapter (development) |
+| `[ocre mail]` | The `log` mail adapter (development); a `warn` line when a [fallback adapter](email.md#fallback-adapters) takes over |
 | `[ocre cache]` | KV failures, after which `ocre::cache::fetch` computes the value |
 | `[ocre realtime]` | Failed broadcasts |
 

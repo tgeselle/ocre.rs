@@ -18,10 +18,12 @@ use worker::{
 
 use super::{
     Ctx,
-    storage::{bucket, dev_base, endpoint},
+    storage::{bucket, dev_base, endpoint, r2_retried},
 };
 use crate::{
     ApiError, Error, Result, http,
+    log::Logger,
+    retry::{RETRIES, s3_retryable, with_retries},
     storage::{
         CompletedPart, DEV_MARKERS, DEV_STORAGE_PATH, DevGet, DevPut, Disposition, MAX_PARTS, PendingUpload,
         StoredPart, check_expires_in, dev_parts_prefix, dev_upload_from_marker, dev_upload_marker, dev_url, essence,
@@ -91,7 +93,9 @@ pub fn read_range(
     let length = length.max(1);
     SendFuture::new(async move {
         let range = Range::OffsetWithLength { offset, length };
-        let object = bucket(&env)?.get(&key).range(range).execute().await.map_err(|err| r2_error("read", &key, err))?;
+        let (bucket, key) = (&bucket(&env)?, key.as_str());
+        let get = move || bucket.get(key).range(range.clone()).execute();
+        let object = r2_retried("read", key, get).await.map_err(|err| r2_error("read", key, err))?;
         let Some(object) = object else { return Ok(None) };
         match object.body() {
             Some(body) => Ok(Some(body.bytes().await?)),
@@ -129,14 +133,17 @@ pub fn copy(ctx: &Ctx, from: &str, to: &str) -> impl Future<Output = Result<Opti
     let env = ctx.env().clone();
     let (from, to) = (from.to_owned(), to.to_owned());
     SendFuture::new(async move {
-        let bucket = bucket(&env)?;
-        let Some(head) = bucket.head(&from).await.map_err(|err| r2_error("read", &from, err))? else {
+        let bucket = &bucket(&env)?;
+        let from_ref = from.as_str();
+        let head = r2_retried("read", from_ref, move || bucket.head(from_ref)).await;
+        let Some(head) = head.map_err(|err| r2_error("read", &from, err))? else {
             return Ok(None);
         };
         let size = head.size();
         let metadata = head.http_metadata();
         if size <= MAX_SINGLE_PUT {
-            let object = bucket.get(&from).execute().await.map_err(|err| r2_error("read", &from, err))?;
+            let get = move || bucket.get(from_ref).execute();
+            let object = r2_retried("read", from_ref, get).await.map_err(|err| r2_error("read", &from, err))?;
             let Some(stream) = object.as_ref().map(js_stream).transpose()?.flatten() else { return Ok(None) };
             bucket
                 .put(&to, worker::Data::ReadableStream(stream))
@@ -156,7 +163,8 @@ pub fn copy(ctx: &Ctx, from: &str, to: &str) -> impl Future<Output = Result<Opti
         let (mut offset, mut number) = (0, 1);
         while offset < size {
             let length = COPY_PART.min(size - offset);
-            let read = bucket.get(&from).range(Range::OffsetWithLength { offset, length }).execute().await;
+            let get = move || bucket.get(from_ref).range(Range::OffsetWithLength { offset, length }).execute();
+            let read = r2_retried("read", from_ref, get).await;
             let stream = match read {
                 Ok(object) => object.as_ref().map(js_stream).transpose()?.flatten(),
                 Err(err) => {
@@ -320,11 +328,15 @@ pub(super) async fn complete(env: &Env, key: &str, upload_id: &str, parts: &[Com
     if parts.is_empty() {
         return Err(Error::bad_request("complete needs the parts"));
     }
-    let bucket = bucket(env)?;
-    let upload = bucket.resume_multipart_upload(key, upload_id)?;
+    let bucket = &bucket(env)?;
     // R2 answers a part's ETag in quotes to a presigned PUT, without them to the binding.
-    let uploaded = parts.iter().map(|part| UploadedPart::new(part.part_number, part.etag.trim_matches('"').to_owned()));
-    if let Err(err) = upload.complete(uploaded).await {
+    let uploaded =
+        move || parts.iter().map(|part| UploadedPart::new(part.part_number, part.etag.trim_matches('"').to_owned()));
+    // `complete` consumes the upload, so each attempt resumes it. A repeat
+    // after a success answers NoSuchUpload: `false`, as documented.
+    let complete = move || async move { bucket.resume_multipart_upload(key, upload_id)?.complete(uploaded()).await };
+    let completed = r2_retried("assemble", key, complete).await;
+    if let Err(err) = completed {
         let message = err.to_string();
         if upload_gone(&message) {
             return Ok(false);
@@ -351,7 +363,8 @@ pub fn abort_multipart(ctx: &Ctx, key: &str, upload_id: &str) -> impl Future<Out
 
 pub(super) async fn abort(env: &Env, key: &str, upload_id: &str) -> Result<()> {
     let upload = bucket(env)?.resume_multipart_upload(key, upload_id)?;
-    if let Err(err) = upload.abort().await {
+    let upload = &upload;
+    if let Err(err) = r2_retried("abort the upload of", key, move || upload.abort()).await {
         let message = err.to_string();
         if !upload_gone(&message) {
             return Err(r2_error("abort the upload of", key, message));
@@ -406,7 +419,7 @@ pub fn list_parts(
                 query.push(("part-number-marker", marker));
             }
             let url = endpoint.presign("GET", &key, &[], &query, crate::now(), S3_CALL_EXPIRES_IN)?;
-            let response = http::Request::get(url).send().await?;
+            let response = s3_get("list the parts of", &key, url).await?;
             match response.status {
                 404 => return Ok(None),
                 200 => {
@@ -485,7 +498,7 @@ async fn s3_list_uploads(env: &Env, prefix: &str) -> Result<Vec<PendingUpload>> 
             query.extend([("key-marker", key.as_str()), ("upload-id-marker", id.as_str())]);
         }
         let url = endpoint.presign("GET", "", &[], &query, crate::now(), S3_CALL_EXPIRES_IN)?;
-        let response = http::Request::get(url).send().await?;
+        let response = s3_get("list the uploads under", prefix, url).await?;
         if response.status != 200 {
             return Err(r2_error("list the uploads under", prefix, format!("{} {}", response.status, response.text())));
         }
@@ -497,6 +510,21 @@ async fn s3_list_uploads(env: &Env, prefix: &str) -> Result<Vec<PendingUpload>> 
         }
     }
     Err(r2_error("list the uploads under", prefix, "more than 10,000 uploads"))
+}
+
+/// Sends a signed `GET` to R2's S3 API, and again (see [`with_retries`])
+/// when R2 answers 500, 502, 503 or 504 or the connection fails
+/// ([`s3_retryable`]). Each retry is logged at `warn` and is one more subrequest.
+async fn s3_get(action: &str, key: &str, url: String) -> Result<http::Response> {
+    let url = &url;
+    let warn = |retry, outcome: &Result<http::Response>| {
+        let cause = match outcome {
+            Ok(response) => format!("HTTP {}", response.status),
+            Err(err) => err.to_string(),
+        };
+        Logger::new().warn(format_args!("R2 retry {retry}/{RETRIES} to {action} `{key}` after: {cause}"));
+    };
+    with_retries(move || http::Request::get(url).send(), s3_retryable, warn, super::sleep).await
 }
 
 async fn dev_list_parts(env: &Env, key: &str, upload_id: &str) -> Result<Option<Vec<StoredPart>>> {

@@ -41,7 +41,7 @@ Nothing is checked while building. `send` checks, then delivers:
 | Problem | Result |
 |---|---|
 | A recipient (`to`, `cc`, `bcc`) or `reply_to` is not an email address | `Error::BadRequest`, 400 `invalid email address: <address>` |
-| `MAIL_ADAPTER` unset or unknown, the sender unset or not an address, no recipient or more than 50, subject empty or on several lines, a header Ocre sets itself (`Subject`, `Cc`...) or with a line break, an attachment without a name or a MIME type, `RESEND_API_KEY` or the `EMAIL` binding missing, the provider refused or could not be reached | `Error::Internal`, 500; the log line says what to fix |
+| `MAIL_ADAPTER` unset or unknown, the sender unset or not an address, no recipient or more than 50, subject empty or on several lines, a header Ocre sets itself (`Subject`, `Cc`...) or with a line break, an attachment without a name or a MIME type, `RESEND_API_KEY` or the `EMAIL` binding missing, the provider refused or could not be reached (with [fallback adapters](#fallback-adapters): the last one) | `Error::Internal`, 500; the log line says what to fix |
 
 The sender is the `MAIL_FROM` variable, `noreply@yourdomain.com` or `Name <noreply@yourdomain.com>`. `ocre new` puts a placeholder in `cloudflare.config.ts`:
 
@@ -65,12 +65,12 @@ The `MAIL_ADAPTER` variable names how mail leaves the Worker. Nothing is guessed
 
 For sign-up, magic-link and password-reset mail to any address on the free plan, use Resend. The `cloudflare` adapter on the free plan suits mail to yourself (alerts, reports).
 
-One email can use the other provider with `.delivery_method("cloudflare")` or `.delivery_method("resend")` (Rails' `delivery_method` and `delivery_method_options` per message): for example customer mail through Resend and internal alerts through Cloudflare Email Service, each with its own configuration above. While `MAIL_ADAPTER` is `log`, such emails are still only logged; an unknown name is a 500 naming the fix.
+One email can use the other provider with `.delivery_method("cloudflare")` or `.delivery_method("resend")` (Rails' `delivery_method` and `delivery_method_options` per message): for example customer mail through Resend and internal alerts through Cloudflare Email Service, each with its own configuration above. Such an email uses that adapter alone, without [fallback](#fallback-adapters). While `MAIL_ADAPTER` is `log`, such emails are still only logged; an unknown name is a 500 naming the fix.
 
 With `MAIL_ADAPTER` unset, `send` fails rather than dropping mail silently. With `MAIL_ADAPTER` removed from `.dev.vars`, a handler that sends answers 500 and `ocre dev` logs:
 
 ```text
-✘ [ERROR] [ocre] cannot send email: MAIL_ADAPTER is not set. Fix: set MAIL_ADAPTER to "resend" (with the RESEND_API_KEY secret) or "cloudflare" (with the EMAIL: bindings.sendEmail() binding) in worker.env of cloudflare.config.ts, as MAIL_ADAPTER: bindings.text("resend"); `ocre new` puts MAIL_ADAPTER=log in .dev.vars so `ocre dev` only logs mail
+✘ [ERROR] [ocre] cannot send email: MAIL_ADAPTER is not set. Fix: set MAIL_ADAPTER to "resend" (with the RESEND_API_KEY secret) or "cloudflare" (with the EMAIL: bindings.sendEmail() binding) in worker.env of cloudflare.config.ts, as MAIL_ADAPTER: bindings.text("resend"), or to both in fallback order ("resend,cloudflare"); `ocre new` puts MAIL_ADAPTER=log in .dev.vars so `ocre dev` only logs mail
 ```
 
 ### log (development)
@@ -149,6 +149,25 @@ HTML: /private/tmp/webguides.5ujL/shop/.wrangler/tmp/email/miniflare-4210ceb107a
 ```
 
 In production a refused email is a 500 whose log explains that `MAIL_FROM` must use an onboarded domain and that the free plan only sends to verified destination addresses.
+
+### Fallback adapters
+
+`MAIL_ADAPTER` may list several adapters, separated by commas and tried in order: `bindings.text("resend,cloudflare")` sends with Resend, and with Cloudflare Email Service when Resend did not take the email. On Workers Paid this adds Email Service's 3,000 included emails a month to Resend's free 100 a day. Both adapters need their own configuration (the `RESEND_API_KEY` secret, the `EMAIL` binding); one that lacks it is skipped like a failed one.
+
+`send`, and the jobs consumer of `deliver_later` and `deliver_in`, move to the next adapter only when the provider did not take the email for a reason of its own:
+
+| Adapter | Moves to the next one on | Never on |
+|---|---|---|
+| `resend` | 429 (rate limit, daily or monthly quota), 5xx, no answer (connection failed), 401/403 (API key, domain not verified at Resend), `RESEND_API_KEY` missing | 400, 422 and other refusals of the email itself |
+| `cloudflare` | `E_RATE_LIMIT_EXCEEDED`, `E_DAILY_LIMIT_EXCEEDED`, `E_INTERNAL_SERVER_ERROR`, `E_SENDER_NOT_VERIFIED`, `E_SENDER_DOMAIN_NOT_AVAILABLE`, `E_RECIPIENT_NOT_ALLOWED` (Workers Free), an error without a code, the `EMAIL` binding missing | `E_VALIDATION_ERROR`, `E_DELIVERY_FAILED` and the other codes about the email itself |
+
+Errors every provider would hit (a bad address, `MAIL_FROM` missing, a subject on several lines) fail before any adapter runs. Each fallback logs a `warn` line naming both adapters, with the provider's error and its fix:
+
+```text
+WARN [ocre mail] resend did not send the email, trying cloudflare (MAIL_ADAPTER): Resend did not send the email (429: <Resend's message>). Fix: Resend's rate or daily quota was reached (free plan: 100 emails a day, 3,000 a month)
+```
+
+When the last adapter fails too, `send` returns its error (a 500, and a retry for `deliver_later`). A single value keeps the behaviour of one adapter, `log` anywhere in the list means `log`, and an email with its own [`delivery_method`](#choose-an-adapter) uses that adapter alone.
 
 ## Mailers
 

@@ -10,7 +10,10 @@ use axum::{
 use serde::Deserialize;
 use worker::{Env, send::SendFuture};
 
-use super::{Ctx, storage::bucket};
+use super::{
+    Ctx,
+    storage::{bucket, r2_retried},
+};
 use crate::{
     ApiError, Error, Result,
     config::Environment,
@@ -188,7 +191,8 @@ async fn finish(ctx: &Ctx, field: &str, request: &FinishRequest, complete: bool)
         super::s3::abort(env, &key, &request.upload_id).await?;
     } else if !super::s3::complete(env, &key, &request.upload_id, &request.parts).await? {
         // Completed by an earlier request whose answer was lost, aborted or expired.
-        if bucket(env)?.head(key.clone()).await?.is_none() {
+        let (bucket, key) = (&bucket(env)?, key.as_str());
+        if r2_retried("head", key, move || bucket.head(key)).await?.is_none() {
             return Err(Error::NotFound);
         }
     }

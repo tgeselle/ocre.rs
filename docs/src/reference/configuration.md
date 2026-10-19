@@ -492,13 +492,13 @@ ALLOWED_HOSTS: bindings.text("example.com, .example.com"),
 ### MAIL_ADAPTER
 
 - Kind: variable. Required to send mail (`ocre::mail::send`, `deliver_later`, the auth emails).
-- Values: `log` (print the whole email to the Worker log between `[ocre mail]` lines, send nothing), `resend` (Resend's HTTP API, needs [`RESEND_API_KEY`](#resend_api_key)), `cloudflare` (Email Service through the [`EMAIL`](#env-email-send_email) binding). Surrounding spaces are ignored.
+- Values: `log` (print the whole email to the Worker log between `[ocre mail]` lines, send nothing), `resend` (Resend's HTTP API, needs [`RESEND_API_KEY`](#resend_api_key)), `cloudflare` (Email Service through the [`EMAIL`](#env-email-send_email) binding), or a comma-separated list tried in order, for example `resend,cloudflare` (see [Fallback adapters](../guides/email.md#fallback-adapters)). Surrounding spaces are ignored; `log` anywhere in a list means `log`.
 - Default: none. Nothing is guessed from which keys exist, so a development machine holding a real key never sends by accident.
 - Development: `ocre new` writes `MAIL_ADAPTER=log` to `.dev.vars`.
 - Production: uncomment `MAIL_ADAPTER: bindings.text("resend"),` (or `"cloudflare"`) in `worker.env`, then `ocre deploy`.
 - Errors (500, logged):
-  - unset: ``cannot send email: MAIL_ADAPTER is not set. Fix: set MAIL_ADAPTER to "resend" (with the RESEND_API_KEY secret) or "cloudflare" (with the EMAIL: bindings.sendEmail() binding) in worker.env of cloudflare.config.ts, as MAIL_ADAPTER: bindings.text("resend"); `ocre new` puts MAIL_ADAPTER=log in .dev.vars so `ocre dev` only logs mail``
-  - another value, for example `smtp`: `cannot send email: unknown MAIL_ADAPTER "smtp" (expected log, resend or cloudflare). Fix: ...` (same fix).
+  - unset: ``cannot send email: MAIL_ADAPTER is not set. Fix: set MAIL_ADAPTER to "resend" (with the RESEND_API_KEY secret) or "cloudflare" (with the EMAIL: bindings.sendEmail() binding) in worker.env of cloudflare.config.ts, as MAIL_ADAPTER: bindings.text("resend"), or to both in fallback order ("resend,cloudflare"); `ocre new` puts MAIL_ADAPTER=log in .dev.vars so `ocre dev` only logs mail``
+  - another value, or an empty entry in a list, for example `smtp`: `cannot send email: unknown MAIL_ADAPTER "smtp" (expected log, resend or cloudflare). Fix: ...` (same fix).
 
 See [Email](../guides/email.md).
 

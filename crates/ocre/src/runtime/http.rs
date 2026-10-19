@@ -5,7 +5,7 @@ use worker::{AbortSignal, Fetch, Headers, Method, Request as JsRequest, RequestI
 
 use crate::{
     Result,
-    http::{Request, Response},
+    http::{Request, Response, TIMED_OUT},
 };
 
 impl Request {
@@ -52,7 +52,7 @@ fn send(request: Request) -> impl Future<Output = Result<Response>> + Send + use
         let mut response = match Fetch::Request(js_request).send_with_signal(&signal).await {
             Ok(response) => response,
             Err(_) if signal.aborted() => {
-                return Err(request.error(format!("no answer within {} ms", request.timeout_duration().as_millis())));
+                return Err(request.error(format!("{TIMED_OUT} {} ms", request.timeout_duration().as_millis())));
             }
             Err(err) => return Err(request.error(err)),
         };

@@ -1143,6 +1143,19 @@ When the builder does not fit (a subquery, `UNION`, `INSERT ... ON CONFLICT`, a 
 
 `params!` accepts strings, integers, `f64`, `bool` (bound as 1/0), `Option` (`None` binds `NULL`) and `serde_json::Value` (bound as JSON text), mixed freely. A failed query is `Error::Internal`: the client gets a 500 "Internal server error", and the Worker log gets the D1 message and the SQL. The full API is in the [rustdoc of `Db`](/api/ocre/struct.Db.html).
 
+### Retries of transient D1 errors
+
+D1 sometimes fails a query for reasons of its own, and [Cloudflare's error list](https://developers.cloudflare.com/d1/observability/debug-d1/#error-list) says to retry them: `Network connection lost`, `D1 DB is overloaded`, `Replica disconnected from primary`, `... storage caused object to be reset`, `D1 DB reset because its code was updated`, `Cannot resolve D1 DB due to transient issue on remote node`. `Db` runs such a statement again, at most twice (after about 100 ms, then 400 ms, jittered), and logs each retry at `warn`: `D1 retry 1/2 after: <D1 message>. SQL: <statement>`.
+
+Only a statement that cannot be applied twice runs again:
+
+| Statement | Retried on |
+|---|---|
+| Read-only: a `SELECT` (what the query cache serves; a `batch` of `SELECT`s only) | every error above |
+| Anything else: `INSERT`, `UPDATE`, `DELETE`, `INSERT ... RETURNING` through `first`, a `batch` with a write | only the errors proving it never ran: `D1 DB is overloaded` (queued, then refused) and `Cannot resolve D1 DB` (never reached the database). Never after `Network connection lost`, which may come after the write was applied |
+
+D1 itself retries read-only queries up to twice before answering ([automatic retries](https://developers.cloudflare.com/d1/observability/debug-d1/#automatic-retries)); Ocre's retries come on top, for the failures that still reach the Worker and for writes. Each retry is one more D1 query and subrequest of the invocation (50 on the free plan). After the last attempt the error is the usual `Error::Internal` with the D1 message and the SQL. R2 calls are retried the same way: see [Files](files.md#retries-of-transient-r2-errors).
+
 Queries on one table belong in its model file, next to the generated functions. Queries across tables can go in a module of their own under `src/models/` (add `pub mod reports;` under `// ocre:models` in `src/models/mod.rs`):
 
 ```rust,check

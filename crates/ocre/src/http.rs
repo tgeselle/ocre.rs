@@ -73,6 +73,9 @@ use crate::{Error, Result, config::Environment};
 /// ```
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// The start of the cause of a request that got no answer within its timeout.
+pub(crate) const TIMED_OUT: &str = "no answer within";
+
 /// An outgoing HTTP request, built step by step and sent with [`send`](Request::send).
 ///
 /// # Examples

@@ -54,6 +54,19 @@
 //! Worker has 128 MB and Cloudflare refuses request bodies over 100 MB on the
 //! Free plan, so keep limits in the tens of MB.
 //!
+//! # Retries
+//!
+//! Calls that may run twice are repeated, at most twice (about 100 ms then
+//! 400 ms apart, each retry logged at `warn`), when R2 answers an error its
+//! documentation says to retry: binding reads ([`read`], [`read_first`],
+//! [`read_range`], [`head`], [`exists`], [`list`], [`serve`], the reads of
+//! [`copy`]), [`abort_multipart`] and [`complete_multipart`] on the codes
+//! 10001 (`InternalError`) and 10043 (`ServiceUnavailable`); the S3 API
+//! calls [`list_parts`] and [`list_multipart_uploads`] on HTTP 500, 502, 503,
+//! 504 or a lost connection. Writes are never repeated. Each retry is one
+//! more subrequest (50 per invocation on the free plan) and one more R2
+//! operation.
+//!
 //! # Examples
 //!
 //! ```rust,no_run

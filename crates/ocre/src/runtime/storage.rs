@@ -10,7 +10,9 @@ use super::Ctx;
 use crate::{
     Error, IntoParam as _, Result,
     config::Environment,
+    log::Logger,
     mail::APP_URL,
+    retry::{RETRIES, r2_retryable, with_retries},
     storage::{
         Attachment, ByteRange, DEV_APP_URL, DirectUpload, DirectUploadRequest, Disposition, Fetch, KEYS_PER_QUERY,
         Listing, MAX_LIST, Purged, Rules, S3Endpoint, STORAGE_BINDING, STORAGE_PUBLIC_URL, StoredObject, Upload,
@@ -22,6 +24,24 @@ use crate::{
 
 pub(super) fn bucket(env: &Env) -> Result<Bucket> {
     env.bucket(STORAGE_BINDING).map_err(|err| missing_binding(&err.to_string()))
+}
+
+/// Runs an R2 binding call that may run twice (a read, an abort, a
+/// completion), and again (see [`with_retries`]) when R2 answers a transient
+/// error ([`r2_retryable`]). Each retry is logged at `warn` and is one more
+/// subrequest.
+pub(super) async fn r2_retried<T, F: Future<Output = worker::Result<T>>>(
+    action: &str,
+    key: &str,
+    call: impl FnMut() -> F,
+) -> worker::Result<T> {
+    let retryable = |outcome: &worker::Result<T>| outcome.as_ref().is_err_and(|err| r2_retryable(&err.to_string()));
+    let warn = |retry, outcome: &worker::Result<T>| {
+        if let Err(err) = outcome {
+            Logger::new().warn(format_args!("R2 retry {retry}/{RETRIES} of {action} `{key}` after: {err}"));
+        }
+    };
+    with_retries(call, retryable, warn, super::sleep).await
 }
 
 async fn put(env: &Env, attachment: &Attachment, data: worker::Data) -> Result<()> {
@@ -223,7 +243,8 @@ pub fn read(ctx: &Ctx, key: &str) -> impl Future<Output = Result<Option<Vec<u8>>
     let env = ctx.env().clone();
     let key = key.to_owned();
     SendFuture::new(async move {
-        let Some(object) = bucket(&env)?.get(&key).execute().await? else { return Ok(None) };
+        let (bucket, key) = (&bucket(&env)?, key.as_str());
+        let Some(object) = r2_retried("get", key, move || bucket.get(key).execute()).await? else { return Ok(None) };
         match object.body() {
             Some(body) => Ok(Some(body.bytes().await?)),
             None => Ok(Some(Vec::new())),
@@ -372,7 +393,10 @@ const DIRECT_UPLOAD_EXPIRES_IN: u64 = 600;
 pub fn head(ctx: &Ctx, key: &str) -> impl Future<Output = Result<Option<StoredObject>>> + Send + use<> {
     let env = ctx.env().clone();
     let key = key.to_owned();
-    SendFuture::new(async move { Ok(bucket(&env)?.head(key).await?.as_ref().map(stored)) })
+    SendFuture::new(async move {
+        let (bucket, key) = (&bucket(&env)?, key.as_str());
+        Ok(r2_retried("head", key, move || bucket.head(key)).await?.as_ref().map(stored))
+    })
 }
 
 /// Returns whether an object exists at `key` (Active Storage's `exist?`); a [`head`] without the details.
@@ -444,13 +468,17 @@ pub fn list(
     let cursor = cursor.map(str::to_owned);
     let limit = limit.clamp(1, MAX_LIST);
     SendFuture::new(async move {
-        let bucket = bucket(&env)?;
-        let mut request =
-            bucket.list().prefix(prefix).limit(limit).include(vec![Include::HttpMetadata, Include::CustomMetadata]);
-        if let Some(cursor) = cursor {
-            request = request.cursor(cursor);
-        }
-        let page = request.execute().await?;
+        let bucket = &bucket(&env)?;
+        let (prefix, cursor) = (&prefix, &cursor);
+        let page = r2_retried("list", prefix, move || {
+            let request =
+                bucket.list().prefix(prefix).limit(limit).include(vec![Include::HttpMetadata, Include::CustomMetadata]);
+            match cursor {
+                Some(cursor) => request.cursor(cursor).execute(),
+                None => request.execute(),
+            }
+        })
+        .await?;
         let objects = page.objects().iter().map(stored).collect();
         Ok(Listing { objects, cursor: if page.truncated() { page.cursor() } else { None } })
     })
@@ -485,8 +513,9 @@ pub fn read_first(ctx: &Ctx, key: &str, length: u64) -> impl Future<Output = Res
     let key = key.to_owned();
     let length = length.max(1);
     SendFuture::new(async move {
-        let bucket = bucket(&env)?;
-        let Some(object) = bucket.get(&key).range(Range::Prefix { length }).execute().await? else { return Ok(None) };
+        let (bucket, key) = (&bucket(&env)?, key.as_str());
+        let get = move || bucket.get(key).range(Range::Prefix { length }).execute();
+        let Some(object) = r2_retried("get", key, get).await? else { return Ok(None) };
         match object.body() {
             Some(body) => Ok(Some(body.bytes().await?)),
             None => Ok(Some(Vec::new())),
@@ -689,7 +718,8 @@ pub fn attach_direct_upload(
     SendFuture::new(async move {
         let key = verify_key(&field, &upload_secret(&|name| env.var(name).ok().map(|v| v.to_string()))?, &signed_key)?;
         let bucket = bucket(&env)?;
-        let object = bucket.head(key).await?.as_ref().map(stored);
+        let (bucket_ref, key_ref) = (&bucket, key.as_str());
+        let object = r2_retried("head", key_ref, move || bucket_ref.head(key_ref)).await?.as_ref().map(stored);
         let attached = attachment_from_head(&field, object.as_ref(), &filename, &rules);
         if let (Err(_), Some(refused)) = (&attached, object) {
             bucket.delete(refused.key).await?;
@@ -909,15 +939,19 @@ pub fn serve(
         if fetch.range == ByteRange::Unsatisfiable {
             return Ok(unsatisfiable(attachment.size));
         }
-        let bucket = bucket(&env)?;
-        let mut get = bucket.get(&attachment.key);
-        if let Some(etag) = fetch.if_none_match {
-            get = get.only_if(Conditional { etag_does_not_match: Some(etag), ..Default::default() });
-        }
-        if let ByteRange::Partial { offset, length } = fetch.range {
-            get = get.range(Range::OffsetWithLength { offset, length });
-        }
-        let object = get.execute().await?.ok_or(Error::NotFound)?;
+        let bucket = &bucket(&env)?;
+        let (key, conditional) = (&attachment.key, &fetch.if_none_match);
+        let get = move || {
+            let mut get = bucket.get(key);
+            if let Some(etag) = conditional {
+                get = get.only_if(Conditional { etag_does_not_match: Some(etag.clone()), ..Default::default() });
+            }
+            if let ByteRange::Partial { offset, length } = fetch.range {
+                get = get.range(Range::OffsetWithLength { offset, length });
+            }
+            get.execute()
+        };
+        let object = r2_retried("get", key, get).await?.ok_or(Error::NotFound)?;
         let etag = object.http_etag();
         let Some(body) = object.body() else { return Ok(not_modified(&etag)) };
         let mut response = file_response(&attachment, disposition, &etag, fetch.range, Body::empty());

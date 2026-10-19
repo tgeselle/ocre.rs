@@ -13,6 +13,7 @@ use super::ctx::Memo;
 use crate::{
     Error, Param, Result, Statement,
     cache::{is_read_query, query_key},
+    retry::{RETRIES, d1_retryable, with_retries},
     sql::Value,
 };
 use crate::{instrument::Timings, log::Logger};
@@ -28,6 +29,20 @@ use crate::{instrument::Timings, log::Logger};
 ///
 /// A failed query is [`Error::Internal`] (500) with the D1 message and the SQL;
 /// the details go to the Worker logs (Workers Logs), never to the client.
+///
+/// # Retries
+///
+/// A statement that fails with an error Cloudflare's D1 documentation says to
+/// retry runs again, at most twice (after about 100 ms, then 400 ms), each
+/// retry logged at `warn` with the SQL. A read-only statement (a `SELECT`, as
+/// the query cache sees it) is retried on any of them (`Network connection
+/// lost`, `D1 DB is overloaded`, `Replica disconnected from primary`,
+/// `storage caused object to be reset`, `reset because its code was
+/// updated`, `Cannot resolve D1 DB due to transient issue on remote node`);
+/// a write or a [`batch`](Self::batch) only when the error proves it never
+/// ran (`D1 DB is overloaded`, `Cannot resolve D1 DB`), never after a lost
+/// connection, which may have applied it. Each retry is one more
+/// subrequest (50 per invocation on the free plan).
 ///
 /// # Free plan
 ///
@@ -73,7 +88,7 @@ pub struct Db {
     memo: Option<Arc<Memo>>,
     /// Whether `SELECT`s may be served from `memo` (false after [`Db::uncached`]).
     cached: bool,
-    probe: Option<Probe>,
+    probe: Option<Arc<Probe>>,
 }
 
 /// The database itself, or the request's session on it (read replicas).
@@ -114,7 +129,7 @@ impl Db {
 
     /// This handle, timing and logging each statement for the request.
     pub(crate) fn probed(self, log: Logger, timings: Timings) -> Self {
-        Self { probe: Some(Probe { log, timings }), ..self }
+        Self { probe: Some(Arc::new(Probe { log, timings })), ..self }
     }
 
     /// This handle without the per-request query cache: every query goes to D1.
@@ -203,8 +218,9 @@ impl Db {
         let slot = self.cache_slot(sql, &params);
         let written = self.write_memo(sql);
         let stmt = self.prepare(sql, params);
+        let probe = self.probe.clone();
         SendFuture::new(timed(self.probe.clone(), sql, async move {
-            let rows = rows(stmt?, sql, slot).await?;
+            let rows = rows(stmt?, sql, slot, probe).await?;
             if let Some(memo) = written {
                 memo.clear_queries();
             }
@@ -258,12 +274,16 @@ impl Db {
         let slot = self.cache_slot(sql, &params);
         let written = self.write_memo(sql);
         let stmt = self.prepare(sql, params);
+        let probe = self.probe.clone();
         SendFuture::new(timed(self.probe.clone(), sql, async move {
             let stmt = stmt?;
             let row = match slot {
-                Some(slot) => rows(stmt, sql, Some(slot)).await?.iter().next().map(|row| deserialize(&row, sql)),
+                Some(slot) => rows(stmt, sql, Some(slot), probe).await?.iter().next().map(|row| deserialize(&row, sql)),
                 None => {
-                    let row = stmt.first::<T>(None).await.map_err(|err| query_error(sql, err))?;
+                    let stmt = &stmt;
+                    let row = retried(probe.as_deref(), sql, is_read_query(sql), move || stmt.first::<T>(None))
+                        .await
+                        .map_err(|err| query_error(sql, err))?;
                     if let Some(memo) = written {
                         memo.clear_queries();
                     }
@@ -308,8 +328,12 @@ impl Db {
         self.cache_slot(sql, &params);
         let written = self.write_memo(sql);
         let stmt = self.prepare(sql, params);
+        let probe = self.probe.clone();
         SendFuture::new(timed(self.probe.clone(), sql, async move {
-            let result = stmt?.run().await.map_err(|err| query_error(sql, err))?;
+            let stmt = &stmt?;
+            let result = retried(probe.as_deref(), sql, is_read_query(sql), move || stmt.run())
+                .await
+                .map_err(|err| query_error(sql, err))?;
             if let Some(memo) = written {
                 memo.clear_queries();
             }
@@ -349,11 +373,16 @@ impl Db {
     pub fn exists<'q>(&self, sql: &'q str, params: Vec<Param>) -> impl Future<Output = Result<bool>> + Send + use<'q> {
         let slot = self.cache_slot(sql, &params);
         let stmt = self.prepare(sql, params);
+        let probe = self.probe.clone();
         SendFuture::new(timed(self.probe.clone(), sql, async move {
             match slot {
-                Some(slot) => Ok(rows(stmt?, sql, Some(slot)).await?.length() > 0),
+                Some(slot) => Ok(rows(stmt?, sql, Some(slot), probe).await?.length() > 0),
                 None => {
-                    let row = stmt?.first::<serde_json::Value>(None).await.map_err(|err| query_error(sql, err))?;
+                    let stmt = &stmt?;
+                    let first = move || stmt.first::<serde_json::Value>(None);
+                    let row = retried(probe.as_deref(), sql, is_read_query(sql), first)
+                        .await
+                        .map_err(|err| query_error(sql, err))?;
                     Ok(row.is_some())
                 }
             }
@@ -397,6 +426,7 @@ impl Db {
     /// ```
     pub fn batch(&self, statements: Vec<Statement>) -> impl Future<Output = Result<Vec<usize>>> + Send + '_ {
         let sql = statements.iter().map(|s| s.sql.as_str()).collect::<Vec<_>>().join("; ");
+        let read_only = statements.iter().all(|s| is_read_query(&s.sql));
         let prepared: Result<Vec<D1PreparedStatement>> =
             statements.into_iter().map(|s| self.prepare(&s.sql, s.params)).collect();
         let db = &self.inner;
@@ -407,8 +437,13 @@ impl Db {
         }
         let probe = self.probe.clone();
         SendFuture::new(async move {
-            let batch = async { db.batch(prepared?).await.map_err(|err| query_error(&sql, err)) };
-            let results = timed(probe, &sql, batch).await;
+            let batch = async {
+                let prepared = &prepared?;
+                retried(probe.as_deref(), &sql, read_only, || db.batch(prepared.clone()))
+                    .await
+                    .map_err(|err| query_error(&sql, err))
+            };
+            let results = timed(probe.clone(), &sql, batch).await;
             if let Some(memo) = memo {
                 memo.clear_queries();
             }
@@ -431,7 +466,7 @@ impl Db {
 /// Awaits a statement, then records how long it took (Workers' clock
 /// advances during I/O, so this is D1's time) and logs it at `debug`:
 /// `SQL (1.2 ms) SELECT ...`, like Rails' `Post Load (0.3ms) SELECT ...`.
-async fn timed<T>(probe: Option<Probe>, sql: &str, future: impl Future<Output = Result<T>>) -> Result<T> {
+async fn timed<T>(probe: Option<Arc<Probe>>, sql: &str, future: impl Future<Output = Result<T>>) -> Result<T> {
     let Some(probe) = probe else { return future.await };
     let started = crate::clock::now_millis();
     let result = future.await;
@@ -447,14 +482,23 @@ async fn timed<T>(probe: Option<Probe>, sql: &str, future: impl Future<Output = 
 
 /// The rows of a query, from the request's cache when `slot` holds them.
 /// A statement without a slot (uncached, or one that may write) runs as is.
-async fn rows(stmt: D1PreparedStatement, sql: &str, slot: Option<(Arc<Memo>, String)>) -> Result<Array> {
+async fn rows(
+    stmt: D1PreparedStatement,
+    sql: &str,
+    slot: Option<(Arc<Memo>, String)>,
+    probe: Option<Arc<Probe>>,
+) -> Result<Array> {
     if let Some((memo, key)) = &slot
         && let Some(rows) = memo.query(key)
     {
         return Ok(rows);
     }
-    let promise = stmt.inner().all().map_err(|err| query_error(sql, js_error(err)))?;
-    let result = JsFuture::from(promise).await.map_err(|err| query_error(sql, js_error(err)))?;
+    let stmt = &stmt;
+    let all = move || async move {
+        let promise = stmt.inner().all().map_err(js_error)?;
+        JsFuture::from(promise).await.map_err(js_error)
+    };
+    let result = retried(probe.as_deref(), sql, is_read_query(sql), all).await.map_err(|err| query_error(sql, err))?;
     let results =
         Reflect::get(&result, &JsValue::from_str("results")).map_err(|err| query_error(sql, js_error(err)))?;
     let rows = results.dyn_into::<Array>().unwrap_or_else(|_| Array::new());
@@ -462,6 +506,28 @@ async fn rows(stmt: D1PreparedStatement, sql: &str, slot: Option<(Arc<Memo>, Str
         memo.remember_query(key, rows.clone());
     }
     Ok(rows)
+}
+
+/// Runs a D1 call, and again (see [`with_retries`]) when it fails with an
+/// error [`d1_retryable`] accepts for a statement `read_only` or not. Each
+/// retry is logged at `warn` with the SQL.
+async fn retried<T, F: Future<Output = worker::Result<T>>>(
+    probe: Option<&Probe>,
+    sql: &str,
+    read_only: bool,
+    call: impl FnMut() -> F,
+) -> worker::Result<T> {
+    let retryable =
+        |outcome: &worker::Result<T>| outcome.as_ref().is_err_and(|err| d1_retryable(&err.to_string(), read_only));
+    let warn = |retry, outcome: &worker::Result<T>| {
+        let Err(err) = outcome else { return };
+        let message = format_args!("D1 retry {retry}/{RETRIES} after: {err}. SQL: {sql}");
+        match probe {
+            Some(probe) => probe.log.warn(message),
+            None => crate::log::Logger::new().warn(message),
+        }
+    };
+    with_retries(call, retryable, warn, super::sleep).await
 }
 
 /// A rejected D1 promise as an error naming D1's message (`D1_ERROR: no such table: posts...`).

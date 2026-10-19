@@ -9,13 +9,13 @@ fn internal(err: Error) -> String {
 
 #[test]
 fn adapter_is_explicit() {
-    assert_eq!(adapter(Some("log")).unwrap(), Adapter::Log);
-    assert_eq!(adapter(Some(" resend ")).unwrap(), Adapter::Resend);
-    assert_eq!(adapter(Some("cloudflare")).unwrap(), Adapter::Cloudflare);
-    let unset = internal(adapter(None).unwrap_err());
+    assert_eq!(adapter("log").unwrap(), Adapter::Log);
+    assert_eq!(adapter(" resend ").unwrap(), Adapter::Resend);
+    assert_eq!(adapter("cloudflare").unwrap(), Adapter::Cloudflare);
+    let unset = internal(adapters(None).unwrap_err());
     assert!(unset.starts_with("cannot send email: MAIL_ADAPTER is not set. Fix: set MAIL_ADAPTER"), "{unset}");
     assert!(unset.contains("MAIL_ADAPTER=log in .dev.vars"), "{unset}");
-    let unknown = internal(adapter(Some("smtp")).unwrap_err());
+    let unknown = internal(adapter("smtp").unwrap_err());
     assert!(unknown.contains("unknown MAIL_ADAPTER \"smtp\" (expected log, resend or cloudflare)"), "{unknown}");
 }
 
@@ -28,16 +28,88 @@ fn delivery_method_overrides_the_adapter_except_in_log_mode() {
             None => email,
         }
     };
-    assert_eq!(adapter_for(Some("resend"), &email(None)).unwrap(), Adapter::Resend);
-    assert_eq!(adapter_for(Some("resend"), &email(Some(" cloudflare"))).unwrap(), Adapter::Cloudflare);
-    assert_eq!(adapter_for(Some("cloudflare"), &email(Some("resend"))).unwrap(), Adapter::Resend);
-    assert_eq!(adapter_for(Some("log"), &email(Some("resend"))).unwrap(), Adapter::Log, "development never sends");
+    use Adapter::{Cloudflare, Log, Resend};
+    assert_eq!(adapter_for(Some("resend"), &email(None)).unwrap(), [Resend]);
+    assert_eq!(adapter_for(Some("resend"), &email(Some(" cloudflare"))).unwrap(), [Cloudflare]);
+    assert_eq!(adapter_for(Some("cloudflare"), &email(Some("resend"))).unwrap(), [Resend]);
+    assert_eq!(adapter_for(Some("log"), &email(Some("resend"))).unwrap(), [Log], "development never sends");
+    assert_eq!(adapter_for(Some("resend,cloudflare"), &email(None)).unwrap(), [Resend, Cloudflare]);
+    assert_eq!(
+        adapter_for(Some("resend,cloudflare"), &email(Some("cloudflare"))).unwrap(),
+        [Cloudflare],
+        "delivery_method forces one adapter, no fallback"
+    );
+    assert_eq!(adapter_for(Some("resend, log"), &email(Some("resend"))).unwrap(), [Log]);
     let unknown = internal(adapter_for(Some("log"), &email(Some("smtp"))).unwrap_err());
     assert!(unknown.contains("unknown delivery_method \"smtp\""), "{unknown}");
     assert!(adapter_for(None, &email(Some("resend"))).is_err(), "MAIL_ADAPTER is still required");
     let json = serde_json::to_value(email(Some("resend"))).unwrap();
     assert_eq!(json["delivery_method"], "resend", "kept in deliver_later messages");
     assert!(serde_json::to_value(email(None)).unwrap().get("delivery_method").is_none());
+}
+
+#[test]
+fn mail_adapter_lists_adapters_in_fallback_order() {
+    use Adapter::{Cloudflare, Log, Resend};
+    for adapter in [Log, Resend, Cloudflare] {
+        assert_eq!(adapters(Some(adapter.name())).unwrap(), [adapter]);
+    }
+    assert_eq!(adapters(Some("resend")).unwrap(), [Resend], "one value: today's behaviour");
+    assert_eq!(adapters(Some("resend,cloudflare")).unwrap(), [Resend, Cloudflare]);
+    assert_eq!(adapters(Some(" cloudflare , resend ")).unwrap(), [Cloudflare, Resend]);
+    assert_eq!(adapters(Some("resend,resend,cloudflare")).unwrap(), [Resend, Cloudflare]);
+    assert_eq!(adapters(Some("resend,log")).unwrap(), [Log], "log anywhere: development never sends");
+    assert_eq!(adapters(Some("log,cloudflare")).unwrap(), [Log]);
+    let unknown = internal(adapters(Some("resend,smtp")).unwrap_err());
+    assert!(unknown.contains("unknown MAIL_ADAPTER \"smtp\""), "{unknown}");
+    let empty = internal(adapters(Some("resend,")).unwrap_err());
+    assert!(empty.contains("unknown MAIL_ADAPTER \"\""), "{empty}");
+    assert!(internal(adapters(None).unwrap_err()).contains("MAIL_ADAPTER is not set"));
+}
+
+#[test]
+fn resend_falls_over_only_when_it_did_not_take_the_email() {
+    for status in [429, 500, 502, 503, 401, 403] {
+        assert!(resend_fails_over(status), "{status}");
+    }
+    for status in [400, 404, 409, 422] {
+        assert!(!resend_fails_over(status), "{status}: any provider would refuse it");
+    }
+}
+
+#[test]
+fn cloudflare_falls_over_on_limits_outages_and_its_own_setup() {
+    for detail in [
+        "E_RATE_LIMIT_EXCEEDED: Rate limit exceeded",
+        "E_DAILY_LIMIT_EXCEEDED: Daily limit exceeded",
+        "E_INTERNAL_SERVER_ERROR: Email Service temporarily unavailable",
+        "E_SENDER_NOT_VERIFIED: Sender domain not verified",
+        "E_SENDER_DOMAIN_NOT_AVAILABLE: Domain not available",
+        "E_RECIPIENT_NOT_ALLOWED: Recipient not in allowed list",
+        "internal error",
+    ] {
+        assert!(cloudflare_fails_over(detail), "{detail}");
+    }
+    for detail in [
+        "E_VALIDATION_ERROR: Invalid email format",
+        "E_FIELD_MISSING: subject",
+        "E_TOO_MANY_RECIPIENTS: 51",
+        "E_CONTENT_TOO_LARGE: too large",
+        "E_DELIVERY_FAILED: recipient server rejection",
+        "E_HEADER_NOT_ALLOWED: From",
+        "E_RATE_LIMIT_EXCEEDED_SOMETHING_ELSE: x",
+    ] {
+        assert!(!cloudflare_fails_over(detail), "{detail}");
+    }
+}
+
+#[test]
+fn missing_provider_setup_fails_over_and_keeps_the_fix() {
+    let failure = Failure::provider(resend_key(None).unwrap_err());
+    assert!(failure.fail_over);
+    assert!(internal(failure.error).contains("ocre secrets push RESEND_API_KEY"));
+    let invalid: Failure = Error::internal("subject spans several lines").into();
+    assert!(!invalid.fail_over, "errors every provider would hit never fall over");
 }
 
 #[test]

@@ -791,6 +791,18 @@ if let Some(parts) = storage::list_parts(&ctx, &key, &upload_id).await? {
 
 The R2 binding has no ListParts or ListMultipartUploads: `list_parts` and `list_multipart_uploads` call R2's S3 API, so they need the `R2_*` [settings](#settings) in a release build. In debug builds they read what the development route and `create_multipart` recorded under `.ocre-dev-storage/` in the local bucket.
 
+### Retries of transient R2 errors
+
+R2 sometimes answers an internal error that its [error reference](https://developers.cloudflare.com/r2/api/error-codes/#service-errors) says to retry: `InternalError` (10001, HTTP 500) and `ServiceUnavailable` (10043, HTTP 503). Ocre repeats the calls that may safely run twice, at most twice (after about 100 ms, then 400 ms, jittered), and logs each retry at `warn` (`R2 retry 1/2 of get <key> after: ...`):
+
+| Calls | Retried on |
+|---|---|
+| Binding reads: `read`, `read_first`, `read_range`, `head`, `exists`, `list` (and `purge_unattached`'s listing), `serve`, the reads of `copy`, the check of `attach_direct_upload` | an error with code 10001 or 10043 (`get: We encountered an internal error. Please try again. (10001)`) |
+| `abort_multipart` (idempotent) and `complete_multipart` (a repeat after a success answers NoSuchUpload, which is `false`: check the object with `head`) | the same codes |
+| S3 API: `list_parts`, `list_multipart_uploads` (signed `GET`s) | HTTP 500, 502, 503, 504, or a request that got no answer (connection failed); not a timeout |
+
+Writes are not retried: `store`, `store_bytes`, `store_body`, `create_multipart` (a repeat would start a second upload), the uploaded parts and the writes of `copy`. Each retry is one more subrequest (50 per invocation on the free plan) and one more R2 operation of the call's class. After the last attempt the error is the usual `Error::Internal`.
+
 ## Purging unattached uploads
 
 A direct upload whose form is never submitted (a closed tab, a failed validation) leaves an object no row points to. `storage::purge_unattached(&ctx, prefix, table, column, max_age, cursor)` lists one page (up to 1,000 keys) under the prefix, keeps the objects uploaded more than `max_age` seconds ago, looks them up in `table.column` (`SELECT column FROM table WHERE column IN (...)`, 100 keys per query) and deletes the ones no row references. It returns the deleted keys and the cursor of the next page.

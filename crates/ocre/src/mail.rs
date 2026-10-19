@@ -45,6 +45,11 @@
 //!   (September 2026) only delivers to verified destination addresses of the
 //!   account; any recipient needs Workers Paid (3,000 a month included).
 //!
+//! A comma-separated list (`resend,cloudflare`) tries the adapters in
+//! order: the next one sends when the previous provider did not take the
+//! email (quota, outage, its own setup missing), never after an error every
+//! provider would return. See [`MAIL_ADAPTER`].
+//!
 //! The sender is the email's own [`from`](Email::from), else the
 //! [`MAIL_FROM`] variable, `noreply@example.com` or
 //! `Name <noreply@example.com>`. With `MAIL_ADAPTER`
@@ -75,12 +80,24 @@ pub(crate) use parse::Message;
 
 use crate::{Error, Result, validate::is_email};
 
-/// Name of the Worker variable that chooses the adapter: `log`, `resend` or `cloudflare`.
+/// Name of the Worker variable that chooses the adapter: `log`, `resend` or `cloudflare`, or a comma-separated list of them tried in order.
 ///
 /// Read on every [`send`] and [`deliver_later`]; unset or any other value is
 /// an [`Error::Internal`] that names the fix. Set it as
 /// `MAIL_ADAPTER: bindings.text("resend")` in cloudflare.config.ts, or in `.dev.vars` for
 /// `ocre dev` (which overrides it).
+///
+/// With a list, `bindings.text("resend,cloudflare")`, [`send`] (and the
+/// jobs consumer of [`deliver_later`]) moves to the next adapter, with a
+/// `warn` line naming both, only when the provider did not take the email:
+/// Resend's 429 (rate or daily/monthly quota), 5xx, no answer, 401/403 (its
+/// key or domain); Email Service's `E_RATE_LIMIT_EXCEEDED`,
+/// `E_DAILY_LIMIT_EXCEEDED`, `E_INTERNAL_SERVER_ERROR`, `E_SENDER_NOT_VERIFIED`,
+/// `E_SENDER_DOMAIN_NOT_AVAILABLE`, `E_RECIPIENT_NOT_ALLOWED` or an error
+/// without a code; or the adapter's own setup missing ([`RESEND_API_KEY`],
+/// the [`EMAIL_BINDING`] binding). An invalid email fails at once. `log`
+/// anywhere in the list means `log`; an email's
+/// [`delivery_method`](Email::delivery_method) uses that adapter alone.
 ///
 /// # Examples
 ///
@@ -535,32 +552,63 @@ pub(crate) enum Adapter {
     Cloudflare,
 }
 
+impl Adapter {
+    /// The adapter's name in `MAIL_ADAPTER`.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Log => "log",
+            Self::Resend => "resend",
+            Self::Cloudflare => "cloudflare",
+        }
+    }
+}
+
 const ADAPTER_FIX: &str = "Fix: set MAIL_ADAPTER to \"resend\" (with the RESEND_API_KEY secret) or \"cloudflare\" \
                            (with the EMAIL: bindings.sendEmail() binding) in worker.env of cloudflare.config.ts, \
-                           as MAIL_ADAPTER: bindings.text(\"resend\"); \
+                           as MAIL_ADAPTER: bindings.text(\"resend\"), or to both in fallback order (\"resend,cloudflare\"); \
                            `ocre new` puts MAIL_ADAPTER=log in .dev.vars so `ocre dev` only logs mail";
 
-/// Reads `MAIL_ADAPTER`. Unset is an error: production must choose, and
-/// development gets `log` from `.dev.vars`.
-pub(crate) fn adapter(value: Option<&str>) -> Result<Adapter> {
-    match value.map(str::trim) {
-        Some("log") => Ok(Adapter::Log),
-        Some("resend") => Ok(Adapter::Resend),
-        Some("cloudflare") => Ok(Adapter::Cloudflare),
-        None => Err(Error::internal(format!("cannot send email: {MAIL_ADAPTER} is not set. {ADAPTER_FIX}"))),
-        Some(other) => Err(Error::internal(format!(
+/// Reads one adapter name of `MAIL_ADAPTER` (or of a `delivery_method`).
+pub(crate) fn adapter(name: &str) -> Result<Adapter> {
+    match name.trim() {
+        "log" => Ok(Adapter::Log),
+        "resend" => Ok(Adapter::Resend),
+        "cloudflare" => Ok(Adapter::Cloudflare),
+        other => Err(Error::internal(format!(
             "cannot send email: unknown {MAIL_ADAPTER} \"{other}\" (expected log, resend or cloudflare). {ADAPTER_FIX}"
         ))),
     }
 }
 
-/// The adapter for `email`: `MAIL_ADAPTER`, or the email's own
-/// [`delivery_method`](Email::delivery_method) unless `MAIL_ADAPTER` is `log`.
-pub(crate) fn adapter_for(configured: Option<&str>, email: &Email) -> Result<Adapter> {
-    let configured = adapter(configured)?;
+/// Reads `MAIL_ADAPTER`: one adapter, or a comma-separated list tried in
+/// order (`resend,cloudflare`), without repeats. `log` anywhere in the list
+/// means `log` alone: a development setting never sends. Unset is an error:
+/// production must choose, and development gets `log` from `.dev.vars`.
+pub(crate) fn adapters(value: Option<&str>) -> Result<Vec<Adapter>> {
+    let Some(value) = value else {
+        return Err(Error::internal(format!("cannot send email: {MAIL_ADAPTER} is not set. {ADAPTER_FIX}")));
+    };
+    let mut list = Vec::new();
+    for name in value.split(',') {
+        let adapter = adapter(name)?;
+        if adapter == Adapter::Log {
+            return Ok(vec![Adapter::Log]);
+        }
+        if !list.contains(&adapter) {
+            list.push(adapter);
+        }
+    }
+    Ok(list)
+}
+
+/// The adapters for `email`, in the order to try them: `MAIL_ADAPTER`, or
+/// the email's own [`delivery_method`](Email::delivery_method) alone (no
+/// fallback) unless `MAIL_ADAPTER` is `log`.
+pub(crate) fn adapter_for(configured: Option<&str>, email: &Email) -> Result<Vec<Adapter>> {
+    let configured = adapters(configured)?;
     let own = match email.delivery_method.as_deref().map(str::trim) {
         None => None,
-        Some(name @ ("resend" | "cloudflare")) => Some(adapter(Some(name))?),
+        Some(name @ ("resend" | "cloudflare")) => Some(adapter(name)?),
         Some(other) => {
             return Err(Error::internal(format!(
                 "cannot send email: unknown delivery_method \"{other}\" (expected resend or cloudflare). Fix: \
@@ -568,7 +616,58 @@ pub(crate) fn adapter_for(configured: Option<&str>, email: &Email) -> Result<Ada
             )));
         }
     };
-    Ok(if configured == Adapter::Log { Adapter::Log } else { own.unwrap_or(configured) })
+    Ok(match own {
+        Some(own) if configured != [Adapter::Log] => vec![own],
+        _ => configured,
+    })
+}
+
+/// Why an adapter did not send an email, and whether the next adapter of
+/// `MAIL_ADAPTER` may try: only when the provider did not take the email for
+/// a reason of its own (quota, outage, its own configuration), never for an
+/// email every provider would refuse.
+#[derive(Debug)]
+pub(crate) struct Failure {
+    pub error: Error,
+    pub fail_over: bool,
+}
+
+impl Failure {
+    /// A failure the next adapter may retry.
+    pub(crate) fn provider(error: Error) -> Self {
+        Self { error, fail_over: true }
+    }
+}
+
+impl From<Error> for Failure {
+    fn from(error: Error) -> Self {
+        Self { error, fail_over: false }
+    }
+}
+
+/// Whether another adapter may send an email Resend answered `status` to:
+/// its rate or daily/monthly quota (429), an outage (5xx), or its own setup
+/// (401/403: the API key, a domain not verified at Resend). Not a 400/422
+/// (an invalid email, refused by any provider).
+pub(crate) fn resend_fails_over(status: u16) -> bool {
+    matches!(status, 401 | 403 | 429 | 500..=599)
+}
+
+/// Whether another adapter may send an email the send_email binding refused
+/// with `detail` (`CODE: message`): a limit reached, an internal error, the
+/// binding's own setup (sender domain not onboarded, recipient not allowed
+/// on Workers Free), or an error without a code. Not a validation error.
+pub(crate) fn cloudflare_fails_over(detail: &str) -> bool {
+    const NOT_SENT: &[&str] = &[
+        "E_RATE_LIMIT_EXCEEDED",
+        "E_DAILY_LIMIT_EXCEEDED",
+        "E_INTERNAL_SERVER_ERROR",
+        "E_SENDER_NOT_VERIFIED",
+        "E_SENDER_DOMAIN_NOT_AVAILABLE",
+        "E_RECIPIENT_NOT_ALLOWED",
+    ];
+    !detail.starts_with("E_")
+        || NOT_SENT.iter().any(|code| detail.strip_prefix(code).is_some_and(|rest| rest.starts_with(':')))
 }
 
 /// The Resend key, from the `RESEND_API_KEY` secret.
